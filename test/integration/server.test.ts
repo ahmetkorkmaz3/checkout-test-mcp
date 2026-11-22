@@ -18,11 +18,13 @@ let dir: string;
 let client: Client;
 let executions: ExecuteInput[];
 let release: () => void;
+let releaseAll: Array<() => void> = [];
+let activeManager: RunManager | undefined;
 
 function fakeExecute(input: ExecuteInput): Promise<ExecuteOutput> {
   executions.push(input);
   return new Promise((resolve) => {
-    release = () =>
+    const done = () =>
       resolve({
         verdict: 'passed',
         failure: null,
@@ -34,6 +36,11 @@ function fakeExecute(input: ExecuteInput): Promise<ExecuteOutput> {
         screenshots: [],
         trace_path: null,
       });
+    releaseAll.push(done);
+    // release() finishes every pending fake run.
+    release = () => {
+      for (const r of releaseAll.splice(0)) r();
+    };
   });
 }
 
@@ -88,11 +95,15 @@ async function call(name: string, args: Record<string, unknown>): Promise<any> {
 }
 
 beforeEach(() => {
+  releaseAll = [];
   release = () => {};
+  activeManager = undefined;
 });
 
 afterEach(async () => {
   release();
+  // Background runs write to the runs dir. Wait for them before the folder is removed.
+  await activeManager?.idle();
   await client?.close();
   await rm(dir, { recursive: true, force: true });
 });

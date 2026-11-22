@@ -144,6 +144,63 @@ function checkAction(v: Record<string, unknown>, ctx: z.RefinementCtx): void {
 export const Action = z.object(ActionFields).strict().superRefine(checkAction);
 export type Action = z.infer<typeof Action>;
 
+const ParamScalar = z.union([z.string(), z.number(), z.boolean()]);
+
+/** A condition on a resolved scenario param. Exactly one operator. */
+export const Condition = z
+  .object({
+    param: z.string().regex(/^[a-z][a-z0-9_]*$/),
+    equals: ParamScalar.optional(),
+    not_equals: ParamScalar.optional(),
+    in: z.array(ParamScalar).min(1).optional(),
+  })
+  .strict()
+  .refine(
+    (c) => [c.equals, c.not_equals, c.in].filter((x) => x !== undefined).length === 1,
+    'A condition needs exactly one of: equals, not_equals, in.',
+  );
+export type Condition = z.infer<typeof Condition>;
+
+/** One condition, or a list where all conditions must pass. */
+const When = z.union([Condition, z.array(Condition).min(1)]);
+export type When = z.infer<typeof When>;
+
+const STEP_ACTION_KINDS = [...ACTION_KINDS, 'include'] as const;
+
+function checkStep(v: Record<string, unknown>, ctx: z.RefinementCtx): void {
+  if (v.include === undefined) {
+    if (v.with !== undefined)
+      ctx.addIssue({ code: 'custom', message: '"with" is allowed only with "include".' });
+    const kinds = STEP_ACTION_KINDS.filter((k) => v[k] !== undefined);
+    if (kinds.length !== 1) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `A step needs exactly one action: ${STEP_ACTION_KINDS.join(', ')}.`,
+      });
+      return;
+    }
+    checkAction(v, ctx);
+    return;
+  }
+  const extra = [
+    ...ACTION_KINDS,
+    'within',
+    'then',
+    'expect',
+    'timeout_ms',
+    'on_failure',
+    'value',
+    'option',
+    'key',
+  ].filter((k) => v[k] !== undefined);
+  if (extra.length > 0) {
+    ctx.addIssue({
+      code: 'custom',
+      message: `An "include" step allows only id, title, include, with, and when. Remove: ${extra.join(', ')}.`,
+    });
+  }
+}
+
 export const Step = z
   .object({
     id: z.string().regex(/^[a-z][a-z0-9_]*$/),
@@ -154,13 +211,23 @@ export const Step = z
     expect: z.array(Expectation).optional(),
     timeout_ms: z.number().int().positive().optional(),
     on_failure: z.object({ hint: z.string() }).strict().optional(),
+    when: When.optional(),
+    include: z
+      .string()
+      .regex(/\.ya?ml$/)
+      .optional()
+      .describe('Path of a fragment file, relative to this file.'),
+    with: z
+      .record(z.string().regex(/^[a-z][a-z0-9_]*$/), z.union([z.string(), z.number()]))
+      .optional()
+      .describe('Values for the fragment args. Available in the fragment as {{args.<name>}}.'),
   })
   .strict()
-  .superRefine(checkAction);
+  .superRefine(checkStep);
 export type Step = z.infer<typeof Step>;
 
 export const OutcomeCheck = z
-  .object({ id: z.string().regex(/^[a-z][a-z0-9_]*$/), ...ExpectationFields })
+  .object({ id: z.string().regex(/^[a-z][a-z0-9_]*$/), when: When.optional(), ...ExpectationFields })
   .strict()
   .refine(exactlyOneExpectation, ONE_EXPECTATION_MSG);
 export type OutcomeCheck = z.infer<typeof OutcomeCheck>;
@@ -213,6 +280,7 @@ export type ParamDef = z.infer<typeof ParamDef>;
 export const Scenario = z
   .object({
     schema_version: z.literal(1),
+    kind: z.literal('scenario').optional(),
     id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
     title: z.string().min(1),
     summary: z.string().min(1),
@@ -252,3 +320,20 @@ export const Scenario = z
     }
   });
 export type Scenario = z.infer<typeof Scenario>;
+
+export const FragmentArg = z
+  .object({ description: z.string().min(1), default: z.union([z.string(), z.number()]).optional() })
+  .strict();
+
+/** Reusable steps. A scenario uses a fragment with an "include" step. Fragments are never run alone. */
+export const Fragment = z
+  .object({
+    schema_version: z.literal(1),
+    kind: z.literal('fragment'),
+    id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+    description: z.string().min(1),
+    args: z.record(z.string().regex(/^[a-z][a-z0-9_]*$/), FragmentArg).default({}),
+    steps: z.array(Step).min(1),
+  })
+  .strict();
+export type Fragment = z.infer<typeof Fragment>;
