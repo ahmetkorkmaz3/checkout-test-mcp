@@ -140,6 +140,8 @@ production_hosts: # always refused, even if listed above
 
 ## 4. Scenario format
 
+The current reference is [scenario-format.md](scenario-format.md). It also covers `include` and `when`. This section keeps the original design.
+
 Full example: [card-3ds-challenge-fail.yaml](../scenarios/demo-store/card-3ds-challenge-fail.yaml).
 
 ### 4.1 Top-level keys

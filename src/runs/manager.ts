@@ -9,6 +9,7 @@ import { classify } from '../runner/classify.js';
 import { type ExecuteInput, type ExecuteOutput, executeRun } from '../runner/executor.js';
 import { containsCardNumber } from '../safety/cards.js';
 import { looksLikeSecret, Redactor } from '../safety/secrets.js';
+import { conditionsPass } from '../scenarios/expand.js';
 import { resolveParams } from '../scenarios/params.js';
 import type { LoadedScenario, ScenarioRegistry } from '../scenarios/registry.js';
 import { collectTokens, renderDeep, TemplateError } from '../scenarios/template.js';
@@ -363,7 +364,25 @@ export class RunManager {
     const redactor = new Redactor();
 
     // Secrets referenced by the scenario and by http_credentials.
-    const tokens = collectTokens([scenario.steps, scenario.outcome]);
+    // Steps and outcome checks whose "when" conditions pass for these params. Only they run.
+    const activeSteps = scenario.steps.filter((st) => conditionsPass(st.when, params.values));
+    const activeOutcome = scenario.outcome.filter((o) => conditionsPass(o.when, params.values));
+    if (activeSteps.length === 0) {
+      throw new ToolError({
+        code: 'INVALID_PARAMS',
+        message: `Scenario "${scenario.id}" has no steps to run for these params.`,
+        likelyCause: 'The "when" conditions of every step exclude the given param values.',
+        nextActions: [
+          {
+            kind: 'call_tool',
+            description: 'Check the param values for this scenario.',
+            tool: 'list_scenarios',
+            arguments: { scenario_id: scenario.id },
+          },
+        ],
+      });
+    }
+    const tokens = collectTokens([activeSteps, activeOutcome]);
     const secretNames = new Set(
       [...tokens].filter((t) => t.startsWith('secrets.')).map((t) => t.slice('secrets.'.length)),
     );
@@ -417,8 +436,8 @@ export class RunManager {
     let steps: Step[];
     let outcome: OutcomeCheck[];
     try {
-      steps = renderDeep(scenario.steps, ctx);
-      outcome = renderDeep(scenario.outcome, ctx);
+      steps = renderDeep(activeSteps, ctx);
+      outcome = renderDeep(activeOutcome, ctx);
     } catch (err) {
       if (!(err instanceof TemplateError)) throw err;
       throw new ToolError({
@@ -453,10 +472,10 @@ export class RunManager {
       started_at: null,
       finished_at: null,
       duration_ms: null,
-      progress: { completed_steps: 0, total_steps: scenario.steps.length, current_step_id: null },
+      progress: { completed_steps: 0, total_steps: activeSteps.length, current_step_id: null },
       failure: null,
-      outcome_checks: scenario.outcome.map((o) => ({ id: o.id, status: 'not_run' })),
-      steps: scenario.steps.map((s) => ({ id: s.id, title: s.title, status: 'pending' })),
+      outcome_checks: activeOutcome.map((o) => ({ id: o.id, status: 'not_run' })),
+      steps: activeSteps.map((s) => ({ id: s.id, title: s.title, status: 'pending' })),
       console_errors: [],
       network_failures: [],
       blocked_requests: [],

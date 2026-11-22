@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=../../../schemas/fragment.schema.json
+schema_version: 1
+kind: fragment
+id: demo-fill-card
+description: >-
+  Fills the card form in the payment iframe. The including scenario needs
+  exactly one test_card param, so {{card.*}} works.
+steps:
+  - id: fill
+    title: Fill the card form in the payment iframe
+    within:
+      frame: { css: "iframe[title='Secure card payment input']" }
+    fill_form:
+      - field: { placeholder: Card number }
+        value: "{{card.number}}"
+      - field: { placeholder: MM / YY }
+        value: "{{card.expiry}}"
+      - field: { placeholder: CVC }
+        value: "{{card.cvc}}"
+    on_failure:
+      hint: >-
+        The payment iframe did not load. Check that the payment provider script
+        host is in the target's third_party_hosts list.

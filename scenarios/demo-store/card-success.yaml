@@ -41,64 +41,20 @@ ignore:
     - url: "**/favicon.ico"
 
 steps:
-  - id: open_product
-    title: Open the product page
-    goto: "{{params.product_path}}"
-    expect:
-      - visible: { role: heading, level: 1 }
-      - response: { method: GET, url: "**/api/products/*", status: 200 }
-
-  - id: set_quantity
-    title: Set the quantity
-    fill: { label: Quantity }
-    value: "{{params.quantity}}"
-
-  - id: add_to_cart
+  - id: cart
     title: Add the product to the cart
-    click: { role: button, name: Add to cart }
-    expect:
-      - text: { test_id: cart-count, equals: "{{params.quantity}}" }
-      - response: { method: POST, url: "**/api/cart/items", status: 201 }
+    include: fragments/add-to-cart.yaml
+    with:
+      product_path: "{{params.product_path}}"
+      quantity: "{{params.quantity}}"
 
-  - id: start_checkout
-    title: Go to checkout as a guest
-    click: { role: link, name: Checkout }
-    then:
-      - click: { role: button, name: Continue as guest }
-    expect:
-      - url: { matches: "**/checkout/**" }
+  - id: checkout
+    title: Start a guest checkout and fill the address
+    include: fragments/guest-contact-address.yaml
 
-  - id: fill_contact_and_address
-    title: Fill the contact and address form
-    fill_form:
-      - field: { label: Email }
-        value: "{{data.customer.email}}"
-      - field: { label: Full name }
-        value: "{{data.customer.full_name}}"
-      - field: { label: Phone }
-        value: "{{data.customer.phone}}"
-      - field: { label: Address }
-        value: "{{data.customer.address_line}}"
-      - field: { label: City }
-        select: "{{data.customer.city}}"
-      - field: { label: District }
-        select: "{{data.customer.district}}"
-    then:
-      - click: { role: button, name: Continue to payment }
-    expect:
-      - visible: { role: heading, name: Payment }
-
-  - id: fill_card
-    title: Fill the card form in the payment iframe
-    within:
-      frame: { css: "iframe[title='Secure card payment input']" }
-    fill_form:
-      - field: { placeholder: Card number }
-        value: "{{card.number}}"
-      - field: { placeholder: MM / YY }
-        value: "{{card.expiry}}"
-      - field: { placeholder: CVC }
-        value: "{{card.cvc}}"
+  - id: card
+    title: Fill the card form
+    include: fragments/fill-card.yaml
 
   - id: submit_payment
     title: Submit the payment

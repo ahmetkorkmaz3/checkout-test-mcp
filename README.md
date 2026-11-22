@@ -57,7 +57,7 @@ Full definitions: [docs/tools.md](docs/tools.md).
 
 ## Scenarios
 
-Scenarios are YAML files with steps, Playwright-style locators, expectations, and final outcome checks. See [card-3ds-challenge-fail.yaml](scenarios/demo-store/card-3ds-challenge-fail.yaml) and the format in [docs/design.md](docs/design.md#4-scenario-format). Editors can use [schemas/scenario.schema.json](schemas/scenario.schema.json) for autocomplete.
+Scenarios are YAML files with steps, Playwright-style locators, expectations, and final outcome checks. See [card-3ds-challenge-fail.yaml](scenarios/demo-store/card-3ds-challenge-fail.yaml) and the format in [docs/scenario-format.md](docs/scenario-format.md). Fragments (`include`) and conditions (`when`) let one scenario cover guest and member checkouts. Editors can use [schemas/scenario.schema.json](schemas/scenario.schema.json) for autocomplete.
 
 Shipped examples:
 

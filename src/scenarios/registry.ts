@@ -4,7 +4,8 @@ import path from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
 import { containsCardNumber } from '../safety/cards.js';
-import { Scenario } from '../schemas/scenario.js';
+import { Fragment, Scenario } from '../schemas/scenario.js';
+import { ExpandError, expandScenario } from './expand.js';
 
 export interface LoadedScenario {
   scenario: Scenario;
@@ -24,7 +25,19 @@ async function listYamlFiles(dir: string): Promise<string[]> {
     .sort();
 }
 
-export function parseScenario(text: string, file: string): LoadedScenario {
+function isFragmentDoc(doc: unknown): boolean {
+  return typeof doc === 'object' && doc !== null && (doc as { kind?: unknown }).kind === 'fragment';
+}
+
+/**
+ * Parses one scenario file and expands its includes.
+ * `roots` limits where fragment files can come from. Default: the folder of the file.
+ */
+export function parseScenario(
+  text: string,
+  file: string,
+  roots: readonly string[] = [path.dirname(file)],
+): LoadedScenario {
   if (containsCardNumber(text)) {
     throw new ScenarioLoadError(`${file}: contains a card number. Use a test_card param instead.`);
   }
@@ -32,7 +45,15 @@ export function parseScenario(text: string, file: string): LoadedScenario {
   if (!result.success) {
     throw new ScenarioLoadError(`${file}: invalid scenario:\n${z.prettifyError(result.error)}`);
   }
-  return { scenario: result.data, file, hash: createHash('sha256').update(text).digest('hex').slice(0, 16) };
+  try {
+    const { scenario, fragments } = expandScenario(result.data, file, { roots });
+    const hash = createHash('sha256').update(text);
+    for (const f of fragments) hash.update(f.text);
+    return { scenario, file, hash: hash.digest('hex').slice(0, 16) };
+  } catch (err) {
+    if (err instanceof ExpandError) throw new ScenarioLoadError(err.message);
+    throw err;
+  }
 }
 
 export class ScenarioRegistry {
@@ -51,7 +72,15 @@ export class ScenarioRegistry {
       }
       for (const file of files) {
         try {
-          const loaded = parseScenario(await readFile(file, 'utf8'), file);
+          const text = await readFile(file, 'utf8');
+          const doc: unknown = parse(text);
+          if (isFragmentDoc(doc)) {
+            // Fragments are not scenarios. Validate them here so a broken fragment shows at startup.
+            const frag = Fragment.safeParse(doc);
+            if (!frag.success) errors.push(`${file}: invalid fragment:\n${z.prettifyError(frag.error)}`);
+            continue;
+          }
+          const loaded = parseScenario(text, file, dirs);
           const existing = byId.get(loaded.scenario.id);
           if (existing) {
             errors.push(`Duplicate scenario id "${loaded.scenario.id}" in ${existing.file} and ${file}.`);

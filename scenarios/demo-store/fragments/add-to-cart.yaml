@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=../../../schemas/fragment.schema.json
+schema_version: 1
+kind: fragment
+id: demo-add-to-cart
+description: >-
+  Opens a product page, sets the quantity when it is not 1, and adds the product
+  to the cart. The including scenario needs an integer param "quantity".
+args:
+  product_path:
+    description: Path of the product page, relative to the target base URL.
+  quantity:
+    description: Number of units. Also the expected cart count.
+    default: 1
+
+steps:
+  - id: open_product
+    title: Open the product page
+    goto: "{{args.product_path}}"
+    expect:
+      - visible: { role: heading, level: 1 }
+      - response: { method: GET, url: "**/api/products/*", status: 200 }
+    on_failure:
+      hint: The product path can be wrong, or the product can be out of stock in this environment.
+
+  - id: set_quantity
+    title: Set the quantity
+    # The quantity input starts at 1. Skip the step when nothing changes.
+    when: { param: quantity, not_equals: 1 }
+    fill: { label: Quantity }
+    value: "{{args.quantity}}"
+
+  - id: add
+    title: Add the product to the cart
+    click: { role: button, name: Add to cart }
+    expect:
+      - text: { test_id: cart-count, equals: "{{args.quantity}}" }
+      - response: { method: POST, url: "**/api/cart/items", status: 201 }
