@@ -1,0 +1,36 @@
+import { McpServer } from '@modelcontextprotocol/server';
+import type { Logger } from './logger.js';
+import type { RunManager } from './runs/manager.js';
+import type { ScenarioRegistry } from './scenarios/registry.js';
+import type { ResolvedConfig } from './schemas/config.js';
+import { registerCompareRuns } from './tools/compare-runs.js';
+import { registerGetRunResult } from './tools/get-run-result.js';
+import { registerListScenarios } from './tools/list-scenarios.js';
+import { registerRunScenario } from './tools/run-scenario.js';
+import { VERSION } from './version.js';
+
+export interface ServerDeps {
+  config: ResolvedConfig;
+  registry: ScenarioRegistry;
+  manager: RunManager;
+  logger: Logger;
+}
+
+/** Transport-agnostic server. index.ts connects it to stdio. An HTTP transport can reuse it. */
+export function createServer(deps: ServerDeps): McpServer {
+  const server = new McpServer(
+    { name: 'checkout-test-mcp', version: VERSION },
+    {
+      instructions: [
+        'Runs end-to-end checkout and payment test scenarios against configured test environments only.',
+        'Order of calls: list_scenarios, then run_scenario (with an idempotency_key), then get_run_result with wait_s 20 until status is "finished". Use compare_runs for before/after checks.',
+        'A failed checkout is a normal result with verdict "failed", not a tool error.',
+      ].join(' '),
+    },
+  );
+  registerListScenarios(server, deps);
+  registerRunScenario(server, deps);
+  registerGetRunResult(server, deps);
+  registerCompareRuns(server, deps);
+  return server;
+}

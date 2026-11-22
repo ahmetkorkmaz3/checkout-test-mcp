@@ -1,0 +1,120 @@
+# yaml-language-server: $schema=../../schemas/scenario.schema.json
+schema_version: 1
+
+id: card-success
+title: Guest checkout with a card that succeeds without 3D Secure
+summary: >-
+  Buys one product as a guest with a test card that succeeds without 3DS,
+  and checks that the store creates an order and shows the confirmation page.
+  Use it as the baseline before you test a negative payment scenario.
+tags: [checkout, payment, happy-path, guest]
+compatible_profiles: [demo-store]
+expected_outcome: order_placed
+
+params:
+  product_path:
+    type: string
+    default: /products/ceramic-mug
+    description: Path of the product page to buy, relative to the target base URL.
+  quantity:
+    type: integer
+    default: 1
+    minimum: 1
+    maximum: 5
+    description: Number of units to add to the cart.
+  card:
+    type: test_card
+    default: stripe/visa-success
+    description: Id of a test card from list_scenarios.test_cards. The card must have the behaviour "success".
+    constraints:
+      behaviour: success
+
+data:
+  customer: customers/tr-guest.yaml
+
+timeouts:
+  step_ms: 15000
+  run_ms: 120000
+
+ignore:
+  network:
+    - url: "**/favicon.ico"
+
+steps:
+  - id: open_product
+    title: Open the product page
+    goto: "{{params.product_path}}"
+    expect:
+      - visible: { role: heading, level: 1 }
+      - response: { method: GET, url: "**/api/products/*", status: 200 }
+
+  - id: set_quantity
+    title: Set the quantity
+    fill: { label: Quantity }
+    value: "{{params.quantity}}"
+
+  - id: add_to_cart
+    title: Add the product to the cart
+    click: { role: button, name: Add to cart }
+    expect:
+      - text: { test_id: cart-count, equals: "{{params.quantity}}" }
+      - response: { method: POST, url: "**/api/cart/items", status: 201 }
+
+  - id: start_checkout
+    title: Go to checkout as a guest
+    click: { role: link, name: Checkout }
+    then:
+      - click: { role: button, name: Continue as guest }
+    expect:
+      - url: { matches: "**/checkout/**" }
+
+  - id: fill_contact_and_address
+    title: Fill the contact and address form
+    fill_form:
+      - field: { label: Email }
+        value: "{{data.customer.email}}"
+      - field: { label: Full name }
+        value: "{{data.customer.full_name}}"
+      - field: { label: Phone }
+        value: "{{data.customer.phone}}"
+      - field: { label: Address }
+        value: "{{data.customer.address_line}}"
+      - field: { label: City }
+        select: "{{data.customer.city}}"
+      - field: { label: District }
+        select: "{{data.customer.district}}"
+    then:
+      - click: { role: button, name: Continue to payment }
+    expect:
+      - visible: { role: heading, name: Payment }
+
+  - id: fill_card
+    title: Fill the card form in the payment iframe
+    within:
+      frame: { css: "iframe[title='Secure card payment input']" }
+    fill_form:
+      - field: { placeholder: Card number }
+        value: "{{card.number}}"
+      - field: { placeholder: MM / YY }
+        value: "{{card.expiry}}"
+      - field: { placeholder: CVC }
+        value: "{{card.cvc}}"
+
+  - id: submit_payment
+    title: Submit the payment
+    click: { role: button, name: { matches: "^Pay " } }
+    expect:
+      - response: { method: POST, url: "**/api/payments", status: 200 }
+    on_failure:
+      hint: The payment API rejected a card that must succeed. Check the payment provider test mode.
+
+outcome:
+  - id: confirmation_page_shown
+    visible: { role: heading, name: { matches: "thank you" } }
+    timeout_ms: 20000
+  - id: on_success_url
+    url: { matches: "**/checkout/success**" }
+  - id: order_created
+    response: { method: POST, url: "**/api/orders", status: 201 }
+  - id: cart_empty
+    text: { test_id: cart-count, equals: "0" }

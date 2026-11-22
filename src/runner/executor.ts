@@ -1,0 +1,644 @@
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { type Browser, type BrowserContext, chromium, errors, type Page, selectors } from 'playwright';
+import { containsUnregisteredCardNumber } from '../safety/cards.js';
+import { hostOf, isUrlAllowed } from '../safety/hosts.js';
+import { type Redactor, redactQuery } from '../safety/secrets.js';
+import type { FailureCategory, Verdict } from '../schemas/common.js';
+import type { ResolvedConfig, TargetConfig } from '../schemas/config.js';
+import type {
+  BlockedRequest,
+  ConsoleError,
+  Failure,
+  NetworkFailure,
+  OutcomeCheckResult,
+  RunOptions,
+  StepResult,
+} from '../schemas/run.js';
+import type { Action, Expectation, OutcomeCheck, Scenario, Step } from '../schemas/scenario.js';
+import { classify } from './classify.js';
+import { describeLocator, scopeFor, toLocator } from './locator.js';
+import {
+  describeResponseMatch,
+  type RecordedResponse,
+  responseMatches,
+  statusMatches,
+  urlMatchesGlob,
+} from './match.js';
+
+export interface ExecuteInput {
+  runDir: string;
+  scenario: Scenario;
+  /** Steps and outcome checks with all templates rendered. Never stored. */
+  steps: Step[];
+  outcome: OutcomeCheck[];
+  target: TargetConfig;
+  targetName: string;
+  config: Pick<ResolvedConfig, 'production_hosts' | 'headless'>;
+  options: RunOptions;
+  httpCredentials?: { username: string; password: string };
+  redactor: Redactor;
+  onProgress: (p: { completed_steps: number; current_step_id: string | null; steps: StepResult[] }) => void;
+}
+
+export interface ExecuteOutput {
+  verdict: Verdict;
+  failure: Failure | null;
+  steps: StepResult[];
+  outcome_checks: OutcomeCheckResult[];
+  console_errors: ConsoleError[];
+  network_failures: NetworkFailure[];
+  blocked_requests: BlockedRequest[];
+  screenshots: { step_id: string; path: string; uri: string }[];
+  trace_path: string | null;
+}
+
+/** A step or outcome check did not pass. */
+class StepFailure extends Error {
+  constructor(
+    readonly category: FailureCategory,
+    message: string,
+    readonly expected?: string,
+    readonly actual?: string,
+  ) {
+    super(message);
+  }
+}
+
+const UNREACHABLE =
+  /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_CONNECTION_TIMED_OUT|ERR_INTERNET_DISCONNECTED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_|ERR_SSL_/;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
+  const { scenario, target, options, redactor } = input;
+  const mult = options.timeout_multiplier;
+  const stepTimeout = (override?: number) => Math.round((override ?? scenario.timeouts.step_ms) * mult);
+  const runTimeoutMs = Math.round(scenario.timeouts.run_ms * mult);
+
+  const stepResults: StepResult[] = input.steps.map((s) => ({ id: s.id, title: s.title, status: 'pending' }));
+  const outcomeResults: OutcomeCheckResult[] = input.outcome.map((o) => ({ id: o.id, status: 'not_run' }));
+  const responses: RecordedResponse[] = [];
+  const consoleMap = new Map<string, ConsoleError>();
+  const networkFailures: NetworkFailure[] = [];
+  const blocked: BlockedRequest[] = [];
+  const blockedUrls = new Set<string>();
+  const screenshots: ExecuteOutput['screenshots'] = [];
+  let stepIndex = 0;
+  let currentStepId = 'setup';
+  let blockedNavigation: string | null = null;
+  let runTimedOut = false;
+  let tracePath: string | null = null;
+
+  const consoleIgnored = (text: string) => scenario.ignore.console.some((i) => text.includes(i.pattern));
+  const networkIgnored = (url: string) => scenario.ignore.network.some((i) => urlMatchesGlob(url, i.url));
+
+  let browser: Browser | undefined;
+  let context: BrowserContext | undefined;
+  let page: Page | undefined;
+  let failure: Failure | null = null;
+
+  const frameCss = new Set<string>();
+  for (const s of input.steps) {
+    for (const w of [s.within, ...(s.then ?? []).map((t) => t.within)])
+      if (w?.frame.css) frameCss.add(w.frame.css);
+  }
+
+  async function screenshot(stepId: string, n: number): Promise<string | undefined> {
+    const p = page;
+    if (!p || p.isClosed()) return undefined;
+    const file = path.join(input.runDir, `${String(n).padStart(2, '0')}-${stepId}.png`);
+    const sensitive = 'input[type=password], input[autocomplete^="cc-"]';
+    const mask = [
+      p.locator(sensitive),
+      ...[...frameCss].map((css) => p.frameLocator(css).locator(sensitive)),
+    ];
+    try {
+      await p.screenshot({ path: file, mask, timeout: 10_000 });
+      screenshots.push({ step_id: stepId, path: file, uri: pathToFileURL(file).toString() });
+      return file;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function guardValue(value: string): void {
+    if (containsUnregisteredCardNumber(value)) {
+      throw new StepFailure(
+        'blocked_by_safety',
+        'The run stopped before it filled a value that looks like a card number outside the test card registry.',
+      );
+    }
+  }
+
+  function checkBlockedNavigation(): void {
+    if (blockedNavigation) {
+      throw new StepFailure(
+        'blocked_by_safety',
+        `The page tried to open ${blockedNavigation}, which is not an allowed host for target "${input.targetName}".`,
+      );
+    }
+  }
+
+  async function perform(p: Page, action: Action | Step, timeout: number): Promise<void> {
+    const scope = scopeFor(p, action.within);
+    if (action.goto !== undefined) {
+      try {
+        const res = await p.goto(action.goto, { timeout, waitUntil: 'load' });
+        checkBlockedNavigation();
+        if (res && res.status() >= 500) {
+          throw new StepFailure(
+            'navigation_failed',
+            `The page ${redactQuery(res.url())} returned HTTP ${res.status()}.`,
+          );
+        }
+      } catch (err) {
+        if (err instanceof StepFailure) throw err;
+        checkBlockedNavigation();
+        const msg = (err as Error).message;
+        if (msg.includes('ERR_BLOCKED_BY_CLIENT')) {
+          throw new StepFailure(
+            'blocked_by_safety',
+            `Navigation to ${action.goto} was blocked by the host guard.`,
+          );
+        }
+        if (UNREACHABLE.test(msg)) throw new StepFailure('target_unreachable', firstLine(msg));
+        if (err instanceof errors.TimeoutError)
+          throw new StepFailure('timeout', `The page ${action.goto} did not load within ${timeout} ms.`);
+        throw new StepFailure('navigation_failed', firstLine(msg));
+      }
+      return;
+    }
+    const run = async (desc: string, fn: () => Promise<unknown>) => {
+      try {
+        await fn();
+      } catch (err) {
+        if (err instanceof errors.TimeoutError) {
+          throw new StepFailure(
+            'element_not_found',
+            `No usable element matched ${desc} within ${timeout} ms.`,
+            desc,
+          );
+        }
+        throw err;
+      }
+    };
+    if (action.click) {
+      const spec = action.click;
+      await run(describeLocator(spec, action.within), () =>
+        toLocator(scope, spec).first().click({ timeout }),
+      );
+    } else if (action.fill) {
+      const spec = action.fill;
+      const value = String(action.value ?? '');
+      guardValue(value);
+      await run(describeLocator(spec, action.within), () =>
+        toLocator(scope, spec).first().fill(value, { timeout }),
+      );
+    } else if (action.select) {
+      const spec = action.select;
+      const option = action.option ?? '';
+      await run(describeLocator(spec, action.within), () =>
+        toLocator(scope, spec).first().selectOption(option, { timeout }),
+      );
+    } else if (action.check) {
+      const spec = action.check;
+      await run(describeLocator(spec, action.within), () =>
+        toLocator(scope, spec).first().check({ timeout }),
+      );
+    } else if (action.uncheck) {
+      const spec = action.uncheck;
+      await run(describeLocator(spec, action.within), () =>
+        toLocator(scope, spec).first().uncheck({ timeout }),
+      );
+    } else if (action.press) {
+      const spec = action.press;
+      const key = action.key ?? 'Enter';
+      await run(describeLocator(spec, action.within), () =>
+        toLocator(scope, spec).first().press(key, { timeout }),
+      );
+    } else if (action.fill_form) {
+      for (const f of action.fill_form) {
+        const desc = describeLocator(f.field, action.within);
+        const loc = toLocator(scope, f.field).first();
+        if ('value' in f) {
+          guardValue(f.value);
+          await run(desc, () => loc.fill(f.value, { timeout }));
+        } else {
+          await run(desc, () => loc.selectOption(f.select, { timeout }));
+        }
+      }
+    } else if (action.wait_for) {
+      await check(p, action.wait_for, timeout, stepIndex);
+    }
+    checkBlockedNavigation();
+  }
+
+  async function check(
+    p: Page,
+    exp: Expectation | OutcomeCheck,
+    defaultTimeout: number,
+    sinceStep: number,
+  ): Promise<void> {
+    const timeout = exp.timeout_ms ? Math.round(exp.timeout_ms * mult) : defaultTimeout;
+    const deadline = Date.now() + timeout;
+    const resolveTarget = (t: NonNullable<Expectation['visible']>) =>
+      'locator' in t
+        ? {
+            loc: toLocator(scopeFor(p, t.within), t.locator).first(),
+            desc: describeLocator(t.locator, t.within),
+          }
+        : { loc: toLocator(p, t).first(), desc: describeLocator(t) };
+
+    if (exp.visible) {
+      const { loc, desc } = resolveTarget(exp.visible);
+      try {
+        await loc.waitFor({ state: 'visible', timeout });
+      } catch (err) {
+        if (err instanceof errors.TimeoutError) {
+          throw new StepFailure(
+            'element_not_found',
+            `No visible element matched ${desc} within ${timeout} ms.`,
+            `visible: ${desc}`,
+            `page url: ${p.url()}`,
+          );
+        }
+        throw err;
+      }
+    } else if (exp.hidden) {
+      const { loc, desc } = resolveTarget(exp.hidden);
+      try {
+        await loc.waitFor({ state: 'hidden', timeout });
+      } catch (err) {
+        if (err instanceof errors.TimeoutError) {
+          throw new StepFailure(
+            'assertion_failed',
+            `Element ${desc} is still visible after ${timeout} ms.`,
+            `hidden: ${desc}`,
+            'visible',
+          );
+        }
+        throw err;
+      }
+    } else if (exp.text) {
+      const t = exp.text;
+      const { within, equals, contains, matches, ...spec } = t;
+      const desc = describeLocator(spec, within);
+      const loc = toLocator(scopeFor(p, within), spec).first();
+      const expected =
+        equals !== undefined
+          ? `equals "${equals}"`
+          : contains !== undefined
+            ? `contains "${contains}"`
+            : `matches /${matches}/`;
+      const ok = (s: string) =>
+        equals !== undefined
+          ? s === equals
+          : contains !== undefined
+            ? s.includes(contains)
+            : new RegExp(matches ?? '').test(s);
+      let actual: string | null = null;
+      while (true) {
+        actual = await loc
+          .textContent({ timeout: Math.max(100, Math.min(1000, deadline - Date.now())) })
+          .catch(() => null);
+        if (actual !== null && ok(actual.trim())) return;
+        if (Date.now() >= deadline) break;
+        await sleep(200);
+      }
+      if (actual === null) {
+        throw new StepFailure(
+          'element_not_found',
+          `No element matched ${desc} within ${timeout} ms.`,
+          `${desc} ${expected}`,
+        );
+      }
+      throw new StepFailure(
+        'assertion_failed',
+        `Text of ${desc} did not match.`,
+        expected,
+        `"${actual.trim()}"`,
+      );
+    } else if (exp.url) {
+      const u = exp.url;
+      const ok = (url: string) =>
+        u.equals !== undefined
+          ? url === u.equals
+          : u.regex !== undefined
+            ? new RegExp(u.regex).test(url)
+            : urlMatchesGlob(url, u.matches ?? '');
+      while (!ok(p.url())) {
+        if (Date.now() >= deadline) {
+          const want = u.equals ?? u.regex ?? u.matches ?? '';
+          throw new StepFailure('assertion_failed', 'The page URL did not match.', `url ${want}`, p.url());
+        }
+        await sleep(200);
+      }
+    } else if (exp.response) {
+      const m = exp.response;
+      while (!responses.some((r) => r.stepIndex >= sinceStep && responseMatches(r, m))) {
+        if (Date.now() >= deadline) {
+          const other = responses.filter((r) => r.stepIndex >= sinceStep && responseMatches(r, m, false));
+          const actual = other.length
+            ? other.map((r) => `${r.method} ${redactQuery(r.url)} -> ${r.status}`).join(', ')
+            : 'no matching request';
+          throw new StepFailure(
+            'unexpected_response',
+            `Expected response ${describeResponseMatch(m)} did not arrive.`,
+            describeResponseMatch(m),
+            actual,
+          );
+        }
+        await sleep(100);
+      }
+    } else if (exp.no_response) {
+      const m = exp.no_response;
+      await sleep(Math.min(1000, timeout));
+      const hit = responses.find((r) => responseMatches(r, m));
+      if (hit) {
+        throw new StepFailure(
+          'unexpected_response',
+          `A forbidden response arrived: ${hit.method} ${redactQuery(hit.url)} -> ${hit.status}.`,
+          `no ${describeResponseMatch(m)}`,
+          `${hit.method} ${redactQuery(hit.url)} -> ${hit.status}`,
+        );
+      }
+    }
+  }
+
+  function buildFailure(
+    err: unknown,
+    stepId: string,
+    stepTitle: string,
+    urlBefore: string | undefined,
+    hint: string | undefined,
+    isOutcome: boolean,
+    shot: string | undefined,
+  ): Failure {
+    let category: FailureCategory;
+    let message: string;
+    let expected: string | undefined;
+    let actual: string | undefined;
+    if (runTimedOut) {
+      category = 'timeout';
+      message = `The run did not finish within ${runTimeoutMs} ms.`;
+    } else if (err instanceof StepFailure) {
+      ({ category, message, expected, actual } = err);
+    } else if (err instanceof errors.TimeoutError) {
+      category = 'timeout';
+      message = firstLine((err as Error).message);
+    } else {
+      const msg = err instanceof Error ? err.message : String(err);
+      category = 'browser_error';
+      message = firstLine(msg);
+    }
+    const urlAfter = page && !page.isClosed() ? page.url() : undefined;
+    const serverErrors = networkFailures
+      .filter((n) => n.step_id === stepId && n.status !== null && n.status >= 500)
+      .map((n) => `${n.method} ${n.url} -> ${n.status}`);
+    const c = classify({
+      category,
+      scenarioId: scenario.id,
+      target: input.targetName,
+      stepId,
+      urlBefore,
+      urlAfter,
+      serverErrorsInStep: serverErrors,
+      blockedInStep: blocked.filter((b) => b.step_id === stepId).map((b) => hostOf(b.url)),
+      hint,
+      timeoutMultiplier: mult,
+      isOutcomeCheck: isOutcome,
+      message,
+    });
+    return {
+      step_id: stepId,
+      step_title: stepTitle,
+      category: c.category,
+      message,
+      ...(expected !== undefined ? { expected } : {}),
+      ...(actual !== undefined ? { actual } : {}),
+      likely_causes: c.likely_causes,
+      next_actions: c.next_actions,
+      ...(shot ? { screenshot: shot } : {}),
+      ...(urlAfter ? { page_url: redactQuery(urlAfter) } : {}),
+    };
+  }
+
+  const main = async () => {
+    selectors.setTestIdAttribute(target.test_id_attribute);
+    browser = await chromium.launch({ headless: input.config.headless });
+    context = await browser.newContext({
+      baseURL: target.base_url,
+      viewport: { width: 1280, height: 900 },
+      ...(target.locale ? { locale: target.locale } : {}),
+      ...(input.httpCredentials ? { httpCredentials: input.httpCredentials } : {}),
+    });
+    if (options.trace) await context.tracing.start({ screenshots: true, snapshots: true });
+
+    await context.route('**/*', async (route) => {
+      const req = route.request();
+      const url = req.url();
+      if (isUrlAllowed(url, target, input.config)) return route.continue();
+      blockedUrls.add(url);
+      blocked.push({ url: redactQuery(url), step_id: currentStepId });
+      if (req.isNavigationRequest() && page && req.frame() === page.mainFrame())
+        blockedNavigation = redactQuery(url);
+      return route.abort('blockedbyclient');
+    });
+
+    page = await context.newPage();
+    page.on('console', (msg) => {
+      const type = msg.type();
+      if (type !== 'error' && type !== 'warning') return;
+      const text = redactor.redact(msg.text()).slice(0, 500);
+      if (consoleIgnored(text)) return;
+      addConsole(type === 'error' ? 'error' : 'warning', text, msg.location().url);
+    });
+    page.on('pageerror', (err) => {
+      const text = redactor.redact(`Uncaught ${err.name}: ${err.message}`).slice(0, 500);
+      if (!consoleIgnored(text)) addConsole('error', text, undefined);
+    });
+    page.on('response', (res) => {
+      const req = res.request();
+      responses.push({ method: req.method(), url: res.url(), status: res.status(), stepIndex });
+      if (res.status() >= 400 && !networkIgnored(res.url())) {
+        networkFailures.push({
+          method: req.method(),
+          url: redactQuery(res.url()),
+          status: res.status(),
+          resource_type: req.resourceType(),
+          step_id: currentStepId,
+          relevant: false,
+        });
+      }
+    });
+    page.on('requestfailed', (req) => {
+      if (blockedUrls.has(req.url()) || networkIgnored(req.url())) return;
+      networkFailures.push({
+        method: req.method(),
+        url: redactQuery(req.url()),
+        status: null,
+        failure_text: req.failure()?.errorText ?? 'unknown',
+        resource_type: req.resourceType(),
+        step_id: currentStepId,
+        relevant: false,
+      });
+    });
+
+    for (let i = 0; i < input.steps.length; i++) {
+      const step = input.steps[i] as Step;
+      const result = stepResults[i] as StepResult;
+      stepIndex = i;
+      currentStepId = step.id;
+      result.status = 'running';
+      input.onProgress({ completed_steps: i, current_step_id: step.id, steps: stepResults });
+      const started = Date.now();
+      const urlBefore = page.url();
+      const timeout = stepTimeout(step.timeout_ms);
+      try {
+        await perform(page, step, timeout);
+        for (const t of step.then ?? []) await perform(page, t, timeout);
+        for (const e of step.expect ?? []) await check(page, e, timeout, i);
+        result.status = 'passed';
+        result.duration_ms = Date.now() - started;
+        result.url_after = redactQuery(page.url());
+        if (options.capture === 'every_step') {
+          const shot = await screenshot(step.id, i + 1);
+          if (shot) result.screenshot = shot;
+        }
+      } catch (err) {
+        result.status = 'failed';
+        result.duration_ms = Date.now() - started;
+        const shot = await screenshot(step.id, i + 1);
+        if (shot) result.screenshot = shot;
+        if (!page.isClosed()) result.url_after = redactQuery(page.url());
+        failure = buildFailure(err, step.id, step.title, urlBefore, step.on_failure?.hint, false, shot);
+        for (const r of stepResults.slice(i + 1)) r.status = 'skipped';
+        return;
+      }
+    }
+
+    stepIndex = input.steps.length;
+    currentStepId = 'outcome';
+    input.onProgress({ completed_steps: input.steps.length, current_step_id: 'outcome', steps: stepResults });
+    for (let i = 0; i < input.outcome.length; i++) {
+      const o = input.outcome[i] as OutcomeCheck;
+      const r = outcomeResults[i] as OutcomeCheckResult;
+      try {
+        await check(page, o, stepTimeout(), 0);
+        r.status = 'passed';
+      } catch (err) {
+        r.status = 'failed';
+        r.message = err instanceof Error ? firstLine(err.message) : String(err);
+        if (!failure) {
+          const shot = await screenshot(`outcome-${o.id}`, input.steps.length + 1);
+          failure = buildFailure(err, o.id, `Outcome check: ${o.id}`, undefined, undefined, true, shot);
+        }
+      }
+    }
+  };
+
+  function addConsole(level: 'error' | 'warning', text: string, sourceUrl: string | undefined): void {
+    const key = `${level}|${currentStepId}|${text}`;
+    const existing = consoleMap.get(key);
+    if (existing) existing.count++;
+    else {
+      consoleMap.set(key, {
+        level,
+        text,
+        ...(sourceUrl ? { source_url: redactQuery(sourceUrl) } : {}),
+        step_id: currentStepId,
+        count: 1,
+        relevant: false,
+      });
+    }
+  }
+
+  let timer: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), runTimeoutMs);
+  });
+
+  let fatal: unknown;
+  try {
+    const mainPromise = main().then(() => 'done' as const);
+    // After a run timeout the browser closes and main() rejects. That rejection is expected.
+    mainPromise.catch(() => {});
+    const outcome = await Promise.race([mainPromise, timeoutPromise]);
+    if (outcome === 'timeout') {
+      runTimedOut = true;
+      const idx = stepResults.findIndex((s) => s.status === 'running');
+      const step = idx >= 0 ? (input.steps[idx] as Step) : undefined;
+      const shot = await screenshot(step?.id ?? 'timeout', idx + 1);
+      failure = buildFailure(
+        null,
+        step?.id ?? currentStepId,
+        step?.title ?? 'Run',
+        undefined,
+        step?.on_failure?.hint,
+        false,
+        shot,
+      );
+      if (idx >= 0) {
+        (stepResults[idx] as StepResult).status = 'failed';
+        for (const r of stepResults.slice(idx + 1)) r.status = 'skipped';
+      }
+    }
+  } catch (err) {
+    fatal = err;
+  } finally {
+    clearTimeout(timer);
+    if (context && options.trace) {
+      tracePath = path.join(input.runDir, 'trace.zip');
+      await context.tracing.stop({ path: tracePath }).catch(() => {
+        tracePath = null;
+      });
+    }
+    await browser?.close().catch(() => {});
+  }
+
+  if (fatal && !failure) {
+    failure = buildFailure(fatal, currentStepId, 'Browser setup', undefined, undefined, false, undefined);
+  }
+
+  // Relevance: the failing step and the step before it, plus any 5xx.
+  const failIdx = failure ? input.steps.findIndex((s) => s.id === (failure as Failure).step_id) : -1;
+  const relevantSteps = new Set<string>();
+  if (failure) {
+    relevantSteps.add(failure.step_id);
+    if (failIdx > 0) relevantSteps.add((input.steps[failIdx - 1] as Step).id);
+    if (failIdx < 0) relevantSteps.add('outcome');
+  }
+  const consoleErrors = [...consoleMap.values()].map((c) => ({
+    ...c,
+    relevant: relevantSteps.has(c.step_id) && c.level === 'error',
+  }));
+  const nets = networkFailures.map((n) => ({
+    ...n,
+    relevant: relevantSteps.has(n.step_id) || (n.status !== null && statusMatches(n.status, '5xx')),
+  }));
+
+  const verdict: Verdict = !failure
+    ? 'passed'
+    : failure.category === 'blocked_by_safety'
+      ? 'blocked'
+      : ['target_unreachable', 'browser_error', 'server_restarted'].includes(failure.category)
+        ? 'error'
+        : 'failed';
+
+  return redactor.redactDeep({
+    verdict,
+    failure,
+    steps: stepResults,
+    outcome_checks: outcomeResults,
+    console_errors: consoleErrors,
+    network_failures: nets,
+    blocked_requests: blocked,
+    screenshots,
+    trace_path: tracePath,
+  });
+}
+
+function firstLine(msg: string): string {
+  return (msg.split('\n')[0] ?? msg).slice(0, 400);
+}

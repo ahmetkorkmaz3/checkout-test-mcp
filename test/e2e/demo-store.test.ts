@@ -1,0 +1,164 @@
+import { existsSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+// @ts-expect-error plain JS example without types
+import { startDemoStore } from '../../examples/demo-store/server.mjs';
+import { parseConfig } from '../../src/config/load-config.js';
+import { silentLogger } from '../../src/logger.js';
+import { RunManager } from '../../src/runs/manager.js';
+import { RunStore } from '../../src/runs/store.js';
+import { parseScenario, ScenarioRegistry } from '../../src/scenarios/registry.js';
+import { createServer } from '../../src/server.js';
+
+const ROOT = path.resolve(import.meta.dirname, '../..');
+
+let dir: string;
+let store: {
+  url: string;
+  port: number;
+  setBugs(b: string[]): void;
+  close(): Promise<void>;
+  stats: { orders: number };
+};
+let client: Client;
+
+// biome-ignore lint/suspicious/noExplicitAny: test helper over SDK result union
+async function call(name: string, args: Record<string, unknown>): Promise<any> {
+  const res = await client.callTool({ name, arguments: args });
+  return res;
+}
+
+// biome-ignore lint/suspicious/noExplicitAny: test helper
+async function runToEnd(args: Record<string, unknown>): Promise<any> {
+  const started = await call('run_scenario', args);
+  expect(started.isError, JSON.stringify(started.structuredContent)).toBeFalsy();
+  const runId = started.structuredContent.run_id as string;
+  for (let i = 0; i < 12; i++) {
+    const res = await call('get_run_result', { run_id: runId, wait_s: 20, detail: 'full' });
+    if (res.structuredContent.status === 'finished') return res;
+  }
+  throw new Error('run did not finish');
+}
+
+const BLOCKED_SCENARIO = `
+schema_version: 1
+id: blocked-host-check
+title: Opens a host outside the allowlist
+summary: Safety test. Must end with verdict blocked.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open_external
+    title: Open an external page
+    goto: https://example.com/
+`;
+
+beforeAll(async () => {
+  dir = await mkdtemp(path.join(os.tmpdir(), 'ctm-e2e-'));
+  store = await startDemoStore({ port: 0 });
+  const config = parseConfig(
+    {
+      runs_dir: path.join(dir, 'runs'),
+      scenario_dirs: [path.join(ROOT, 'scenarios/demo-store')],
+      test_data_dir: path.join(ROOT, 'test-data'),
+      targets: { 'demo-local': { profile: 'demo-store', base_url: store.url, allowed_hosts: ['localhost'] } },
+    },
+    dir,
+  );
+  const loaded = await ScenarioRegistry.load(config.scenario_dirs);
+  const registry = ScenarioRegistry.fromLoaded([
+    ...loaded.list(),
+    parseScenario(BLOCKED_SCENARIO, 'inline.yaml'),
+  ]);
+  const runStore = new RunStore(config.runs_dir);
+  await runStore.init();
+  const manager = new RunManager({ config, registry, store: runStore, logger: silentLogger });
+  const server = createServer({ config, registry, manager, logger: silentLogger });
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  await server.connect(st);
+  client = new Client({ name: 'e2e', version: '0.0.0' });
+  await client.connect(ct);
+});
+
+afterAll(async () => {
+  await client?.close();
+  await store?.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+describe('demo store', () => {
+  it('card-success places an order', async () => {
+    const before = store.stats.orders;
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'card-success',
+      idempotency_key: 'e2e-success-01',
+    });
+    expect(res.structuredContent.failure, res.structuredContent.summary).toBeNull();
+    expect(res.structuredContent.verdict).toBe('passed');
+    expect(res.structuredContent.outcome_checks.every((o: { status: string }) => o.status === 'passed')).toBe(
+      true,
+    );
+    expect(store.stats.orders).toBe(before + 1);
+  });
+
+  let baselineId = '';
+  it('card-3ds-challenge-fail passes when the store declines after a failed challenge', async () => {
+    const before = store.stats.orders;
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'card-3ds-challenge-fail',
+      idempotency_key: 'e2e-3ds-base-01',
+    });
+    expect(res.structuredContent.failure, res.structuredContent.summary).toBeNull();
+    expect(res.structuredContent.verdict).toBe('passed');
+    expect(store.stats.orders).toBe(before);
+    baselineId = res.structuredContent.run_id;
+  });
+
+  it('detects a skipped 3DS challenge as a regression, with screenshot and next actions', async () => {
+    store.setBugs(['skip-3ds']);
+    try {
+      const res = await runToEnd({
+        target: 'demo-local',
+        scenario_id: 'card-3ds-challenge-fail',
+        idempotency_key: 'e2e-3ds-cand-01',
+        options: { timeout_multiplier: 1 },
+      });
+      const out = res.structuredContent;
+      expect(out.verdict).toBe('failed');
+      expect(out.failure.step_id).toBe('submit_payment');
+      expect(out.failure.category).toBe('element_not_found');
+      expect(out.failure.page_url).toContain('/checkout/success');
+      expect(out.failure.likely_causes.join(' ')).toMatch(/flow|3DS/);
+      expect(out.failure.next_actions[0].kind).toBe('treat_as_regression');
+      expect(existsSync(out.failure.screenshot)).toBe(true);
+      expect(res.content.some((c: { type: string }) => c.type === 'image')).toBe(true);
+      expect(JSON.stringify(out)).not.toContain('4000000000003220');
+
+      const cmp = await call('compare_runs', { baseline_run_id: baselineId, candidate_run_id: out.run_id });
+      expect(cmp.structuredContent.verdict).toBe('regression');
+      expect(cmp.structuredContent.regressions[0]).toMatchObject({
+        kind: 'step_failed',
+        step_id: 'submit_payment',
+      });
+    } finally {
+      store.setBugs([]);
+    }
+  });
+
+  it('blocks navigation to a host outside the allowlist', async () => {
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'blocked-host-check',
+      idempotency_key: 'e2e-blocked-01',
+    });
+    expect(res.structuredContent.verdict).toBe('blocked');
+    expect(res.structuredContent.failure.category).toBe('blocked_by_safety');
+    expect(res.structuredContent.blocked_requests[0].url).toContain('example.com');
+  });
+});

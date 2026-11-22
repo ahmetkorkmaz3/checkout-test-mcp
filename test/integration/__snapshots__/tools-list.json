@@ -1,0 +1,1148 @@
+[
+  {
+    "name": "list_scenarios",
+    "title": "List checkout test scenarios",
+    "description": "Lists the checkout and payment test scenarios this server can run, the targets (test environments) they can run against, and the test cards you can use. Call this first, before run_scenario, to get valid values for scenario_id, target, and params. Each scenario lists its params with type, default, and description. Params of type \"test_card\" take an id from the test_cards list, never a card number. This tool is read-only and fast.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "description": "Only show scenarios that can run on this target. Omit to see all.",
+          "type": "string"
+        },
+        "tag": {
+          "description": "Only show scenarios with this tag, for example \"3ds\" or \"negative\".",
+          "type": "string"
+        },
+        "scenario_id": {
+          "description": "Only show this one scenario, with full param details.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "profile": {
+                "type": "string"
+              },
+              "base_url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "profile",
+              "base_url"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "scenarios": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "expected_outcome": {
+                "type": "string",
+                "enum": [
+                  "order_placed",
+                  "payment_declined",
+                  "validation_error",
+                  "custom"
+                ]
+              },
+              "compatible_targets": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "estimated_duration_s": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "params": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "string",
+                        "integer",
+                        "number",
+                        "boolean",
+                        "enum",
+                        "test_card"
+                      ]
+                    },
+                    "required": {
+                      "type": "boolean"
+                    },
+                    "default": {
+                      "type": [
+                        "string",
+                        "number",
+                        "boolean"
+                      ]
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "minimum": {
+                      "type": "number"
+                    },
+                    "maximum": {
+                      "type": "number"
+                    },
+                    "test_card_behaviour": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "type",
+                    "required",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "summary",
+              "tags",
+              "expected_outcome",
+              "compatible_targets",
+              "estimated_duration_s",
+              "params"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "test_cards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "brand": {
+                "type": "string"
+              },
+              "last4": {
+                "type": "string"
+              },
+              "behaviour": {
+                "type": "string",
+                "enum": [
+                  "success",
+                  "challenge_required",
+                  "frictionless_3ds",
+                  "declined_generic",
+                  "declined_insufficient_funds",
+                  "declined_expired"
+                ]
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "provider",
+              "brand",
+              "last4",
+              "behaviour",
+              "description"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "targets",
+        "scenarios",
+        "test_cards"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "run_scenario",
+    "title": "Start a checkout test run",
+    "description": "Starts one checkout test scenario against a configured test environment and returns a run_id at once. The run continues in the background, usually for 30 to 180 seconds. Then call get_run_result with the run_id to get progress and the final verdict. Do not call run_scenario again to check progress. idempotency_key is required: use the same key when you retry this call after a timeout or transport error, and the server returns the first run instead of starting a second checkout. Use a new key only when you want a new run, for example \"pr-4812-3ds-fail-after-deploy\". target and scenario_id must come from list_scenarios. Only test environments from the server config are accepted, never URLs. Card params take test card ids, never card numbers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Target name from list_scenarios.targets, for example \"my-staging\"."
+        },
+        "scenario_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Scenario id from list_scenarios.scenarios, for example \"card-3ds-challenge-fail\"."
+        },
+        "params": {
+          "default": {},
+          "description": "Scenario params by name. Omit a param to use its default.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          }
+        },
+        "idempotency_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{8,128}$",
+          "description": "8 to 128 characters: letters, digits, \".\", \"_\", \":\", \"-\". Same key = same run."
+        },
+        "options": {
+          "default": {
+            "timeout_multiplier": 1,
+            "capture": "failure_only",
+            "trace": false
+          },
+          "type": "object",
+          "properties": {
+            "timeout_multiplier": {
+              "default": 1,
+              "description": "Multiplies every step timeout. Use 2 or 3 when a previous run failed with category \"timeout\" on a slow environment.",
+              "type": "number",
+              "minimum": 1,
+              "maximum": 5
+            },
+            "capture": {
+              "default": "failure_only",
+              "description": "\"every_step\" takes a screenshot after each step. Use it when you need to compare screens between runs.",
+              "type": "string",
+              "enum": [
+                "failure_only",
+                "every_step"
+              ]
+            },
+            "trace": {
+              "default": false,
+              "description": "Record a Playwright trace file for a human to open later. Makes the run slower.",
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "required": [
+        "target",
+        "scenario_id",
+        "idempotency_key"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "pattern": "^run_[A-Za-z0-9_-]{16}$",
+          "description": "Run id returned by run_scenario, for example \"run_8fK2mQ9xLp3vTz1a\"."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "running",
+            "finished"
+          ]
+        },
+        "reused_existing_run": {
+          "type": "boolean",
+          "description": "True when this idempotency_key already had a run. No new checkout started."
+        },
+        "scenario_id": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "resolved_params": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          }
+        },
+        "estimated_duration_s": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "next": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "call_tool",
+                "change_argument",
+                "wait_and_retry",
+                "fix_scenario",
+                "treat_as_regression",
+                "ask_human"
+              ]
+            },
+            "description": {
+              "type": "string",
+              "description": "One sentence the agent can act on."
+            },
+            "tool": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "after_s": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "kind",
+            "description"
+          ],
+          "additionalProperties": false,
+          "description": "Normally: call get_run_result with wait_s 20."
+        }
+      },
+      "required": [
+        "run_id",
+        "status",
+        "reused_existing_run",
+        "scenario_id",
+        "target",
+        "resolved_params",
+        "estimated_duration_s",
+        "next"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "get_run_result",
+    "title": "Get checkout test run result",
+    "description": "Returns the status of a run started with run_scenario, and the verdict when it is finished. Set wait_s (max 20) to wait for the run to finish or make progress before the call returns. While status is \"queued\" or \"running\", call again with wait_s 20. verdict \"failed\" means the site did not behave as the scenario expects: read failure.category, failure.likely_causes, and failure.next_actions. verdict \"error\" or \"blocked\" means the run could not test the site: read failure.next_actions before you retry. detail \"summary\" (default) returns the failing step, relevant console errors, and relevant network failures. Use detail \"full\" only when you need every step, console line, and request.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "pattern": "^run_[A-Za-z0-9_-]{16}$",
+          "description": "Run id returned by run_scenario, for example \"run_8fK2mQ9xLp3vTz1a\"."
+        },
+        "wait_s": {
+          "default": 0,
+          "description": "Seconds to wait for completion or progress. 0 returns at once.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "detail": {
+          "default": "summary",
+          "type": "string",
+          "enum": [
+            "summary",
+            "full"
+          ]
+        }
+      },
+      "required": [
+        "run_id"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "pattern": "^run_[A-Za-z0-9_-]{16}$",
+          "description": "Run id returned by run_scenario, for example \"run_8fK2mQ9xLp3vTz1a\"."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "running",
+            "finished"
+          ]
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "passed",
+                "failed",
+                "error",
+                "blocked",
+                "cancelled"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null until status is \"finished\"."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Two to four sentences: what ran, what happened, what to do."
+        },
+        "scenario_id": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "progress": {
+          "type": "object",
+          "properties": {
+            "completed_steps": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "total_steps": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "current_step_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "completed_steps",
+            "total_steps",
+            "current_step_id"
+          ],
+          "additionalProperties": false
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "step_id": {
+                  "type": "string",
+                  "description": "Step id, or outcome check id when an outcome check failed."
+                },
+                "step_title": {
+                  "type": "string"
+                },
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "assertion_failed",
+                    "element_not_found",
+                    "timeout",
+                    "unexpected_response",
+                    "navigation_failed",
+                    "blocked_by_safety",
+                    "target_unreachable",
+                    "browser_error",
+                    "server_restarted"
+                  ]
+                },
+                "message": {
+                  "type": "string"
+                },
+                "expected": {
+                  "type": "string"
+                },
+                "actual": {
+                  "type": "string"
+                },
+                "likely_causes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Most likely first. Includes the scenario author hint."
+                },
+                "next_actions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "call_tool",
+                          "change_argument",
+                          "wait_and_retry",
+                          "fix_scenario",
+                          "treat_as_regression",
+                          "ask_human"
+                        ]
+                      },
+                      "description": {
+                        "type": "string",
+                        "description": "One sentence the agent can act on."
+                      },
+                      "tool": {
+                        "type": "string"
+                      },
+                      "arguments": {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      },
+                      "after_s": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "description"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "screenshot": {
+                  "type": "string"
+                },
+                "page_url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "step_id",
+                "step_title",
+                "category",
+                "message",
+                "likely_causes",
+                "next_actions"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome_checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "passed",
+                  "failed",
+                  "not_run"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "running",
+                  "passed",
+                  "failed",
+                  "skipped"
+                ]
+              },
+              "duration_ms": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "url_after": {
+                "type": "string"
+              },
+              "screenshot": {
+                "description": "Absolute file path.",
+                "type": "string"
+              },
+              "flaky": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "description": "summary: only failed and flaky steps. full: all steps."
+        },
+        "console_errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "level": {
+                "type": "string",
+                "enum": [
+                  "error",
+                  "warning"
+                ]
+              },
+              "text": {
+                "type": "string"
+              },
+              "source_url": {
+                "type": "string"
+              },
+              "step_id": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "relevant": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "level",
+              "text",
+              "step_id",
+              "count",
+              "relevant"
+            ],
+            "additionalProperties": false
+          },
+          "description": "summary: only relevant items, max 10."
+        },
+        "network_failures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string",
+                "description": "Query string values are redacted."
+              },
+              "status": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "null when the request failed without a response."
+              },
+              "failure_text": {
+                "type": "string"
+              },
+              "resource_type": {
+                "type": "string"
+              },
+              "step_id": {
+                "type": "string"
+              },
+              "relevant": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "method",
+              "url",
+              "status",
+              "resource_type",
+              "step_id",
+              "relevant"
+            ],
+            "additionalProperties": false
+          },
+          "description": "HTTP >= 400, aborted, and failed requests. summary: only relevant items, max 10."
+        },
+        "blocked_requests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string"
+              },
+              "step_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "url",
+              "step_id"
+            ],
+            "additionalProperties": false
+          },
+          "description": "Requests the host guard stopped. Often a missing third_party_hosts entry."
+        },
+        "artifacts": {
+          "type": "object",
+          "properties": {
+            "run_dir": {
+              "type": "string"
+            },
+            "screenshots": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "step_id": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "step_id",
+                  "path",
+                  "uri"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "trace_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "run_dir",
+            "screenshots",
+            "trace_path"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "run_id",
+        "status",
+        "verdict",
+        "summary",
+        "scenario_id",
+        "target",
+        "started_at",
+        "finished_at",
+        "duration_ms",
+        "progress",
+        "failure",
+        "outcome_checks",
+        "steps",
+        "console_errors",
+        "network_failures",
+        "blocked_requests",
+        "artifacts"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "compare_runs",
+    "title": "Compare two checkout test runs",
+    "description": "Compares two finished runs of the same scenario, for example before and after a deploy, and reports regressions. baseline_run_id is the known-good or earlier run. candidate_run_id is the new run. A regression is a step or outcome check that passed in the baseline and failed in the candidate, a new console error, a new network failure, or a step that became much slower. Both runs must have status \"finished\". The runs can use different targets, for example staging and a preview environment.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "baseline_run_id": {
+          "type": "string",
+          "pattern": "^run_[A-Za-z0-9_-]{16}$",
+          "description": "Run id returned by run_scenario, for example \"run_8fK2mQ9xLp3vTz1a\"."
+        },
+        "candidate_run_id": {
+          "type": "string",
+          "pattern": "^run_[A-Za-z0-9_-]{16}$",
+          "description": "Run id returned by run_scenario, for example \"run_8fK2mQ9xLp3vTz1a\"."
+        },
+        "slowdown_threshold_pct": {
+          "default": 50,
+          "description": "Report a step as slower when its duration grows by more than this percent and by more than 1000 ms.",
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 1000
+        }
+      },
+      "required": [
+        "baseline_run_id",
+        "candidate_run_id"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "regression",
+            "fixed",
+            "no_change",
+            "both_failing",
+            "inconclusive"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "scenario_id": {
+          "type": "string"
+        },
+        "baseline": {
+          "type": "object",
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "pattern": "^run_[A-Za-z0-9_-]{16}$",
+              "description": "Run id returned by run_scenario, for example \"run_8fK2mQ9xLp3vTz1a\"."
+            },
+            "target": {
+              "type": "string"
+            },
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "passed",
+                "failed",
+                "error",
+                "blocked",
+                "cancelled"
+              ]
+            },
+            "finished_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id",
+            "target",
+            "verdict",
+            "finished_at"
+          ],
+          "additionalProperties": false
+        },
+        "candidate": {
+          "type": "object",
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "pattern": "^run_[A-Za-z0-9_-]{16}$",
+              "description": "Run id returned by run_scenario, for example \"run_8fK2mQ9xLp3vTz1a\"."
+            },
+            "target": {
+              "type": "string"
+            },
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "passed",
+                "failed",
+                "error",
+                "blocked",
+                "cancelled"
+              ]
+            },
+            "finished_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id",
+            "target",
+            "verdict",
+            "finished_at"
+          ],
+          "additionalProperties": false
+        },
+        "regressions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "step_failed",
+                  "outcome_failed",
+                  "new_console_error",
+                  "new_network_failure",
+                  "slower"
+                ]
+              },
+              "step_id": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "baseline_value": {
+                "type": "string"
+              },
+              "candidate_value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "step_id",
+              "description"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "fixes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "step_id": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "step_id",
+              "description"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "step_changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string"
+              },
+              "baseline_status": {
+                "type": "string"
+              },
+              "candidate_status": {
+                "type": "string"
+              },
+              "baseline_ms": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "candidate_ms": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "step_id",
+              "baseline_status",
+              "candidate_status",
+              "baseline_ms",
+              "candidate_ms"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "For example: params differ, scenario file changed between runs."
+        }
+      },
+      "required": [
+        "verdict",
+        "summary",
+        "scenario_id",
+        "baseline",
+        "candidate",
+        "regressions",
+        "fixes",
+        "step_changes",
+        "warnings"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  }
+]

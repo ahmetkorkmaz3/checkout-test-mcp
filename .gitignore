@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.checkout-test-mcp/
+*.log
+.env
+checkout-test-mcp.config.yaml

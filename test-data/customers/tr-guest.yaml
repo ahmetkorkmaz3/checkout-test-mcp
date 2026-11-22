@@ -1,0 +1,7 @@
+# Fake person and address. Never put real customer data here.
+email: guest@example.test
+full_name: Ayşe Test
+phone: "+90 555 000 00 00"
+address_line: Test Sokak No 1 Daire 2
+city: İstanbul
+district: Kadıköy

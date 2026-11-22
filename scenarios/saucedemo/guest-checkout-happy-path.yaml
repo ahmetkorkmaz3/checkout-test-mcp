@@ -1,0 +1,89 @@
+# yaml-language-server: $schema=../../schemas/scenario.schema.json
+#
+# Target: https://www.saucedemo.com, a public demo store built for test automation.
+# The site has no card step. It shows how a remote target and login secrets work.
+# The site shows its demo user names and password on the login page.
+# Put them in env vars (see checkout-test-mcp.config.example.yaml). Never write them here.
+schema_version: 1
+
+id: saucedemo-guest-checkout
+title: Sauce Demo checkout with the standard user
+summary: >-
+  Logs in to the Sauce Demo store, adds one product to the cart, completes the
+  checkout information form, and checks that the order confirmation appears.
+tags: [checkout, happy-path, remote]
+compatible_profiles: [saucedemo]
+expected_outcome: order_placed
+
+params:
+  product_test_id:
+    type: string
+    default: add-to-cart-sauce-labs-backpack
+    description: data-test id of the "Add to cart" button of the product to buy.
+
+timeouts:
+  step_ms: 20000
+  run_ms: 120000
+
+ignore:
+  network:
+    - url: "**/events.backtrace.io/**"
+  console:
+    - pattern: "backtrace"
+
+steps:
+  - id: open_login
+    title: Open the login page
+    goto: /
+    expect:
+      - visible: { test_id: login-button }
+
+  - id: log_in
+    title: Log in with the demo user
+    fill_form:
+      - field: { test_id: username }
+        value: "{{secrets.username}}"
+      - field: { test_id: password }
+        value: "{{secrets.password}}"
+    then:
+      - click: { test_id: login-button }
+    expect:
+      - url: { matches: "**/inventory.html" }
+
+  - id: add_to_cart
+    title: Add the product to the cart
+    click: { test_id: "{{params.product_test_id}}" }
+    expect:
+      - text: { test_id: shopping-cart-badge, equals: "1" }
+
+  - id: open_cart
+    title: Open the cart and start checkout
+    click: { test_id: shopping-cart-link }
+    then:
+      - click: { test_id: checkout }
+    expect:
+      - url: { matches: "**/checkout-step-one.html" }
+
+  - id: fill_information
+    title: Fill the checkout information form
+    fill_form:
+      - field: { test_id: firstName }
+        value: Ayşe
+      - field: { test_id: lastName }
+        value: Test
+      - field: { test_id: postalCode }
+        value: "34000"
+    then:
+      - click: { test_id: continue }
+    expect:
+      - url: { matches: "**/checkout-step-two.html" }
+
+  - id: finish
+    title: Finish the order
+    click: { test_id: finish }
+
+outcome:
+  - id: confirmation_shown
+    text: { test_id: complete-header, matches: "[Tt]hank you" }
+  - id: on_complete_url
+    url: { matches: "**/checkout-complete.html" }

@@ -1,0 +1,48 @@
+# checkout-test-mcp config. Copy to checkout-test-mcp.config.yaml and edit.
+# Paths are relative to this file.
+
+runs_dir: .checkout-test-mcp/runs # results, screenshots, traces
+max_parallel_runs: 1
+scenario_dirs: [./scenarios]
+test_data_dir: ./test-data
+headless: true
+
+targets:
+  demo-local:
+    description: Bundled demo store on this machine. Start it with "npm run demo-store".
+    profile: demo-store
+    base_url: http://localhost:4173
+    allowed_hosts: [localhost]
+
+  saucedemo:
+    description: Public Sauce Labs demo store. No payment step.
+    profile: saucedemo
+    base_url: https://www.saucedemo.com
+    allowed_hosts: [www.saucedemo.com]
+    test_id_attribute: data-test
+    # www.saucedemo.com has no test label. This flag is accepted only
+    # together with a non-empty production_hosts list (see below).
+    allow_unlabeled_host: true
+    secrets:
+      # The site shows these demo values on its login page.
+      username: SAUCEDEMO_USERNAME
+      password: SAUCEDEMO_PASSWORD
+
+  # Example for a company staging environment:
+  # my-staging:
+  #   description: Company staging, checkout v2 branch.
+  #   profile: my-store
+  #   base_url: https://staging.example-shop.test
+  #   allowed_hosts: [staging.example-shop.test, api-staging.example-shop.test]
+  #   third_party_hosts: [sandbox-api.iyzipay.com]
+  #   secrets:
+  #     basic_auth_user: STAGING_BASIC_USER
+  #     basic_auth_pass: STAGING_BASIC_PASS
+  #   http_credentials:
+  #     username_secret: basic_auth_user
+  #     password_secret: basic_auth_pass
+
+# Always refused, even when a target lists them.
+production_hosts:
+  - saucelabs.com
+  - www.saucelabs.com
