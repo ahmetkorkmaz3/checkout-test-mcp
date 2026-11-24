@@ -3,6 +3,7 @@ import { parse as parseYaml } from 'yaml';
 import { hostOf, isUrlAllowed, matchesAny } from '../safety/hosts.js';
 import { redactText } from '../safety/redact-text.js';
 import type { InspectConfig, ResolvedConfig, TargetConfig } from '../schemas/config.js';
+import { type ActionLog, guardedClick, hasCardFields } from './actions.js';
 import { guessPageKind, type PageKind } from './page-kind.js';
 import { matchesKind } from './words.js';
 
@@ -65,8 +66,9 @@ const IDLE_TIMEOUT_MS = 5_000;
 const READ_TIMEOUT_MS = 2_000;
 /** Failed gotos and redirects count too, so a site full of broken links cannot keep the crawl busy. */
 const NAVIGATIONS_PER_PAGE = 3;
-/** Words that mark a container as a cookie or consent banner. */
-const COOKIE_CONTAINER = 'cookie|cookies|çerez|consent|datenschutz';
+/** Whole words that mark a container as a cookie or consent banner. */
+const COOKIE_CONTAINER =
+  '(?<![\\p{L}\\p{N}])(cookie|cookies|çerez|çerezler|çerezleri|consent|datenschutz)(?![\\p{L}\\p{N}])';
 
 /** Counts the hosts that the browser guard blocked. Pass `onBlocked` to openGuardedContext. */
 export class BlockedHostCounter {
@@ -181,7 +183,7 @@ function firstLine(msg: string): string {
  * Reads the accessible name from the element's ARIA snapshot, for example `- button "Add to cart"`.
  * Use it for small elements only. Landmarks and dialogs use labelName.
  */
-async function accessibleName(loc: Locator): Promise<string> {
+export async function accessibleName(loc: Locator): Promise<string> {
   const snap = await loc.ariaSnapshot({ depth: 1, timeout: READ_TIMEOUT_MS }).catch(() => '');
   let first: unknown;
   try {
@@ -230,24 +232,39 @@ async function namesOf(
 }
 
 /**
- * True when the button is inside a dialog, alertdialog, banner or region, or inside a small
- * container whose text names cookies or consent. A "Reject" button in a normal form is not a banner.
+ * True when the button is inside a cookie or consent banner. The walk stops at the first form or
+ * landmark, and at a container that holds a form or landmark, because those are page content.
+ * A dialog, alertdialog, banner or region counts only when its own text or name names cookies.
+ * A plain container counts when its text is short and names cookies.
  */
-async function isInCookieContainer(loc: Locator): Promise<boolean> {
+export async function isInCookieContainer(loc: Locator): Promise<boolean> {
   return loc
     .evaluate(
       (e, words) => {
-        const cookieText = new RegExp(words, 'i');
+        const cookieText = new RegExp(words, 'iu');
+        if (e.closest('form')) return false;
+        const landmarkTags = /^(FORM|MAIN|NAV|ASIDE|HEADER|FOOTER|BODY|HTML)$/;
+        const landmarkRoles = /^(form|main|navigation|complementary|contentinfo|search)$/;
+        const pageContent =
+          'form, main, nav, [role="form"], [role="main"], [role="navigation"], [role="search"]';
         for (
           let el = e.parentElement, depth = 0;
           el && el !== document.body && depth < 8;
           el = el.parentElement, depth++
         ) {
-          const role = el.getAttribute('role');
-          if (role === 'dialog' || role === 'alertdialog' || role === 'banner' || role === 'region')
-            return true;
-          if (el.tagName === 'DIALOG') return true;
-          const text = el.textContent ?? '';
+          const role = el.getAttribute('role') ?? '';
+          const text = `${el.getAttribute('aria-label') ?? ''} ${el.textContent ?? ''}`;
+          if (
+            el.tagName === 'DIALOG' ||
+            role === 'dialog' ||
+            role === 'alertdialog' ||
+            role === 'banner' ||
+            role === 'region'
+          ) {
+            return text.length <= 4000 && cookieText.test(text);
+          }
+          if (landmarkTags.test(el.tagName) || landmarkRoles.test(role)) return false;
+          if (el.querySelector(pageContent)) return false;
           if (text.length <= 2000 && cookieText.test(text)) return true;
         }
         return false;
@@ -258,21 +275,26 @@ async function isInCookieContainer(loc: Locator): Promise<boolean> {
     .catch(() => false);
 }
 
-/** Clicks one visible cookie button that rejects. It never clicks a button that accepts. */
-async function rejectCookieBanner(page: Page, words: InspectConfig['words']): Promise<boolean> {
+/**
+ * Clicks one visible cookie button that rejects. It never clicks a button that accepts.
+ * The click goes through guardedClick, which also refuses pay and send-code buttons.
+ * The crawl and the checkout probe both use this function.
+ */
+export async function rejectCookieBanner(
+  page: Page,
+  words: InspectConfig['words'],
+  log: ActionLog = () => {},
+): Promise<boolean> {
   const buttons = (await page.getByRole('button').all()).slice(0, CRAWL_LIMITS.cookieButtons);
   for (const b of buttons) {
     const name = await accessibleName(b);
     if (!matchesKind('cookie_reject', name, words) || matchesKind('cookie_accept', name, words)) continue;
     if (!(await b.isVisible().catch(() => false))) continue;
     if (!(await isInCookieContainer(b))) continue;
-    try {
-      await b.click({ timeout: READ_TIMEOUT_MS });
-      await page.waitForTimeout(300);
-      return true;
-    } catch {
-      return false;
-    }
+    const result = await guardedClick(page, b, { purpose: 'reject cookie banner', words, log });
+    if (result !== 'done') return false;
+    await page.waitForTimeout(300);
+    return true;
   }
   return false;
 }
@@ -327,17 +349,6 @@ async function readFields(page: Page): Promise<RawField[]> {
 }
 
 const NON_FIELD_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'image']);
-
-async function hasCardFields(page: Page): Promise<boolean> {
-  for (const frame of page.frames()) {
-    const n = await frame
-      .locator('[autocomplete*="cc-number" i], [autocomplete*="cc-csc" i]')
-      .count()
-      .catch(() => 0);
-    if (n > 0) return true;
-  }
-  return false;
-}
 
 async function snapshotPage(
   page: Page,
@@ -559,7 +570,9 @@ export async function crawlSite(ctx: CrawlContext): Promise<SiteReport> {
 
       if (!cookieBannerTried) {
         cookieBannerTried = true;
-        await rejectCookieBanner(page, inspect.words);
+        await rejectCookieBanner(page, inspect.words, (action, result) =>
+          ctx.onProgress(`${action} (${result}).`),
+        );
       }
 
       let snap: PageSnapshot;

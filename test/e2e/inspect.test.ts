@@ -1,17 +1,26 @@
 import { createServer, type Server } from 'node:http';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 // @ts-expect-error plain JS example without types
 import { startDemoStore } from '../../examples/demo-store/server.mjs';
 import { parseConfig } from '../../src/config/load-config.js';
+import { guardedClick, guardedFill } from '../../src/inspect/actions.js';
 import { BlockedHostCounter, crawlSite, type SiteReport } from '../../src/inspect/crawl.js';
+import { type ProbeResult, probeCheckout } from '../../src/inspect/probe.js';
 import { openGuardedContext } from '../../src/runner/browser.js';
 import type { InspectConfig } from '../../src/schemas/config.js';
 
 let demo: {
   url: string;
   close(): Promise<void>;
-  stats: { orders: number; payments: number; return_rejects: number };
+  stats: {
+    orders: number;
+    payments: number;
+    return_rejects: number;
+    cookieAccepted: number;
+    contacts: number;
+  };
   issuedOtps: string[];
+  setBugs(bugs: string[]): void;
 };
 
 beforeAll(async () => {
@@ -67,6 +76,79 @@ async function crawl(
   }
 }
 
+async function probe(
+  t: ReturnType<typeof demoTarget>,
+  signal = new AbortController().signal,
+): Promise<ProbeResult> {
+  const guarded = await openGuardedContext({ config: t.config, target: t.target, onBlocked: () => {} });
+  try {
+    return await probeCheckout({
+      context: guarded.context,
+      target: t.target,
+      inspect: t.inspect,
+      signal,
+      onProgress: () => {},
+    });
+  } finally {
+    await guarded.close();
+  }
+}
+
+describe('checkout probe', () => {
+  afterEach(() => {
+    demo.setBugs([]);
+  });
+
+  it('probes the demo store to the payment step and never pays', async () => {
+    const before = demo.stats.orders;
+    const payments = demo.stats.payments;
+    const contacts = demo.stats.contacts;
+    const otps = demo.issuedOtps.length;
+    const r = await probe(demoTarget({ probe_checkout: true }));
+    expect(r.reached).toBe('payment');
+    expect(r.stopped_reason).toBe('payment_step_reached');
+    expect(r.guest_option).toBe(true);
+    expect(r.payment?.agreement_checkbox).toMatch(/terms/i);
+    expect(r.payment?.pay_button).toMatch(/^Pay/);
+    expect(r.payment?.card_form).toBe(true);
+    expect(r.payment?.card_iframe_hosts).toEqual(['localhost']);
+    expect(demo.stats.orders).toBe(before);
+    expect(demo.stats.payments).toBe(payments);
+    expect(demo.issuedOtps.length).toBe(otps);
+    // The probe saved the address form once.
+    expect(demo.stats.contacts).toBe(contacts + 1);
+    // The guest email is only in side_effects.
+    const email = r.side_effects.find((e) => e.startsWith('guest account '));
+    expect(email).toMatch(/^guest account inspect-[0-9a-f]{8}@example\.test$/);
+    expect(JSON.stringify({ steps: r.steps, payment: r.payment })).not.toMatch(/@example\.test/);
+    expect(r.side_effects).toEqual(expect.arrayContaining(['cart item', 'address']));
+  });
+
+  it('rejects a cookie banner and never accepts it', async () => {
+    demo.setBugs(['cookie-banner']);
+    const r = await probe(demoTarget({ probe_checkout: true }));
+    expect(r.steps[0]).toMatchObject({ action: expect.stringMatching(/reject/i), result: 'done' });
+    expect(demo.stats.cookieAccepted).toBe(0);
+    expect(r.reached).toBe('payment');
+  });
+
+  it('stops at a login wall without a guest option', async () => {
+    demo.setBugs(['login-wall']);
+    const r = await probe(demoTarget({ probe_checkout: true }));
+    expect(r.stopped_reason).toBe('login_required');
+    expect(r.guest_option).toBe(false);
+    expect(r.reached).toBe('checkout');
+  });
+
+  it('stops with timeout when the signal aborts', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const r = await probe(demoTarget({ probe_checkout: true }), ac.signal);
+    expect(r.stopped_reason).toBe('timeout');
+    expect(r.reached).toBe('none');
+  });
+});
+
 describe('site crawl', () => {
   it('crawls the demo store and finds the product page and its API call', async () => {
     const { pages, api_calls, blocked_hosts } = await crawl(demoTarget({ max_pages: 10 }));
@@ -119,7 +201,9 @@ describe('site crawl', () => {
 const BANNER_PAGE = `<!doctype html><html><head><title>Banner</title>
 <script src="https://cdn.example.com/tracker.js"></script></head><body>
 <main><h1>Welcome</h1>
-<form onsubmit="event.preventDefault();fetch('/clicked/form-reject')"><button>Reject</button></form>
+<form onsubmit="event.preventDefault();fetch('/clicked/form-reject')"><p>Withdraw your consent for cookies on request R-2?</p><button>Reject</button></form>
+<section role="region" aria-label="Offers"><button onclick="fetch('/clicked/region-reject')">Reject</button></section>
+<div class="wrap"><p>See our cookie policy.</p><div><button onclick="fetch('/clicked/wrap-reject')">Reject</button></div><nav><a href="/next">Next</a></nav></div>
 <a href="//other.example.com/x">Other host</a>
 <a href="/logout">Log out</a>
 <a href="/next">Next</a>
@@ -180,6 +264,8 @@ describe('site crawl rules', () => {
     expect(hits).toContain('/clicked/reject');
     expect(hits).not.toContain('/clicked/accept');
     expect(hits).not.toContain('/clicked/form-reject');
+    expect(hits).not.toContain('/clicked/region-reject');
+    expect(hits).not.toContain('/clicked/wrap-reject');
     expect(hits).not.toContain('/logout');
     expect(report.pages.map((p) => p.path_pattern)).toEqual(['/', '/next']);
     expect(report.pages[0]?.dialogs).toEqual([]);
@@ -208,5 +294,194 @@ describe('site crawl rules', () => {
     await crawl(siteTarget({ start_paths: ['/dead?session=abc123secret'] }), undefined, messages);
     expect(messages.join('\n')).toContain('Could not open /dead');
     expect(messages.join('\n')).not.toContain('abc123secret');
+  });
+});
+
+// A small Turkish shop: a cart page, custom lists where the district list waits
+// for the city list, a send-code button next to the phone field, and a site test card select.
+const TR_HEAD =
+  '<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Mağaza</title></head><body>';
+const TR_PAGES: Record<string, string> = {
+  '/urun/kalem-123456': `${TR_HEAD}<header><a href="/sepet">Sepetim</a></header><main><h1>Kalem</h1>
+<button onclick="fetch('/api/sepet',{method:'POST'})">Sepete Ekle</button></main></body></html>`,
+  '/sepet': `${TR_HEAD}<main><h1>Sepetim</h1><p>1 ürün</p>
+<button onclick="location.href='/odeme/adres'">Sepeti Onayla</button></main></body></html>`,
+  '/odeme/adres': `${TR_HEAD}<main><h1>Teslimat adresi</h1>
+<label for="ad">Ad</label><input id="ad">
+<label for="soyad">Soyad</label><input id="soyad">
+<label for="tel">Cep Telefonu</label><input id="tel" type="tel" placeholder="05XX XXX XX XX">
+<button onclick="fetch('/clicked/send-code',{method:'POST'})">Kod Gönder</button>
+<span id="il-l">İl</span><button id="il" role="combobox" aria-labelledby="il-l" aria-expanded="false">Seçiniz</button>
+<ul id="il-list" role="listbox" hidden><li role="option">Seçiniz</li><li role="option">Adana</li><li role="option">Ankara</li></ul>
+<span id="ilce-l">İlçe</span><button id="ilce" role="combobox" aria-labelledby="ilce-l" aria-disabled="true" aria-expanded="false">Seçiniz</button>
+<ul id="ilce-list" role="listbox" hidden></ul>
+<label for="adres">Adres</label><textarea id="adres"></textarea>
+<label for="baslik">Adres Başlığı</label><input id="baslik">
+<button id="save">Kaydet ve Devam Et</button></main>
+<script>
+const il = document.getElementById('il'), ilce = document.getElementById('ilce');
+const ilList = document.getElementById('il-list'), ilceList = document.getElementById('ilce-list');
+il.onclick = () => { ilList.hidden = false; };
+ilList.onclick = (e) => {
+  if (e.target.textContent === 'Seçiniz') return;
+  il.textContent = e.target.textContent; ilList.hidden = true;
+  setTimeout(() => {
+    ilceList.innerHTML = '<li role="option">Seçiniz</li><li role="option">Seyhan</li><li role="option">Çukurova</li>';
+    ilce.setAttribute('aria-disabled', 'false');
+  }, 600);
+};
+ilce.onclick = () => { if (ilce.getAttribute('aria-disabled') !== 'true') ilceList.hidden = false; };
+ilceList.onclick = (e) => {
+  if (e.target.textContent === 'Seçiniz') return;
+  ilce.textContent = e.target.textContent; ilceList.hidden = true;
+};
+document.getElementById('save').onclick = async () => {
+  const v = (id) => document.getElementById(id).value;
+  const body = { ad: v('ad'), soyad: v('soyad'), tel: v('tel'), adres: v('adres'), baslik: v('baslik'),
+    il: il.textContent, ilce: ilce.textContent };
+  const r = await fetch('/api/adres', { method: 'POST', body: JSON.stringify(body) });
+  if (r.ok) location.href = '/odeme/kart';
+};
+</script></body></html>`,
+  '/odeme/kart': `${TR_HEAD}<main><h1>Ödeme</h1>
+<label><input type="radio" name="m" checked> Kredi Kartı</label><label><input type="radio" name="m"> Havale</label>
+<label for="tk">Test Kartı</label><select id="tk"><option value="">Seçiniz</option>
+<option value="1">Akbank - Master Card (Credit)</option><option value="2">3DS Tamamlama - İşlem onaylanmadı</option></select>
+<label><input type="checkbox" id="agree"> Ön Bilgilendirme Formu'nu okudum, onaylıyorum.</label>
+<button onclick="fetch('/clicked/pay',{method:'POST'})">Siparişi Tamamla</button></main></body></html>`,
+};
+
+describe('checkout probe on a shop with custom lists', () => {
+  let server: Server;
+  let base = '';
+  const hits: string[] = [];
+  let address: Record<string, string> | null = null;
+
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      hits.push(`${req.method} ${req.url}`);
+      if (req.method === 'POST') {
+        let body = '';
+        req.on('data', (c) => {
+          body += c;
+        });
+        req.on('end', () => {
+          if (req.url === '/api/adres') {
+            address = JSON.parse(body);
+            const ok = address?.il !== 'Seçiniz' && address?.ilce !== 'Seçiniz';
+            res.writeHead(ok ? 200 : 400, { 'content-type': 'application/json' });
+            res.end('{}');
+            return;
+          }
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end('{}');
+        });
+        return;
+      }
+      const page = TR_PAGES[req.url ?? ''];
+      res.writeHead(page ? 200 : 404, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(page ?? '<!doctype html><title>Yok</title><h1>Yok</h1>');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const addr = server.address();
+    base = `http://localhost:${typeof addr === 'object' && addr ? addr.port : 0}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('fills the dependent lists, records the test card select, and never pays or sends a code', async () => {
+    const config = parseConfig(
+      {
+        targets: {
+          tr: {
+            profile: 'p',
+            base_url: base,
+            allowed_hosts: ['localhost'],
+            inspect: { product_paths: ['/urun/kalem-123456'], probe_checkout: true },
+          },
+        },
+      },
+      '/tmp',
+    );
+    const target = config.targets.tr;
+    if (!target?.inspect) throw new Error('test config has no inspect block');
+    const r = await probe({ config, target, inspect: target.inspect });
+    expect(r.stopped_reason).toBe('payment_step_reached');
+    expect(r.reached).toBe('payment');
+    expect(r.guest_option).toBe(false);
+    expect(r.payment).toMatchObject({
+      methods: ['Kredi Kartı', 'Havale'],
+      card_form: false,
+      test_card_select: {
+        label: 'Test Kartı',
+        options: ['Akbank - Master Card (Credit)', '3DS Tamamlama - İşlem onaylanmadı'],
+      },
+      agreement_checkbox: expect.stringMatching(/^Ön Bilgilendirme Formu/),
+      pay_button: 'Siparişi Tamamla',
+    });
+    expect(address).toMatchObject({
+      ad: 'Test',
+      soyad: 'Inspect',
+      tel: '55500000000',
+      adres: 'Test Street 1',
+      baslik: 'Test',
+      il: 'Adana',
+      ilce: 'Seyhan',
+    });
+    expect(hits).toContain('POST /api/sepet');
+    expect(hits).not.toContain('POST /clicked/pay');
+    expect(hits).not.toContain('POST /clicked/send-code');
+    expect(r.steps.map((s) => s.action)).toEqual(
+      expect.arrayContaining(['open cart: "Sepetim"', 'go to checkout: "Sepeti Onayla"']),
+    );
+    expect(r.side_effects).toEqual(['cart item', 'address', expect.stringMatching(/^order draft/)]);
+  });
+});
+
+describe('guarded actions', () => {
+  it('refuses pay, cookie accept, send-code, password form, and card page clicks', async () => {
+    const t = demoTarget();
+    const guarded = await openGuardedContext({ config: t.config, target: t.target, onBlocked: () => {} });
+    try {
+      const page = await guarded.context.newPage();
+      await page.setContent(`<main>
+<button onclick="window.hit.push('next')">Next</button>
+<button onclick="window.hit.push('pay')">Pay now</button>
+<button onclick="window.hit.push('accept')">Accept all</button>
+<button onclick="window.hit.push('code')">Send code</button>
+<input type="submit" value="Place order" onclick="window.hit.push('order')">
+<form onsubmit="event.preventDefault()"><input type="password"><button onclick="window.hit.push('login')">Sign in</button></form>
+<input id="pw" type="password"><input id="cc" autocomplete="cc-number"><input id="otp" autocomplete="one-time-code">
+</main><script>window.hit = []</script>`);
+      const log: [string, string][] = [];
+      const opts = { purpose: 'test', words: {}, log: (a: string, r: string) => log.push([a, r]) };
+      for (const name of ['Next', 'Pay now', 'Accept all', 'Send code', 'Place order', 'Sign in']) {
+        await guardedClick(page, page.getByRole('button', { name, exact: true }), opts);
+      }
+      // The one-time code field on this page makes every click unsafe, also "Next".
+      expect(await page.evaluate(() => (window as unknown as { hit: string[] }).hit)).toEqual([]);
+      expect(log.every(([, r]) => r === 'refused')).toBe(true);
+
+      for (const id of ['pw', 'cc', 'otp']) {
+        expect(await guardedFill(page, page.locator(`#${id}`), '1234', opts)).toBe('refused');
+        expect(await page.locator(`#${id}`).inputValue()).toBe('');
+      }
+
+      await page.setContent(`<button onclick="window.hit.push('next')">Next</button>
+<button onclick="window.hit.push('pay')">Pay now</button><script>window.hit = []</script>`);
+      expect(await guardedClick(page, page.getByRole('button', { name: 'Pay now' }), opts)).toBe('refused');
+      expect(await guardedClick(page, page.getByRole('button', { name: 'Next' }), opts)).toBe('done');
+      expect(await page.evaluate(() => (window as unknown as { hit: string[] }).hit)).toEqual(['next']);
+
+      await page.setContent(`<button onclick="window.hit.push('next')">Next</button>
+<iframe srcdoc="<input autocomplete='cc-number'>"></iframe><script>window.hit = []</script>`);
+      await page.waitForTimeout(200);
+      expect(await guardedClick(page, page.getByRole('button', { name: 'Next' }), opts)).toBe('refused');
+      expect(await page.evaluate(() => (window as unknown as { hit: string[] }).hit)).toEqual([]);
+    } finally {
+      await guarded.close();
+    }
   });
 });

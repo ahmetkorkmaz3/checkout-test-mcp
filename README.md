@@ -44,6 +44,8 @@ DEMO_STORE_BUGS=skip-3ds npm run demo-store
 
 Then ask the agent to compare the two runs.
 
+Other bug flags: `cookie-banner` shows a consent dialog over every page. `login-wall` removes the guest checkout. The checkout probe tests use them.
+
 ## Tools
 
 | Tool             | What it does                                                                                                                                                               |

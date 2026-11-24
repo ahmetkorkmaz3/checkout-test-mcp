@@ -5,6 +5,8 @@
 // It also has a phone check with an SMS code. Like many test environments, send-code returns the code
 // in its response, so a scenario can read it with "capture".
 // Fault injection for demos: start with DEMO_STORE_BUGS=skip-3ds (comma-separated) or call setBugs().
+// Bugs: skip-3ds (no 3DS challenge), cookie-banner (a consent dialog over every page until the user
+// chooses), login-wall (checkout needs a sign-in and has no guest option).
 
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -33,15 +35,32 @@ header{display:flex;justify-content:space-between;align-items:center;border-bott
 label{display:block;margin:8px 0 2px}input,select{padding:6px;width:100%;max-width:360px;box-sizing:border-box}
 button{margin-top:12px;padding:8px 14px}[role=alert]{color:#b00020;margin-top:12px}
 iframe{border:1px solid #ccc;width:100%;max-width:380px}
+.terms input{width:auto}
+#cookie-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center}
+#cookie-backdrop [role=dialog]{background:#fff;padding:16px;max-width:420px}
 </style></head>
 <body>
 <header><a href="/products/${PRODUCT.slug}">Demo Store</a>
 <nav><a href="/products">Products</a> <a href="/checkout">Checkout</a> (<span data-testid="cart-count">${cartCount(session)}</span>)</nav></header>
 <main>${body}</main>
 <footer><a href="/account/verify-phone">Verify phone</a> <a href="/account/returns">Return requests</a></footer>
+${session.cookieBanner ? cookieBanner : ''}
 <script>${script}</script>
 </body></html>`;
 }
+
+// A modal consent dialog. It covers the page, so a click on the page fails until the user chooses.
+const cookieBanner = `<div id="cookie-backdrop"><div role="dialog" aria-label="Cookie settings">
+<p>We use cookies to improve the store.</p>
+<button id="cookie-accept">Accept all</button> <button id="cookie-reject">Reject all</button></div></div>
+<script>
+for (const [id, choice] of [['cookie-accept','accept'],['cookie-reject','reject']]) {
+  document.getElementById(id).addEventListener('click', async () => {
+    await fetch('/api/cookies',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({choice})});
+    document.getElementById('cookie-backdrop').remove();
+  });
+}
+</script>`;
 
 function cartCount(session) {
   return session.cart.reduce((n, i) => n + i.qty, 0);
@@ -93,8 +112,24 @@ const checkoutStart = (s) =>
     'Checkout',
     s,
     `<h1>Checkout</h1><p>${cartCount(s)} item(s), total ${tl(cartTotal(s))}</p>
+<h2>New customer</h2>
+<p>You do not need an account.</p>
 <button id="guest">Continue as guest</button>`,
     `document.getElementById('guest').addEventListener('click',()=>{location.href='/checkout/contact'});`,
+  );
+
+// The login-wall bug: checkout needs a sign-in and has no guest option. The form does not send anything.
+const loginWall = (s) =>
+  layout(
+    'Sign in',
+    s,
+    `<h1>Sign in to check out</h1>
+<form id="f">
+<label for="login-email">Email</label><input id="login-email" type="email" autocomplete="username" required>
+<label for="login-password">Password</label><input id="login-password" type="password" autocomplete="current-password" required>
+<button type="submit">Sign in</button>
+</form>`,
+    `document.getElementById('f').addEventListener('submit', (e) => e.preventDefault());`,
   );
 
 const contactPage = (s) =>
@@ -154,6 +189,7 @@ const paymentPage = (s) =>
     s,
     `<h1>Payment</h1>
 <iframe title="Secure card payment input" src="/pay/card-frame" height="170"></iframe>
+<label class="terms"><input type="checkbox" id="terms" required> I accept the terms</label>
 <div><button id="pay">Pay ${tl(cartTotal(s))}</button></div>
 <div id="challenge"></div>
 <div id="error" role="alert" hidden></div>`,
@@ -172,6 +208,7 @@ window.addEventListener('message', async (e) => {
 });
 document.getElementById('pay').addEventListener('click', async () => {
   err.hidden = true;
+  if (!document.getElementById('terms').checked) return showError('Accept the terms to continue.');
   const doc = document.querySelector('iframe[title="Secure card payment input"]').contentDocument;
   const val = (sel) => doc.querySelector(sel).value;
   const r = await fetch('/api/payments',{method:'POST',headers:{'content-type':'application/json'},
@@ -220,7 +257,7 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
   const sessions = new Map();
   const payments = new Map();
   let activeBugs = new Set(bugs);
-  const stats = { orders: 0, payments: 0, return_rejects: 0 };
+  const stats = { orders: 0, payments: 0, return_rejects: 0, cookieAccepted: 0, contacts: 0 };
   // Codes that send-code returned. Tests use them to check that results never show a code.
   const issuedOtps = [];
 
@@ -228,7 +265,15 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
     const sid = /(?:^|;\s*)sid=([A-Za-z0-9_-]+)/.exec(req.headers.cookie ?? '')?.[1];
     if (sid && sessions.has(sid)) return sessions.get(sid);
     const id = randomBytes(9).toString('base64url');
-    const s = { id, cart: [], contact: null, paid: false, otp: null };
+    const s = {
+      id,
+      cart: [],
+      contact: null,
+      paid: false,
+      otp: null,
+      cookieChoice: null,
+      cookieBanner: false,
+    };
     sessions.set(id, s);
     res.setHeader('set-cookie', `sid=${id}; Path=/; HttpOnly; SameSite=Lax`);
     return s;
@@ -261,6 +306,8 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
     const s = session(req, res);
     const p = url.pathname;
     const m = req.method ?? 'GET';
+    s.cookieBanner = activeBugs.has('cookie-banner') && !s.cookieChoice;
+    const loginRequired = activeBugs.has('login-wall');
 
     if (m === 'GET' && p === '/') return html(res, productPage(s));
     if (m === 'GET' && p === '/products') return html(res, listingPage(s));
@@ -276,6 +323,14 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
       }
       s.cart = [{ slug: PRODUCT.slug, qty }];
       return json(res, 201, { count: cartCount(s) });
+    }
+    if (m === 'POST' && p === '/api/cookies') {
+      const body = await readJson(req);
+      if (body.choice !== 'accept' && body.choice !== 'reject')
+        return json(res, 400, { error: 'invalid choice' });
+      s.cookieChoice = body.choice;
+      if (body.choice === 'accept') stats.cookieAccepted++;
+      return json(res, 200, { ok: true });
     }
     if (m === 'GET' && p === '/account/returns') return html(res, returnsPage(s));
     if (m === 'POST' && p === '/api/returns/reject') {
@@ -309,9 +364,12 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
       s.otp = null;
       return json(res, 200, { verified: true });
     }
-    if (m === 'GET' && p === '/checkout') return html(res, checkoutStart(s));
-    if (m === 'GET' && p === '/checkout/contact') return html(res, contactPage(s));
+    if (m === 'GET' && p === '/checkout') return html(res, loginRequired ? loginWall(s) : checkoutStart(s));
+    if (m === 'GET' && p === '/checkout/contact')
+      return html(res, loginRequired ? loginWall(s) : contactPage(s));
     if (m === 'POST' && p === '/api/checkout/contact') {
+      if (loginRequired) return json(res, 401, { error: 'sign in required' });
+      stats.contacts++;
       s.contact = await readJson(req);
       return json(res, 200, { ok: true });
     }
