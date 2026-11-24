@@ -324,4 +324,5 @@ Many test environments return an SMS or email code in the API response of the pa
 
 - The runner reads only responses that the page receives. It sends no request of its own. So the host guard and the allowlist stay the only network rules.
 - The value is never stored. The run record and the result show `[REDACTED]`.
+- `body_regex` reads a code from a body that is not JSON, for example the `text/x-component` body of a Next.js server action. Error messages name the regex and the count of checked responses. They never show the body.
 - A separate OTP service that the runner must call is out of scope. It needs a new safety review.

@@ -97,7 +97,9 @@ const contactPage = (s) =>
 });`,
   );
 
-const verifyPhonePage = (s) =>
+// textMode mimics a Next.js server action: the code is inside a text/x-component body,
+// and the first response of the click has no code.
+const verifyPhonePage = (s, textMode = false) =>
   layout(
     'Verify phone',
     s,
@@ -109,7 +111,12 @@ const verifyPhonePage = (s) =>
 <div id="error" role="alert" hidden></div>`,
     `const err = document.getElementById('error');
 document.getElementById('send').addEventListener('click', async () => {
-  await fetch('/api/otp/send-code',{method:'POST'});
+  if (${textMode}) {
+    await fetch('/api/otp/send-code-text?step=check',{method:'POST'});
+    await fetch('/api/otp/send-code-text',{method:'POST'});
+  } else {
+    await fetch('/api/otp/send-code',{method:'POST'});
+  }
 });
 document.getElementById('verify').addEventListener('click', async () => {
   const r = await fetch('/api/otp/verify',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:document.getElementById('code').value})});
@@ -247,6 +254,21 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
       return json(res, 201, { count: cartCount(s) });
     }
     if (m === 'GET' && p === '/account/verify-phone') return html(res, verifyPhonePage(s));
+    if (m === 'GET' && p === '/account/verify-phone-text') return html(res, verifyPhonePage(s, true));
+    if (m === 'POST' && p === '/api/otp/send-code-text') {
+      const head = '0:{"a":"$@1","f":""}\n';
+      if (url.searchParams.get('step') === 'check') {
+        return send(res, 200, 'text/x-component', `${head}1:{"success":true,"otpRequired":false}`);
+      }
+      s.otp = String(10000 + (randomBytes(4).readUInt32BE(0) % 90000));
+      issuedOtps.push(s.otp);
+      return send(
+        res,
+        200,
+        'text/x-component',
+        `${head}1:{"success":false,"otpRequired":true,"message":"OTP required (Kod: ${s.otp})"}`,
+      );
+    }
     if (m === 'POST' && p === '/api/otp/send-code') {
       s.otp = String(10000 + (randomBytes(4).readUInt32BE(0) % 90000));
       issuedOtps.push(s.otp);

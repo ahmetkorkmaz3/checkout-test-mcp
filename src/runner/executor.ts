@@ -372,22 +372,55 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   async function capture(c: Capture, timeout: number, sinceStep: number): Promise<void> {
     const deadline = Date.now() + timeout;
     const where = describeResponseMatch(c.from_response);
-    const find = () =>
-      responses.find((r) => r.stepIndex >= sinceStep && r.body && responseMatches(r, c.from_response));
-    let hit = find();
-    while (!hit) {
-      if (Date.now() >= deadline) {
-        throw new StepFailure(
-          'unexpected_response',
-          `Capture "${c.name}": response ${where} did not arrive within ${timeout} ms.`,
-          where,
-          'no matching response',
-        );
+    const source = c.body_regex !== undefined ? `body_regex /${c.body_regex}/` : `"${c.json_path}"`;
+    const checked = new Set<RecordedResponse>();
+    let value: string | undefined;
+    while (value === undefined) {
+      const hit = responses.find(
+        (r) => !checked.has(r) && r.stepIndex >= sinceStep && r.body && responseMatches(r, c.from_response),
+      );
+      if (!hit) {
+        if (Date.now() >= deadline) {
+          // A body_regex skips bodies that do not match, so name that case on its own.
+          const seen = checked.size > 0;
+          throw new StepFailure(
+            'unexpected_response',
+            seen
+              ? `Capture "${c.name}": no body of ${where} matched ${source} within ${timeout} ms.`
+              : `Capture "${c.name}": response ${where} did not arrive within ${timeout} ms.`,
+            seen ? source : where,
+            seen ? `${checked.size} response(s) without a match` : 'no matching response',
+          );
+        }
+        await sleep(100);
+        continue;
       }
-      await sleep(100);
-      hit = find();
+      checked.add(hit);
+      const text = await hit.body;
+      value = c.body_regex !== undefined ? fromRegex(c.body_regex, text) : fromJson(c, where, text);
     }
-    const text = await hit.body;
+    guardValue(value);
+    redactor.register(value);
+    if (c.pattern !== undefined && !new RegExp(c.pattern).test(value)) {
+      throw new StepFailure(
+        'assertion_failed',
+        `Capture "${c.name}": the value from ${source} does not match /${c.pattern}/.`,
+        `/${c.pattern}/`,
+        `${value.length} characters`,
+      );
+    }
+    captured.set(c.name, value);
+  }
+
+  /** First capture group of the regex in the body, or undefined to try the next response. */
+  function fromRegex(regex: string, text: string | null | undefined): string | undefined {
+    const group = text ? new RegExp(regex).exec(text)?.[1] : undefined;
+    return group === undefined || group === '' ? undefined : group;
+  }
+
+  /** The JSON value at the path. The first matching response decides, so a bad body fails the step. */
+  function fromJson(c: Capture, where: string, text: string | null | undefined): string {
+    const jsonPath = c.json_path ?? '';
     let json: unknown;
     try {
       json = JSON.parse(text ?? '');
@@ -399,28 +432,17 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
         text === null ? 'no body' : 'not JSON',
       );
     }
-    const raw = readJsonPath(json, c.json_path);
+    const raw = readJsonPath(json, jsonPath);
     if (typeof raw !== 'string' && typeof raw !== 'number') {
       // Name only the path and the type. The body can hold personal data.
       throw new StepFailure(
         'unexpected_response',
-        `Capture "${c.name}": "${c.json_path}" is not a string or number in the body of ${where}.`,
-        `${c.json_path}: string or number`,
+        `Capture "${c.name}": "${jsonPath}" is not a string or number in the body of ${where}.`,
+        `${jsonPath}: string or number`,
         raw === undefined ? 'missing' : Array.isArray(raw) ? 'array' : raw === null ? 'null' : typeof raw,
       );
     }
-    const value = String(raw);
-    guardValue(value);
-    redactor.register(value);
-    if (c.pattern !== undefined && !new RegExp(c.pattern).test(value)) {
-      throw new StepFailure(
-        'assertion_failed',
-        `Capture "${c.name}": the value at "${c.json_path}" does not match /${c.pattern}/.`,
-        `/${c.pattern}/`,
-        `${value.length} characters`,
-      );
-    }
-    captured.set(c.name, value);
+    return String(raw);
   }
 
   function withCaptured<T>(value: T): T {

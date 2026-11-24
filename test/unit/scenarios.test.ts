@@ -15,6 +15,7 @@ describe('shipped scenarios', () => {
       'card-3ds-challenge-fail',
       'card-success',
       'phone-otp-capture',
+      'phone-otp-capture-text',
       'saucedemo-guest-checkout',
     ]);
   });

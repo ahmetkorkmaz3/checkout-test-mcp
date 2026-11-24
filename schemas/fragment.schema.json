@@ -4213,9 +4213,13 @@
                   "description": "The response that holds the value. It must arrive during this step."
                 },
                 "json_path": {
+                  "description": "Dot path in the JSON body, for example \"data.otp_code\" or \"items.0.code\".",
                   "type": "string",
-                  "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$",
-                  "description": "Dot path in the JSON body, for example \"data.otp_code\" or \"items.0.code\"."
+                  "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$"
+                },
+                "body_regex": {
+                  "description": "Regex for a body that is not JSON, for example \"Kod: (\\d{5})\". The value is the first capture group.",
+                  "type": "string"
                 },
                 "pattern": {
                   "description": "Regex that the value must match, for example \"^\\d{5}$\".",
@@ -4224,8 +4228,7 @@
               },
               "required": [
                 "name",
-                "from_response",
-                "json_path"
+                "from_response"
               ],
               "additionalProperties": false
             }
