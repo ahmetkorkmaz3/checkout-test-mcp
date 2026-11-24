@@ -381,6 +381,12 @@ async function doSave(deps: ServerDeps, input: SaveInput): Promise<SaveResult> {
   }
 
   const root = input.kind === 'test_data' ? config.test_data_dir : config.authoring.dir;
+  // The config load checks that authoring.dir is inside scenario_dirs. A new setup can have no folder yet.
+  try {
+    await mkdir(root, { recursive: true });
+  } catch (err) {
+    throw fsRefused(input.path, err);
+  }
   const file = resolveInside(root, input.path, { pattern: YAML_PATH });
 
   checkInputSafety(input.yaml);

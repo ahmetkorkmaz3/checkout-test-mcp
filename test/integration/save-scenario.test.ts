@@ -41,7 +41,7 @@ function fakeExecute(input: ExecuteInput): Promise<ExecuteOutput> {
   });
 }
 
-type Authoring = 'on' | 'off' | 'test-data';
+type Authoring = 'on' | 'off' | 'test-data' | 'missing-dirs';
 
 async function setup(authoring: Authoring = 'on') {
   dir = await mkdtemp(path.join(os.tmpdir(), 'ctm-save-'));
@@ -52,7 +52,7 @@ async function setup(authoring: Authoring = 'on') {
     {
       runs_dir: path.join(dir, 'runs'),
       scenario_dirs: [path.join(dir, 'scenarios')],
-      test_data_dir: path.join(dir, 'test-data'),
+      test_data_dir: path.join(dir, authoring === 'missing-dirs' ? 'new-test-data' : 'test-data'),
       targets: {
         'demo-local': {
           profile: 'demo-store',
@@ -69,8 +69,8 @@ async function setup(authoring: Authoring = 'on') {
         ? {}
         : {
             authoring: {
-              dir: path.join(dir, 'scenarios'),
-              test_data_dir_writable: authoring === 'test-data',
+              dir: path.join(dir, authoring === 'missing-dirs' ? 'scenarios/authored' : 'scenarios'),
+              test_data_dir_writable: authoring === 'test-data' || authoring === 'missing-dirs',
             },
           }),
     },
@@ -615,6 +615,21 @@ steps:
     expect(ok.structuredContent).toMatchObject({ kind: 'test_data', written: true, fixes_applied: [] });
     // Test data gets no schema line.
     expect(await readFile(file(), 'utf8')).toBe('email: a@example.test\nfull_name: Test Guest\n');
+  });
+
+  it('creates a missing authoring.dir and test_data_dir on the first save', async () => {
+    await setup('missing-dirs');
+    expect(existsSync(scenarioFile('authored'))).toBe(false);
+    const res = await call('save_scenario', { kind: 'scenario', path: 'guest/new-one.yaml', yaml: VALID });
+    expect(res.isError, JSON.stringify(res.structuredContent)).toBeFalsy();
+    expect(existsSync(scenarioFile('authored/guest/new-one.yaml'))).toBe(true);
+    const data = await call('save_scenario', {
+      kind: 'test_data',
+      path: 'customers/new-guest.yaml',
+      yaml: 'email: a@example.test\n',
+    });
+    expect(data.isError, JSON.stringify(data.structuredContent)).toBeFalsy();
+    expect(existsSync(path.join(dir, 'new-test-data/customers/new-guest.yaml'))).toBe(true);
   });
 
   it('says that the file was saved when the validation run does not start', async () => {
