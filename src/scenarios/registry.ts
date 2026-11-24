@@ -86,7 +86,9 @@ export class ScenarioRegistry {
     };
     const byId = new Map<string, LoadedScenario>();
     const errors: string[] = [];
-    for (const dir of dirs) {
+    for (const dirArg of dirs) {
+      // Resolve once so listed paths and override keys compare equal.
+      const dir = path.resolve(dirArg);
       let files: string[];
       try {
         files = await listYamlFiles(dir);

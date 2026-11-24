@@ -148,6 +148,47 @@ describe('registry trial load and swap', () => {
     expect(reg.ids()).not.toContain('inc');
   });
 
+  const FRAG = (goto: string) =>
+    `schema_version: 1\nkind: fragment\nid: f\ndescription: d\nsteps:\n  - id: g\n    title: G\n    goto: ${goto}\n`;
+  const gotoOf = (reg: ScenarioRegistry, id: string) =>
+    (reg.get(id)?.scenario.steps[0] as { goto?: string } | undefined)?.goto;
+
+  it('a valid fragment override changes the including scenario and its hash', async () => {
+    const plain = await ScenarioRegistry.load([tmp]);
+    const reg = await ScenarioRegistry.load([tmp], { overrides: new Map([[fragFile, FRAG('/other')]]) });
+    expect(gotoOf(plain, 'inc')).toBe('/');
+    expect(gotoOf(reg, 'inc')).toBe('/other');
+    expect(reg.get('inc')?.hash).not.toBe(plain.get('inc')?.hash);
+  });
+
+  it('an including scenario loads a fragment that exists only in overrides', async () => {
+    const newFrag = path.join(tmp, 'frag', 'only.yaml');
+    const user = path.join(tmp, 'user.yaml');
+    const reg = await ScenarioRegistry.load([tmp], {
+      overrides: new Map([
+        [newFrag, FRAG('/new')],
+        [user, MINIMAL.replace('id: s', 'id: user').replace('goto: /', 'include: frag/only.yaml')],
+      ]),
+    });
+    expect(gotoOf(reg, 'user')).toBe('/new');
+    expect(existsSync(newFrag)).toBe(false);
+  });
+
+  it('a null fragment override makes the include fail', async () => {
+    await expect(ScenarioRegistry.load([tmp], { overrides: new Map([[fragFile, null]]) })).rejects.toThrow(
+      /does not exist/,
+    );
+  });
+
+  it('matches overrides when the dir is relative', async () => {
+    const rel = path.relative(process.cwd(), tmp);
+    const reg = await ScenarioRegistry.load([rel], {
+      overrides: new Map([[path.join(tmp, 'inc.yaml'), MINIMAL.replace('id: s', 'id: renamed')]]),
+    });
+    expect(reg.ids()).toContain('renamed');
+    expect(reg.ids()).not.toContain('inc');
+  });
+
   it('swap changes what an existing holder sees', async () => {
     const reg = await ScenarioRegistry.load([tmp]);
     reg.swap(ScenarioRegistry.fromLoaded([]));
