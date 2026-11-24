@@ -165,8 +165,18 @@ export type Condition = z.infer<typeof Condition>;
 const When = z.union([Condition, z.array(Condition).min(1)]);
 export type When = z.infer<typeof When>;
 
+/** True when the regex compiles and has at least one capture group. */
+function hasCaptureGroup(source: string): boolean {
+  try {
+    // An empty alternative always matches, so exec returns every group of the source.
+    return (new RegExp(`${source}|`).exec('')?.length ?? 0) > 1;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Reads one value from the JSON body of a response that arrives during the step.
+ * Reads one value from the body of a response that arrives during the step.
  * Later steps use it as {{captured.<name>}}. The value is redacted like a secret.
  */
 export const Capture = z
@@ -181,10 +191,22 @@ export const Capture = z
     json_path: z
       .string()
       .regex(/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/)
+      .optional()
       .describe('Dot path in the JSON body, for example "data.otp_code" or "items.0.code".'),
+    body_regex: z
+      .string()
+      .refine(hasCaptureGroup, 'body_regex must be a valid regex with at least one capture group.')
+      .optional()
+      .describe(
+        'Regex for a body that is not JSON, for example "Kod: (\\d{5})". The value is the first capture group.',
+      ),
     pattern: z.string().optional().describe('Regex that the value must match, for example "^\\d{5}$".'),
   })
-  .strict();
+  .strict()
+  .refine(
+    (c) => (c.json_path === undefined) !== (c.body_regex === undefined),
+    'A capture needs exactly one of: json_path, body_regex.',
+  );
 export type Capture = z.infer<typeof Capture>;
 
 const STEP_ACTION_KINDS = [...ACTION_KINDS, 'include'] as const;

@@ -142,6 +142,7 @@ describe('list_scenarios', () => {
       'card-3ds-challenge-fail',
       'card-success',
       'phone-otp-capture',
+      'phone-otp-capture-text',
     ]);
     expect(out.test_cards.length).toBeGreaterThan(3);
     expect(JSON.stringify(out)).not.toMatch(/4242424242424242/);

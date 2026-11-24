@@ -58,6 +58,27 @@ steps:
     goto: https://example.com/
 `;
 
+const NO_MATCH_SCENARIO = `
+schema_version: 1
+id: capture-regex-no-match
+title: body_regex that no body matches
+summary: Runner test. The capture step must fail with unexpected_response.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open
+    title: Open the page
+    goto: /account/verify-phone-text
+  - id: send_code
+    title: Send the code
+    click: { role: button, name: Send code }
+    timeout_ms: 3000
+    capture:
+      - name: otp_code
+        from_response: { method: POST, url: "**/api/otp/send-code-text**" }
+        body_regex: 'Code=(\\d{5})'
+`;
+
 beforeAll(async () => {
   dir = await mkdtemp(path.join(os.tmpdir(), 'ctm-e2e-'));
   store = await startDemoStore({ port: 0 });
@@ -74,6 +95,7 @@ beforeAll(async () => {
   const registry = ScenarioRegistry.fromLoaded([
     ...loaded.list(),
     parseScenario(BLOCKED_SCENARIO, 'inline.yaml'),
+    parseScenario(NO_MATCH_SCENARIO, 'inline-no-match.yaml'),
   ]);
   const runStore = new RunStore(config.runs_dir);
   await runStore.init();
@@ -169,6 +191,39 @@ describe('demo store', () => {
     for (const f of await readdir(runDir)) {
       if (f.endsWith('.json')) expect(await readFile(path.join(runDir, f), 'utf8')).not.toContain(code);
     }
+  });
+
+  it('phone-otp-capture-text reads the code from a text body with body_regex', async () => {
+    const before = store.issuedOtps.length;
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'phone-otp-capture-text',
+      idempotency_key: 'e2e-otp-capture-text-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict, JSON.stringify(out.failure)).toBe('passed');
+    expect(store.issuedOtps).toHaveLength(before + 1);
+    const code = store.issuedOtps.at(-1) as string;
+    expect(JSON.stringify(res)).not.toContain(code);
+    const runDir = path.join(dir, 'runs', out.run_id);
+    const { readdir, readFile } = await import('node:fs/promises');
+    for (const f of await readdir(runDir)) {
+      if (f.endsWith('.json')) expect(await readFile(path.join(runDir, f), 'utf8')).not.toContain(code);
+    }
+  });
+
+  it('fails a body_regex capture when no body matches, without showing the body', async () => {
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'capture-regex-no-match',
+      idempotency_key: 'e2e-capture-no-match-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict).toBe('failed');
+    expect(out.failure.step_id).toBe('send_code');
+    expect(out.failure.category).toBe('unexpected_response');
+    expect(out.failure.message).toMatch(/no body of .* matched body_regex/);
+    expect(JSON.stringify(out)).not.toContain('Kod:');
   });
 
   it('blocks navigation to a host outside the allowlist', async () => {

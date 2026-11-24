@@ -192,7 +192,7 @@ Note: `role: alert` has no accessible name from its text. Check alert text with 
 
 ### 6.3 Capture
 
-`capture` reads a value from the JSON body of a response that arrives during the step.
+`capture` reads a value from the body of a response that arrives during the step. The body can be JSON (`json_path`) or any text (`body_regex`).
 Later steps use the value as `{{captured.<name>}}`. Use it for a one-time code that a test environment returns in an API response, for example the SMS code in a `send-code` response.
 
 ```yaml
@@ -215,11 +215,27 @@ Later steps use the value as `{{captured.<name>}}`. Use it for a one-time code t
 | `name` | Snake_case name. Unique in the scenario. |
 | `from_response` | `{ method?, url, status? }`, the same shape as the `response` expectation. |
 | `json_path` | Dot path in the JSON body. Use numbers for list items, for example `items.0.code`. |
+| `body_regex` | Regex for a body that is not JSON. The value is the first capture group, for example `"Kod: (\\d{5})"`. |
 | `pattern` | Optional regex. The value must match it. |
+
+- A capture needs exactly one of `json_path` and `body_regex`. A `body_regex` must compile and have at least one capture group. The server checks this when it loads the scenario.
+- With `json_path`, the first matching response decides. With `body_regex`, the runner skips a matching response whose body has no match, and waits for the next one.
+- Use `body_regex` for a Next.js server action. Its body is `text/x-component`, not JSON:
+
+```yaml
+- id: submit_password
+  title: Submit the password and read the login code
+  click: { role: button, name: Devam Et, exact: true }
+  capture:
+    - name: login_otp
+      from_response: { method: POST, url: "**/giris**" }
+      body_regex: "Kod: (\\d{5})"
+      pattern: "^\\d{5}$"
+```
 
 - The runner reads the value after the actions and the `expect` list of the step. It waits up to the step timeout for the response.
 - Only responses that arrive during the step count. The response must come from an allowed host, because the host guard blocks all other requests.
-- The value must be a string or a number. The step fails with `unexpected_response` when the response does not arrive, the body is not JSON, or the path is missing. It fails with `assertion_failed` when the value does not match `pattern`.
+- The value must be a string or a number. The step fails with `unexpected_response` when the response does not arrive, the body is not JSON, the path is missing, or no body matches `body_regex`. It fails with `assertion_failed` when the value does not match `pattern`.
 - A captured value is a secret. Results, logs, and run files show `[REDACTED]` in its place. Values shorter than 4 characters are not redacted. Screenshots mask fields with `autocomplete="one-time-code"`.
 - A value that looks like a card number outside the test card registry stops the run with verdict `blocked`.
 - `{{captured.<name>}}` works only in a step after the capture step, and in outcome checks. The server checks this when it loads the scenario.

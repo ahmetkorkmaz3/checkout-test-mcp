@@ -97,6 +97,34 @@ describe('capture at load time', () => {
   });
 });
 
+describe('capture body_regex at load time', () => {
+  const REGEX = SEND.replace('json_path: data.code', 'body_regex: "Kod: (\\\\d{5})"');
+
+  it('accepts body_regex with a capture group', () => {
+    const { scenario: s } = load(scenario(`${REGEX}\n${FILL}`));
+    expect(s.steps[0]?.capture?.[0]?.body_regex).toBe('Kod: (\\d{5})');
+  });
+
+  it('refuses a capture with both json_path and body_regex', () => {
+    const both = `${SEND}\n        body_regex: "(x)"`;
+    expect(() => load(scenario(both))).toThrow(/exactly one of: json_path, body_regex/);
+  });
+
+  it('refuses a capture with neither json_path nor body_regex', () => {
+    expect(() => load(scenario(SEND.replace('        json_path: data.code', '')))).toThrow(
+      /exactly one of: json_path, body_regex/,
+    );
+  });
+
+  it('refuses body_regex without a capture group or with a syntax error', () => {
+    for (const bad of ['"Kod: \\\\d{5}"', '"Kod: (?:\\\\d{5})"', '"Kod: ("']) {
+      expect(() => load(scenario(SEND.replace('json_path: data.code', `body_regex: ${bad}`)))).toThrow(
+        /at least one capture group/,
+      );
+    }
+  });
+});
+
 describe('capture helpers', () => {
   it('reads dot paths with array indexes', () => {
     const json = { data: { otp_code: '12345', items: [{ code: 7 }] } };

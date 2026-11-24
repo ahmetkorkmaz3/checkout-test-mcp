@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=../../schemas/scenario.schema.json
+schema_version: 1
+id: phone-otp-capture-text
+title: Verify the phone with the SMS code from a text response body
+summary: >-
+  Asks for an SMS code, reads the code from a response body that is not JSON,
+  and fills it in. Expects "Phone verified". Shows how to use "capture" with
+  body_regex, for example for a Next.js server action response.
+tags: [otp, capture]
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open
+    title: Open the phone check page
+    goto: /account/verify-phone-text
+    expect:
+      - visible: { role: heading, name: Verify your phone }
+  - id: send_code
+    title: Ask for an SMS code and read it from the response text
+    click: { role: button, name: Send code }
+    capture:
+      # Two responses match the URL. Only the second one has the code, so the first one is skipped.
+      - name: otp_code
+        from_response: { method: POST, url: "**/api/otp/send-code-text**", status: 2xx }
+        body_regex: "Kod: (\\d{5})"
+        pattern: "^\\d{5}$"
+    on_failure:
+      hint: >-
+        No send-code response has "Kod: NNNNN" in its body.
+        Check if the test environment still returns the code.
+  - id: fill_code
+    title: Fill the code and verify
+    fill: { label: Verification code }
+    value: "{{captured.otp_code}}"
+    then:
+      - click: { role: button, name: Verify }
+    expect:
+      - response: { method: POST, url: "**/api/otp/verify", status: 200 }
+outcome:
+  - id: phone_verified
+    visible: { test_id: phone-verified }
