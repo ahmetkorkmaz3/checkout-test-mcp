@@ -261,3 +261,36 @@ Outcome checks run after the last step. Each one has an `id`, one expectation, a
 - Templates are plain substitution. No expressions, no code.
 - An unknown token stops the run before the browser starts.
 - Secret and card values are redacted in logs and results.
+
+## 9. House rules
+
+`save_scenario` checks every scenario and fragment against these rules. An error refuses the save. A warning does not. The result lists each issue with its `rule`, `path`, `message`, and `fix`.
+
+| Rule id | Severity | What it checks |
+|---|---|---|
+| `param-described` | error | Every param has a `description`, and a `default` or `required: true`. Every fragment arg has a `description`. |
+| `outcome-proves-order` | error | `expected_outcome: order_placed` needs one `response` or `url` outcome check, and one `visible` or `text` outcome check. A check with `when` does not count. |
+| `outcome-proves-no-success` | error | `payment_declined` and `validation_error` need one `hidden` or `no_response` outcome check without `when`. |
+| `no-literal-personal-data` | error | No literal email, phone number, or password in a `fill` value, a `fill_form` value, a param default, or a `with` value. A value with `{{` is a template, not a literal. Use `{{secrets.<name>}}`, `{{data.<name>.<field>}}`, or `{{params.<name>}}`. |
+| `id-format` | error | The scenario id is kebab-case. Step ids are snake_case. Two underscores in a row are reserved for expanded fragment steps. |
+| `prefer-semantic-locator` | warning | A `css` locator. Use role, test id, label, placeholder, or text. |
+| `payment-step-hint` | warning | A step whose title or locator has a pay word, such as "pay", "place order", or "öde", and no `on_failure.hint`. |
+| `url-glob-query` | warning | A `url.matches` glob that ends with `**`. The glob also matches a query string such as `?return=/sepet`. Use `regex` with `^https?://[^/]+/path/?(\?.*)?$`. |
+
+Rules run on the scenario file as written. They also run on the steps that come from fragments. The issue `path` of a fragment step is the `include` step in the scenario file.
+
+The id of a scenario must be unique in all scenario folders. The trial load of `save_scenario` checks this.
+
+### 9.1 Automatic fixes
+
+`save_scenario` adds these when they are missing, and keeps comments and key order:
+
+1. The line `# yaml-language-server: $schema=<path>` at the top of the file.
+2. `schema_version: 1` as the first key.
+
+### 9.2 Test data files
+
+| Rule id | Severity | What it checks |
+|---|---|---|
+| `test-data-email-domain` | error | Every email uses a reserved domain: `example.test`, `example.com`, `example.org`, `example.net`, or a domain that ends in `.invalid` or `.test`. |
+| `test-data-card` | error | No card-like number. The `path` of these issues is `line N`. The message never repeats the value. |
