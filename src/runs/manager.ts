@@ -12,7 +12,7 @@ import { looksLikeSecret, Redactor } from '../safety/secrets.js';
 import { conditionsPass } from '../scenarios/expand.js';
 import { resolveParams } from '../scenarios/params.js';
 import type { LoadedScenario, ScenarioRegistry } from '../scenarios/registry.js';
-import { collectTokens, renderDeep, TemplateError } from '../scenarios/template.js';
+import { capturedPlaceholders, collectTokens, renderDeep, TemplateError } from '../scenarios/template.js';
 import type { ParamValue } from '../schemas/common.js';
 import type { ResolvedConfig, TargetConfig } from '../schemas/config.js';
 import { RunOptions, type RunRecord } from '../schemas/run.js';
@@ -431,6 +431,8 @@ export class RunManager {
       cards: params.cards,
       ...(cardList.length === 1 ? { card: cardList[0] } : {}),
       secrets,
+      // Only steps that run can capture. A token for a capture in a skipped step stops the run here.
+      captured: capturedPlaceholders(activeSteps.flatMap((st) => (st.capture ?? []).map((c) => c.name))),
     };
 
     let steps: Step[];

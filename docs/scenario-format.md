@@ -16,6 +16,7 @@ Examples:
 
 - [card-3ds-challenge-fail.yaml](../scenarios/demo-store/card-3ds-challenge-fail.yaml): a scenario that uses three fragments.
 - [fragments/add-to-cart.yaml](../scenarios/demo-store/fragments/add-to-cart.yaml): a fragment with args and a `when` condition.
+- [phone-otp-capture.yaml](../scenarios/demo-store/phone-otp-capture.yaml): reads an SMS code from a response with `capture`.
 
 ## 1. Files and folders
 
@@ -82,6 +83,7 @@ Optional keys for an action step:
 - `timeout_ms`: timeout for this step. `options.timeout_multiplier` scales it.
 - `on_failure.hint`: author text. The result shows it in `failure.likely_causes`.
 - `when`: run the step only when the condition passes (section 5.3).
+- `capture`: read values from responses of this step (section 6.3).
 
 ## 5. Reuse: include and when
 
@@ -188,6 +190,42 @@ Every expectation can have `timeout_ms`.
 
 Note: `role: alert` has no accessible name from its text. Check alert text with `text: { role: alert, matches: ... }`.
 
+### 6.3 Capture
+
+`capture` reads a value from the JSON body of a response that arrives during the step.
+Later steps use the value as `{{captured.<name>}}`. Use it for a one-time code that a test environment returns in an API response, for example the SMS code in a `send-code` response.
+
+```yaml
+- id: send_code
+  title: Ask for an SMS code
+  click: { role: button, name: Kod Gönder }
+  capture:
+    - name: otp_code
+      from_response: { method: POST, url: "**/otp/send-code", status: 2xx }
+      json_path: data.otp_code
+      pattern: "^\\d{5}$"
+- id: fill_code
+  title: Fill the code
+  fill: { label: Doğrulama kodu }
+  value: "{{captured.otp_code}}"
+```
+
+| Key | Meaning |
+|---|---|
+| `name` | Snake_case name. Unique in the scenario. |
+| `from_response` | `{ method?, url, status? }`, the same shape as the `response` expectation. |
+| `json_path` | Dot path in the JSON body. Use numbers for list items, for example `items.0.code`. |
+| `pattern` | Optional regex. The value must match it. |
+
+- The runner reads the value after the actions and the `expect` list of the step. It waits up to the step timeout for the response.
+- Only responses that arrive during the step count. The response must come from an allowed host, because the host guard blocks all other requests.
+- The value must be a string or a number. The step fails with `unexpected_response` when the response does not arrive, the body is not JSON, or the path is missing. It fails with `assertion_failed` when the value does not match `pattern`.
+- A captured value is a secret. Results, logs, and run files show `[REDACTED]` in its place. Values shorter than 4 characters are not redacted. Screenshots mask fields with `autocomplete="one-time-code"`.
+- A value that looks like a card number outside the test card registry stops the run with verdict `blocked`.
+- `{{captured.<name>}}` works only in a step after the capture step, and in outcome checks. The server checks this when it loads the scenario.
+- When a `when` condition skips the capture step, a later step that uses the value stops the run before the browser starts (`INVALID_PARAMS`).
+- The runner never sends its own requests. `capture` only reads responses that the page receives.
+
 ## 7. Outcome checks
 
 Outcome checks run after the last step. Each one has an `id`, one expectation, and an optional `when`. Each check gets its own result, also when an earlier check fails.
@@ -202,6 +240,7 @@ Outcome checks run after the last step. Each one has an `id`, one expectation, a
 | `{{cards.<param>.number}}` | The test card of a named param. |
 | `{{secrets.<name>}}` | Env var mapped in the target `secrets` config. |
 | `{{args.<name>}}` | Fragment arg. Only inside a fragment. |
+| `{{captured.<name>}}` | Value from a `capture` of an earlier step. Filled in during the run. |
 
 - Templates are plain substitution. No expressions, no code.
 - An unknown token stops the run before the browser starts.

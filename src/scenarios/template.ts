@@ -49,3 +49,52 @@ export function collectTokens(value: unknown, out = new Set<string>()): Set<stri
   }
   return out;
 }
+
+const CAPTURED_TOKEN = /\{\{\s*captured\.([a-z][a-z0-9_]*)\s*\}\}/g;
+
+/** Names of {{captured.<name>}} tokens in a value. */
+export function collectCapturedNames(value: unknown): Set<string> {
+  const out = new Set<string>();
+  for (const t of collectTokens(value)) if (t.startsWith('captured.')) out.add(t.slice('captured.'.length));
+  return out;
+}
+
+/**
+ * Keeps {{captured.<name>}} tokens as they are. The runner fills them in during the run,
+ * because the values exist only after an earlier step reads them from a response.
+ */
+export function capturedPlaceholders(names: Iterable<string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const n of names) out[n] = `{{captured.${n}}}`;
+  return out;
+}
+
+/** Replaces only {{captured.<name>}} tokens. Other text stays as it is. */
+export function renderCaptured<T>(value: T, captured: ReadonlyMap<string, string>): T {
+  if (typeof value === 'string') {
+    return value.replace(CAPTURED_TOKEN, (_m, name: string) => {
+      const v = captured.get(name);
+      if (v === undefined) throw new TemplateError(`No value captured for "{{captured.${name}}}".`);
+      return v;
+    }) as T;
+  }
+  if (Array.isArray(value)) return value.map((v) => renderCaptured(v, captured)) as T;
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = renderCaptured(v, captured);
+    return out as T;
+  }
+  return value;
+}
+
+/** Reads a dot path such as "data.items.0.code" from parsed JSON. */
+export function readJsonPath(json: unknown, dotted: string): unknown {
+  let cur: unknown = json;
+  for (const part of dotted.split('.')) {
+    if (Array.isArray(cur) && /^\d+$/.test(part)) cur = cur[Number(part)];
+    else if (cur !== null && typeof cur === 'object' && part in cur)
+      cur = (cur as Record<string, unknown>)[part];
+    else return undefined;
+  }
+  return cur;
+}

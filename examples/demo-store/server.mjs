@@ -2,6 +2,8 @@
 // Small demo store for checkout-test-mcp. No dependencies.
 // It has one product, a guest checkout, and a mock card provider with a 3D Secure challenge.
 // The mock provider decides by the last 4 digits of the card, the same way Stripe test cards behave.
+// It also has a phone check with an SMS code. Like many test environments, send-code returns the code
+// in its response, so a scenario can read it with "capture".
 // Fault injection for demos: start with DEMO_STORE_BUGS=skip-3ds (comma-separated) or call setBugs().
 
 import { randomBytes } from 'node:crypto';
@@ -95,6 +97,27 @@ const contactPage = (s) =>
 });`,
   );
 
+const verifyPhonePage = (s) =>
+  layout(
+    'Verify phone',
+    s,
+    `<h1>Verify your phone</h1>
+<button id="send">Send code</button>
+<label for="code">Verification code</label><input id="code" inputmode="numeric" autocomplete="one-time-code">
+<button id="verify">Verify</button>
+<p id="ok" data-testid="phone-verified" hidden>Phone verified</p>
+<div id="error" role="alert" hidden></div>`,
+    `const err = document.getElementById('error');
+document.getElementById('send').addEventListener('click', async () => {
+  await fetch('/api/otp/send-code',{method:'POST'});
+});
+document.getElementById('verify').addEventListener('click', async () => {
+  const r = await fetch('/api/otp/verify',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:document.getElementById('code').value})});
+  if (r.ok) { document.getElementById('ok').hidden = false; err.hidden = true; }
+  else { err.textContent = 'The code is wrong.'; err.hidden = false; }
+});`,
+  );
+
 const paymentPage = (s) =>
   layout(
     'Payment',
@@ -168,12 +191,14 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
   const payments = new Map();
   let activeBugs = new Set(bugs);
   const stats = { orders: 0, payments: 0 };
+  // Codes that send-code returned. Tests use them to check that results never show a code.
+  const issuedOtps = [];
 
   function session(req, res) {
     const sid = /(?:^|;\s*)sid=([A-Za-z0-9_-]+)/.exec(req.headers.cookie ?? '')?.[1];
     if (sid && sessions.has(sid)) return sessions.get(sid);
     const id = randomBytes(9).toString('base64url');
-    const s = { id, cart: [], contact: null, paid: false };
+    const s = { id, cart: [], contact: null, paid: false, otp: null };
     sessions.set(id, s);
     res.setHeader('set-cookie', `sid=${id}; Path=/; HttpOnly; SameSite=Lax`);
     return s;
@@ -220,6 +245,18 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
       }
       s.cart = [{ slug: PRODUCT.slug, qty }];
       return json(res, 201, { count: cartCount(s) });
+    }
+    if (m === 'GET' && p === '/account/verify-phone') return html(res, verifyPhonePage(s));
+    if (m === 'POST' && p === '/api/otp/send-code') {
+      s.otp = String(10000 + (randomBytes(4).readUInt32BE(0) % 90000));
+      issuedOtps.push(s.otp);
+      return json(res, 200, { data: { otp_code: s.otp, expires_in: 180 } });
+    }
+    if (m === 'POST' && p === '/api/otp/verify') {
+      const body = await readJson(req);
+      if (!s.otp || String(body.code) !== s.otp) return json(res, 422, { error: 'wrong code' });
+      s.otp = null;
+      return json(res, 200, { verified: true });
     }
     if (m === 'GET' && p === '/checkout') return html(res, checkoutStart(s));
     if (m === 'GET' && p === '/checkout/contact') return html(res, contactPage(s));
@@ -286,6 +323,7 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
         url: `http://localhost:${actualPort}`,
         port: actualPort,
         stats,
+        issuedOtps,
         setBugs: (list) => {
           activeBugs = new Set(list);
         },

@@ -11,7 +11,12 @@ const ROOT = path.resolve(import.meta.dirname, '../..');
 describe('shipped scenarios', () => {
   it('all load and validate', async () => {
     const reg = await ScenarioRegistry.load([path.join(ROOT, 'scenarios')]);
-    expect(reg.ids().sort()).toEqual(['card-3ds-challenge-fail', 'card-success', 'saucedemo-guest-checkout']);
+    expect(reg.ids().sort()).toEqual([
+      'card-3ds-challenge-fail',
+      'card-success',
+      'phone-otp-capture',
+      'saucedemo-guest-checkout',
+    ]);
   });
 });
 

@@ -224,6 +224,7 @@ A locator maps one-to-one to a Playwright locator. Prefer the top rows.
 - Templates are plain substitution. No expressions, no code.
 - `{{secrets.name}}` resolves through the target's `secrets` map to an env var. A missing env var stops the run before the browser starts.
 - All secret and card values are registered for redaction before the run starts.
+- `{{captured.name}}` is a value that a step reads from a response during the run (`capture`). It is filled in during the run and redacted like a secret. See [scenario-format.md](scenario-format.md) section 6.3.
 
 ## 5. Run lifecycle
 
@@ -267,7 +268,7 @@ The server refuses before it starts a browser. The browser layer enforces the sa
 
    A host in `production_hosts` is always refused. This check runs at config load and again for each run.
 3. **Card guard.** Card values come only from `src/safety/test-cards.ts`. Each entry has the provider, the published source URL, and the behaviour. Before each `fill`, the runner checks the value. A Luhn-valid 13 to 19 digit number that is not in the registry stops the run with verdict `blocked`. The same check runs on all tool arguments.
-4. **Secrets.** Secrets come from env vars named in the config. Tool arguments that look like secrets (`sk_live_`, `Bearer `, `password=`, a value equal to a known secret) are refused with `SECRET_IN_ARGUMENTS`. The logger and result writer redact all registered secret and card values. Screenshots use Playwright `mask` on password and card fields.
+4. **Secrets.** Secrets come from env vars named in the config. Tool arguments that look like secrets (`sk_live_`, `Bearer `, `password=`, a value equal to a known secret) are refused with `SECRET_IN_ARGUMENTS`. The logger and result writer redact all registered secret and card values. Screenshots use Playwright `mask` on password, card, and one-time code fields. A value read by `capture` is registered for redaction as soon as the runner reads it.
 5. **Stdout is the protocol.** All logs go to stderr. A `console.log` in `src/` is a lint error.
 
 ## 8. Example scenarios to ship
@@ -316,3 +317,11 @@ Format details that the design did not fix:
 - `role=alert` has no accessible name from its content. Check alert text with `text: { role: alert, matches: ... }`.
 - Target config has `test_id_attribute` (for example `data-test` for Sauce Demo), `http_credentials` (basic auth from secrets), and `locale`.
 - Screenshot `uri` values are `file://` URLs. MCP resource URIs are not registered in v0.1.
+
+### 10.1 One-time codes (2026-11-24)
+
+Many test environments return an SMS or email code in the API response of the page, for example `send-code`. A step reads it with `capture` and a later step fills it in.
+
+- The runner reads only responses that the page receives. It sends no request of its own. So the host guard and the allowlist stay the only network rules.
+- The value is never stored. The run record and the result show `[REDACTED]`.
+- A separate OTP service that the runner must call is out of scope. It needs a new safety review.

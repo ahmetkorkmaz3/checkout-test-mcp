@@ -4165,6 +4165,71 @@
             ],
             "additionalProperties": false
           },
+          "capture": {
+            "description": "Values to read from responses of this step, after the actions and expectations.",
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]*$",
+                  "description": "Name of the value. Later steps use {{captured.<name>}}."
+                },
+                "from_response": {
+                  "type": "object",
+                  "properties": {
+                    "method": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string",
+                      "description": "URL glob. \"*\" matches inside one path segment, \"**\" matches across segments."
+                    },
+                    "status": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 100,
+                          "maximum": 599
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "2xx",
+                            "3xx",
+                            "4xx",
+                            "5xx"
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "url"
+                  ],
+                  "additionalProperties": false,
+                  "description": "The response that holds the value. It must arrive during this step."
+                },
+                "json_path": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$",
+                  "description": "Dot path in the JSON body, for example \"data.otp_code\" or \"items.0.code\"."
+                },
+                "pattern": {
+                  "description": "Regex that the value must match, for example \"^\\d{5}$\".",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "from_response",
+                "json_path"
+              ],
+              "additionalProperties": false
+            }
+          },
           "when": {
             "anyOf": [
               {

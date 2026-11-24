@@ -103,6 +103,55 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+const CAPTURE_SCENARIO = `
+schema_version: 1
+id: member-otp
+title: Member OTP
+summary: Reads the SMS code only for members.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+params:
+  customer_type: { type: enum, values: [guest, member], default: guest, description: Customer type. }
+steps:
+  - id: send
+    title: Send code
+    when: { param: customer_type, equals: member }
+    click: { role: button, name: Send }
+    capture:
+      - name: otp
+        from_response: { url: "**/send-code" }
+        json_path: data.code
+  - id: fill
+    title: Fill code
+    fill: { label: Code }
+    value: "{{captured.otp}}"
+`;
+
+describe('capture in a run', () => {
+  it('refuses a run that uses a capture from a skipped step', async () => {
+    writeFileSync(path.join(dir, 'scenarios/member-otp.yaml'), CAPTURE_SCENARIO);
+    const m = await manager({});
+    await expect(
+      m.start({ target: 'local', scenario_id: 'member-otp', params: {}, idempotency_key: 'cap-guest-01' }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' } satisfies Partial<ToolError>);
+    expect(executions).toHaveLength(0);
+  });
+
+  it('passes the captured token to the runner unchanged', async () => {
+    writeFileSync(path.join(dir, 'scenarios/member-otp.yaml'), CAPTURE_SCENARIO);
+    const m = await manager({});
+    await m.start({
+      target: 'local',
+      scenario_id: 'member-otp',
+      params: { customer_type: 'member' },
+      idempotency_key: 'cap-member-01',
+    });
+    await vi.waitFor(() => expect(executions).toHaveLength(1));
+    expect(executions[0]?.steps[1]?.value).toBe('{{captured.otp}}');
+    await m.idle();
+  });
+});
+
 describe('when filter in a run', () => {
   it('runs only guest steps for a guest and needs no member secret', async () => {
     const m = await manager({});

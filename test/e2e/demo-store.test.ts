@@ -23,6 +23,7 @@ let store: {
   setBugs(b: string[]): void;
   close(): Promise<void>;
   stats: { orders: number };
+  issuedOtps: string[];
 };
 let client: Client;
 
@@ -148,6 +149,25 @@ describe('demo store', () => {
       });
     } finally {
       store.setBugs([]);
+    }
+  });
+
+  it('phone-otp-capture reads the SMS code from the response and never shows it', async () => {
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'phone-otp-capture',
+      idempotency_key: 'e2e-otp-capture-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict, JSON.stringify(out.failure)).toBe('passed');
+    expect(out.outcome_checks).toEqual([{ id: 'phone_verified', status: 'passed' }]);
+    expect(store.issuedOtps).toHaveLength(1);
+    const code = store.issuedOtps[0] as string;
+    expect(JSON.stringify(res)).not.toContain(code);
+    const runDir = path.join(dir, 'runs', out.run_id);
+    const { readdir, readFile } = await import('node:fs/promises');
+    for (const f of await readdir(runDir)) {
+      if (f.endsWith('.json')) expect(await readFile(path.join(runDir, f), 'utf8')).not.toContain(code);
     }
   });
 
