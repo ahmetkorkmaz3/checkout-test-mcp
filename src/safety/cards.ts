@@ -50,27 +50,42 @@ export interface CardSpan {
 // Length 16 first: it is the most common card length, so it wins over a window that eats a neighbour digit.
 const LENGTH_ORDER = [16, 15, 19, 18, 17, 14, 13];
 
+export interface CardSearchOptions {
+  /**
+   * Also try offset windows inside unbroken digit runs longer than 19 digits.
+   * Use it for text that only gets redacted. Do not use it for guards: it flags ordinary long ids.
+   */
+  longRuns?: boolean;
+}
+
+// The pre-window rule: the first 13 to 19 digits of a run. Kept so the guards never catch less than before.
+const WHOLE_CANDIDATE = /\d(?:[ -]?\d){12,18}/g;
+
 /**
- * Finds Luhn-valid 13 to 19 digit windows inside each digit run. It slides a window, so digits next to a card
- * cannot hide it. It tries windows on digit-group boundaries first, then at any offset (fail closed).
+ * Finds Luhn-valid 13 to 19 digit card numbers in text. Digits next to a card cannot hide it.
+ * It tries windows on group boundaries (card shapes first, then any shape), then the old whole-candidate rule,
+ * then offset windows inside one unbroken digit run.
  */
-export function findCardSpans(text: string): CardSpan[] {
+export function findCardSpans(text: string, opts: CardSearchOptions = {}): CardSpan[] {
   const spans: CardSpan[] = [];
   for (const m of text.matchAll(CARD_CANDIDATE)) {
     const run = splitDigitRun(m[0], m.index);
     const n = run.digits.length;
     const starts = run.groupStart.flatMap((g, idx) => (g ? [idx] : []));
-    const singleGroup = starts.length === 1;
+    const offsetOk = starts.length === 1 && (n <= 19 || opts.longRuns === true);
     let i = 0;
     while (n - i >= 13) {
       let found: [number, number] | undefined;
-      for (const len of LENGTH_ORDER) {
-        for (let s = i; s + len <= n && !found; s++) {
-          const aligned = run.groupStart[s] === true && (s + len === n || run.groupStart[s + len] === true);
-          // Windows at any offset only inside one unbroken digit run. Else normal grouped numbers match by chance.
-          if (!aligned && !singleGroup) continue;
-          if (aligned && !hasCardShape(starts, s, s + len, n)) continue;
-          if (luhnValid(run.digits.slice(s, s + len))) found = [s, len];
+      for (const pass of ['shaped', 'aligned', 'offset'] as const) {
+        if (pass === 'offset' && !offsetOk) continue;
+        for (const len of LENGTH_ORDER) {
+          for (let s = i; s + len <= n && !found; s++) {
+            const aligned = run.groupStart[s] === true && (s + len === n || run.groupStart[s + len] === true);
+            if (pass !== 'offset' && !aligned) continue;
+            if (pass === 'shaped' && !hasCardShape(starts, s, s + len, n)) continue;
+            if (luhnValid(run.digits.slice(s, s + len))) found = [s, len];
+          }
+          if (found) break;
         }
         if (found) break;
       }
@@ -84,7 +99,18 @@ export function findCardSpans(text: string): CardSpan[] {
       i = s + len;
     }
   }
-  return spans;
+  for (const m of text.matchAll(WHOLE_CANDIDATE)) {
+    const digits = m[0].replace(/[ -]/g, '');
+    if (luhnValid(digits)) spans.push({ start: m.index, end: m.index + m[0].length, digits });
+  }
+  // Sort, then drop spans that overlap an earlier one, so a redactor can cut the text safely.
+  spans.sort((x, y) => x.start - y.start || y.end - x.end);
+  const kept: CardSpan[] = [];
+  for (const span of spans) {
+    const last = kept[kept.length - 1];
+    if (!last || span.start >= last.end) kept.push(span);
+  }
+  return kept;
 }
 
 /** Card numbers print as one group, 4-4-4-4 (last group 1 to 4 digits), or 4-6-5 (Amex). */

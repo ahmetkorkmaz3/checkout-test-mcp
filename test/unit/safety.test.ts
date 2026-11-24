@@ -250,7 +250,29 @@ describe('resolveInside', () => {
   });
 });
 
+describe('card guard keeps every shape', () => {
+  it.each([
+    '41111111 11111111',
+    '42424242 42424242',
+    '3056 930902 5904',
+    '4242 4242 4242 4242',
+    '4242-4242-4242-4242',
+    '4242424242424242',
+    'card 4242 4242 4242 4242 2026',
+    'Order 1 4242 4242 4242 4242',
+  ])('flags %s', (text) => {
+    expect(containsCardNumber(text)).toBe(true);
+    expect(findCardLikeNumbers(text).length).toBeGreaterThan(0);
+  });
+  it.each(['20261124123045123456789', '123456789012345678901234'])('accepts the long id %s', (text) => {
+    expect(containsCardNumber(text)).toBe(false);
+  });
+});
+
 describe('redactText', () => {
+  it.each(['41111111 11111111', '42424242 42424242', '3056 930902 5904'])('redacts card shape %s', (text) => {
+    expect(redactText(text)).toBe('<card>');
+  });
   it('redacts personal data and tokens but keeps product text', () => {
     expect(redactText('Mail ayse@shop.com, tel 0555 000 00 00, Tabak 19 cm')).toBe(
       'Mail <email>, tel <phone>, Tabak 19 cm',
