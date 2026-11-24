@@ -483,3 +483,45 @@ describe('secret keywords match the secret patterns', () => {
     );
   });
 });
+
+describe('secret words in free text', () => {
+  const param = (name: string, def: string, description: string) =>
+    check(
+      scenario({ params: `  ${name}: { type: string, default: ${def}, description: "${description}" }` }),
+    );
+  const fillLabel = (label: string) =>
+    check(scenario({ steps: `  - { id: s1, title: S, fill: { label: "${label}" }, value: SAVE10 }` }));
+
+  it.each([['Discount token.'], ['Gift card token'], ['Secret Santa offer']])(
+    'allows a literal default with the description %s',
+    (description) => {
+      expect(rules(param('code', 'SAVE10', description))).not.toContain('no-literal-personal-data');
+    },
+  );
+
+  it('allows a literal fill value for a "Promo token" label', () => {
+    expect(rules(fillLabel('Promo token'))).not.toContain('no-literal-personal-data');
+  });
+
+  it.each([['Account password'], ['Your API key'], ['Store secret key'], ['Yeni şifre'], ['PAROLA']])(
+    'refuses a literal default with the description %s',
+    (description) => {
+      expect(rules(param('code', 'SAVE10', description))).toContain('no-literal-personal-data');
+    },
+  );
+
+  it('refuses a literal fill value for a "Password" label', () => {
+    expect(rules(fillLabel('Password'))).toContain('no-literal-personal-data');
+  });
+
+  it('refuses a literal default of a token param name', () => {
+    expect(rules(param('token', 'SAVE10', 'Discount code.'))).toContain('no-literal-personal-data');
+  });
+
+  it('refuses a literal fill value for a test id or css with a keyword', () => {
+    const steps = (loc: string) =>
+      check(scenario({ steps: `  - { id: s1, title: S, fill: ${loc}, value: SAVE10 }` }));
+    expect(rules(steps('{ test_id: promo-token }'))).toContain('no-literal-personal-data');
+    expect(rules(steps(`{ css: "input[name='api_key']" }`))).toContain('no-literal-personal-data');
+  });
+});

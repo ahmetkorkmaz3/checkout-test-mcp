@@ -151,6 +151,26 @@ describe('secrets', () => {
     expect(looksLikeSecret('pr-4812-3ds-fail')).toBe(false);
   });
 
+  it('matches Turkish keywords at the start and after a space', () => {
+    expect(looksLikeSecret('şifre: x')).toBe(true);
+    expect(looksLikeSecret('yeni şifre: x')).toBe(true);
+    expect(looksLikeSecret('ŞİFRE: x')).toBe(true);
+    expect(looksLikeSecret('parola=x')).toBe(true);
+    expect(looksLikeSecret('sifremi unuttum')).toBe(false);
+    expect(looksLikeSecret('sifremi: unuttum')).toBe(false);
+  });
+
+  it('keeps the ASCII keyword boundaries', () => {
+    for (const k of ['password', 'passwd', 'pwd', 'secret', 'api_key', 'api-key', 'apikey', 'token']) {
+      expect(looksLikeSecret(`${k}: x`)).toBe(true);
+      expect(looksLikeSecret(`x-${k}=y`)).toBe(true);
+      expect(looksLikeSecret(`${k.toUpperCase()} : y`)).toBe(true);
+    }
+    // An underscore or a letter before the keyword is part of another word, as with \b before.
+    expect(looksLikeSecret('csrf_token: x')).toBe(false);
+    expect(looksLikeSecret('mytoken: x')).toBe(false);
+  });
+
   it('redacts registered values deeply', () => {
     const r = new Redactor();
     r.register('s3cr3t-value');

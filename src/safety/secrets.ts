@@ -4,15 +4,31 @@
  */
 export const SECRET_KEYWORDS = /password|passwd|pwd|secret|api[_-]?key|token|şifre|sifre|parola/i;
 
+/**
+ * Strong secret words for free text, such as a param description or a visible label.
+ * "token" and "secret" alone are too common there ("Discount token", "Secret Santa offer").
+ */
+export const STRONG_SECRET_WORDS =
+  /(?<![\p{L}\p{N}_])(password|passwd|şifre|sifre|parola|api[ _-]?key|secret[ _-]?key)(?![\p{L}\p{N}_])/iu;
+
+// "ş" is not an ASCII word character, so \b fails before "şifre". Unicode lookarounds keep the old
+// ASCII boundaries: a letter, digit, or "_" before or after the keyword makes it part of another word.
+const SECRET_ASSIGNMENT = new RegExp(
+  `(?<![\\p{L}\\p{N}_])(${SECRET_KEYWORDS.source})(?![\\p{L}\\p{N}_])\\s*[=:]\\s*\\S+`,
+  'iu',
+);
+
 const SECRET_PATTERNS: readonly RegExp[] = [
   /\b(sk|rk)_live_[A-Za-z0-9]{8,}/,
   /\bBearer\s+[A-Za-z0-9._~+/-]{10,}/i,
-  new RegExp(`\\b(${SECRET_KEYWORDS.source})\\s*[=:]\\s*\\S+`, 'i'),
+  SECRET_ASSIGNMENT,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
 ];
 
 export function looksLikeSecret(text: string): boolean {
-  return SECRET_PATTERNS.some((re) => re.test(text));
+  // The Turkish lower case folds "İ" to "i". Without it, "ŞİFRE" does not match "şifre".
+  const lower = text.toLocaleLowerCase('tr-TR');
+  return SECRET_PATTERNS.some((re) => re.test(text) || re.test(lower));
 }
 
 export const REDACTED = '[REDACTED]';

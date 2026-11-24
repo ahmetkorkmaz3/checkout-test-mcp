@@ -1,5 +1,5 @@
 import { isMap, parseDocument } from 'yaml';
-import { SECRET_KEYWORDS } from '../safety/secrets.js';
+import { SECRET_KEYWORDS, STRONG_SECRET_WORDS } from '../safety/secrets.js';
 import type { Fragment, Scenario, Step } from '../schemas/scenario.js';
 import { checkTestData } from './test-data.js';
 
@@ -126,11 +126,17 @@ function locatorStrings(loc: unknown): string[] {
   return ['name', 'label', 'text', 'placeholder', 'test_id'].flatMap((k) => textOf(l[k]));
 }
 
-/** Like locatorStrings, plus role and css. Only the password check uses it, never the pay check. */
-function secretTargetStrings(loc: unknown): string[] {
-  if (!loc || typeof loc !== 'object') return [];
+/**
+ * True when a fill target looks like a secret field. Visible text (name, label, text, placeholder)
+ * needs a strong word, because "Promo token" is a normal label. Ids (test_id, role, css) use the
+ * full keyword list, because "promo-token" in an id names a field, not a sentence.
+ */
+function isSecretTarget(loc: unknown): boolean {
+  if (!loc || typeof loc !== 'object') return false;
   const l = loc as Rec;
-  return [...locatorStrings(loc), ...['role', 'css'].flatMap((k) => textOf(l[k]))];
+  const visible = ['name', 'label', 'text', 'placeholder'].flatMap((k) => textOf(l[k]));
+  const ids = ['test_id', 'role', 'css'].flatMap((k) => textOf(l[k]));
+  return visible.some((s) => hasWord(STRONG_SECRET_WORDS, s)) || ids.some((s) => hasWord(SECRET_KEYWORDS, s));
 }
 
 const LOCATOR_ACTIONS = ['click', 'fill', 'select', 'check', 'uncheck', 'press'] as const;
@@ -143,8 +149,7 @@ function checkFillValues(action: Rec, path: string, issues: RuleIssue[]): void {
   if (action.fill !== undefined && (typeof action.value === 'string' || typeof action.value === 'number')) {
     const value = String(action.value);
     const kind = personalKind(value);
-    const secret =
-      isLiteral(value) && secretTargetStrings(action.fill).some((s) => hasWord(SECRET_KEYWORDS, s));
+    const secret = isLiteral(value) && isSecretTarget(action.fill);
     if (kind) issues.push(personalIssue(kind, `${path}.value`, `The "fill" action at ${path}`));
     else if (secret) issues.push(personalIssue('password', `${path}.value`, `The "fill" action at ${path}`));
   }
@@ -154,8 +159,7 @@ function checkFillValues(action: Rec, path: string, issues: RuleIssue[]): void {
       if (typeof field.value !== 'string') return;
       const p = `${path}.fill_form.${i}.value`;
       const kind = personalKind(field.value);
-      const secret =
-        isLiteral(field.value) && secretTargetStrings(field.field).some((s) => hasWord(SECRET_KEYWORDS, s));
+      const secret = isLiteral(field.value) && isSecretTarget(field.field);
       if (kind) issues.push(personalIssue(kind, p, `The "fill_form" value at ${p}`));
       else if (secret) issues.push(personalIssue('password', p, `The "fill_form" value at ${p}`));
     });
@@ -332,7 +336,8 @@ function checkDefault(
   if (kind) issues.push(personalIssue(kind, path, where));
   else if (
     isLiteral(text) &&
-    (hasWord(SECRET_KEYWORDS, name) || hasWord(SECRET_KEYWORDS, description ?? ''))
+    // A name is an id: the full keyword list. A description is a sentence: strong words only.
+    (hasWord(SECRET_KEYWORDS, name) || hasWord(STRONG_SECRET_WORDS, description ?? ''))
   ) {
     issues.push(personalIssue('password', path, where));
   }

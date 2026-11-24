@@ -19,7 +19,13 @@ let client: Client;
 let executions: ExecuteInput[];
 let release: () => void;
 let releaseAll: Array<() => void> = [];
-let activeManager: RunManager | undefined;
+// Every manager that a test makes. afterEach waits until all of them are idle.
+let managers: RunManager[] = [];
+
+function track(m: RunManager): RunManager {
+  managers.push(m);
+  return m;
+}
 
 function fakeExecute(input: ExecuteInput): Promise<ExecuteOutput> {
   executions.push(input);
@@ -73,14 +79,16 @@ async function setup(env: NodeJS.ProcessEnv = {}) {
   const registry = await ScenarioRegistry.load(config.scenario_dirs);
   const store = new RunStore(config.runs_dir);
   await store.init();
-  const manager = new RunManager({
-    config,
-    registry,
-    store,
-    logger: silentLogger,
-    execute: fakeExecute,
-    env,
-  });
+  const manager = track(
+    new RunManager({
+      config,
+      registry,
+      store,
+      logger: silentLogger,
+      execute: fakeExecute,
+      env,
+    }),
+  );
   const server = createServer({ config, registry, manager, logger: silentLogger });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -97,13 +105,21 @@ async function call(name: string, args: Record<string, unknown>): Promise<any> {
 beforeEach(() => {
   releaseAll = [];
   release = () => {};
-  activeManager = undefined;
+  managers = [];
 });
 
 afterEach(async () => {
-  release();
-  // Background runs write to the runs dir. Wait for them before the folder is removed.
-  await activeManager?.idle();
+  // Background runs write to the runs dir. Release every fake run, also the ones that a queue
+  // starts after a release, until all managers are idle. Then the folder can go.
+  let settled = false;
+  const idle = Promise.all(managers.map((m) => m.idle())).finally(() => {
+    settled = true;
+  });
+  while (!settled) {
+    for (const done of releaseAll.splice(0)) done();
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  await idle;
   await client?.close();
   await rm(dir, { recursive: true, force: true });
 });
@@ -203,13 +219,15 @@ describe('run_scenario and get_run_result', () => {
 
     const store2 = new RunStore(config.runs_dir);
     await store2.init();
-    const manager2 = new RunManager({
-      config,
-      registry,
-      store: store2,
-      logger: silentLogger,
-      execute: fakeExecute,
-    });
+    const manager2 = track(
+      new RunManager({
+        config,
+        registry,
+        store: store2,
+        logger: silentLogger,
+        execute: fakeExecute,
+      }),
+    );
     const again = await manager2.start({ ...args, params: {} });
     expect(again.reused).toBe(true);
     expect(again.record.run_id).toBe(first.structuredContent.run_id);
@@ -226,13 +244,15 @@ describe('run_scenario and get_run_result', () => {
     await new Promise((r) => setTimeout(r, 50));
     const store2 = new RunStore(config.runs_dir);
     const interrupted = await store2.init();
-    const manager2 = new RunManager({
-      config,
-      registry,
-      store: store2,
-      logger: silentLogger,
-      execute: fakeExecute,
-    });
+    const manager2 = track(
+      new RunManager({
+        config,
+        registry,
+        store: store2,
+        logger: silentLogger,
+        execute: fakeExecute,
+      }),
+    );
     await manager2.recover(interrupted);
     const r = manager2.get(first.structuredContent.run_id);
     expect(r).toMatchObject({ status: 'finished', verdict: 'error' });
