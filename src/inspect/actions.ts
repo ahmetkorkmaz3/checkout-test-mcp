@@ -56,6 +56,19 @@ export type ClickKind =
   | 'list'
   | 'list_option';
 
+/**
+ * True when an iframe on the page has a URL whose load the host guard blocked. Such a frame can be
+ * a card form on a payment provider host that the target does not list.
+ */
+export async function hasBlockedFrame(page: Page, blockedFrames: ReadonlySet<string>): Promise<boolean> {
+  if (blockedFrames.size === 0) return false;
+  const srcs = await page
+    .locator('iframe[src]')
+    .evaluateAll((els) => els.map((e) => (e as HTMLIFrameElement).src))
+    .catch(() => [] as string[]);
+  return srcs.some((src) => blockedFrames.has(src));
+}
+
 export interface ClickFacts {
   /** The accessible name: aria-label, aria-labelledby, alt, value, text, title, or label. */
   name: string;
@@ -161,12 +174,20 @@ export function clickRefusal(facts: ClickFacts, allow: ClickKind, words: Words):
 /**
  * Clicks one element after the safety rules pass. The element needs a name of the expected kind.
  * It never clicks a pay button or link, a cookie accept button, or a send-code button, never clicks
- * on a page with card fields or a one-time code field, and never submits a form with a password field.
+ * on a page with card fields, a blocked frame, or a one-time code field, and never submits a form
+ * with a password field.
  */
 export async function guardedClick(
   page: Page,
   loc: Locator,
-  opts: { purpose: string; allow: ClickKind; words: Words; log: ActionLog },
+  opts: {
+    purpose: string;
+    allow: ClickKind;
+    words: Words;
+    log: ActionLog;
+    /** URLs of frame loads that the host guard blocked on this page. */
+    blockedFrames?: ReadonlySet<string>;
+  },
 ): Promise<ActionResult> {
   const facts = await clickFacts(loc);
   const name = clean(facts?.name);
@@ -177,7 +198,10 @@ export async function guardedClick(
   }
   const refusal =
     clickRefusal(facts, opts.allow, opts.words) ??
-    ((await hasCardFields(page)) ? 'the page has card fields' : null);
+    ((await hasCardFields(page)) ? 'the page has card fields' : null) ??
+    ((await hasBlockedFrame(page, opts.blockedFrames ?? new Set()))
+      ? 'the page has a frame that the guard blocked'
+      : null);
   if (refusal) {
     opts.log(`${action} (not clicked: ${refusal})`, 'refused');
     return 'refused';

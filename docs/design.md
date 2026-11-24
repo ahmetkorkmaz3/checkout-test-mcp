@@ -352,7 +352,11 @@ The probe (`src/inspect/probe.ts`) goes through the checkout of a test target up
 
 The payment step has card fields in any frame, a frame that the host guard blocked, or a visible terms checkbox. A pay button alone counts only when no empty field is left, because express wallet buttons also show on the contact step.
 
-Stop reasons: `payment_step_reached`, `login_required`, `no_product`, `no_add_to_cart`, `no_checkout_button`, `form_not_understood`, `timeout`, `blocked_by_safety`, and `verification_required`. The probe stops with `verification_required` when a page with a phone field says that it sends a code. It stops before it clicks to go on.
+`ProbeResult.dialogs` lists every native dialog and dialog element that the probe saw. `ProbeResult.steps` holds only the dialogs that a probe action opened. A dialog that is already open when a page loads, such as a cookie banner, is in `ProbeResult.dialogs` only.
+
+The probe also refuses every click on a page with an iframe whose load the host guard blocked. That frame can be a card form on a provider host that the target does not list.
+
+Stop reasons: `payment_step_reached`, `login_required`, `no_product`, `no_add_to_cart`, `no_checkout_button`, `form_not_understood`, `timeout`, `blocked_by_safety`, and `verification_required`. The probe stops with `verification_required` when a page with a phone field says that it sends a code. It reads send-code and verification phrases, such as "SMS ile doğrulama", "doğrulama kodu", or "verification code". A bare "SMS" does not count, because a marketing consent such as "Kampanyalardan SMS ile haberdar olmak istiyorum" often stands next to the phone field. It stops before it clicks to go on.
 
 Probe risks:
 

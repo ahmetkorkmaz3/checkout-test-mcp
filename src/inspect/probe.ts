@@ -12,6 +12,7 @@ import {
   guardedFill,
   guardedKey,
   guardedSelect,
+  hasBlockedFrame,
   hasCardFields,
 } from './actions.js';
 import { accessibleName, type PageSnapshot, rejectCookieBanner } from './crawl.js';
@@ -97,7 +98,7 @@ const clean = (s: string | null | undefined): string =>
  * the probe stops before it clicks to go on.
  */
 const VERIFY_TEXT =
-  /(?<![\p{L}\p{N}])(sms|otp|kod gönder|doğrulama kodu|onay kodu|tek kullanımlık|verification code|send code|one-time code|código de verificación|code de vérification|bestätigungscode|verificatiecode|codice di verifica)(?![\p{L}\p{N}])/iu;
+  /(?<![\p{L}\p{N}])(sms ile doğrulama|sms doğrulama|sms kodu|sms code|otp kodu|otp code|doğrulama kodu|onay kodu|kod gönder|tek kullanımlık|verification code|send code|one-time code|código de verificación|code de vérification|bestätigungscode|verificatiecode|codice di verifica)(?![\p{L}\p{N}])/iu;
 /** Option and select texts that are a prompt, not a choice. */
 const PLACEHOLDER =
   /^\s*$|^[-–—\s]+$|(select|choose|please|seçiniz|seçin|bitte wählen|auswählen|choisir|sélectionner|selecciona|elegir|seleziona|scegli|kies|selecteer)/iu;
@@ -596,7 +597,13 @@ class Probe {
   private async click(loc: Locator, purpose: string, allow: ClickKind): Promise<ActionResult> {
     this.check();
     const r = await this.act((log) =>
-      guardedClick(this.page, loc, { purpose, allow, words: this.words, log }),
+      guardedClick(this.page, loc, {
+        purpose,
+        allow,
+        words: this.words,
+        log,
+        blockedFrames: this.blockedFrames,
+      }),
     );
     if (r === 'done') {
       await settle(this.page);
@@ -752,11 +759,7 @@ class Probe {
    */
   private async atPaymentStep(hasPayButton: boolean): Promise<boolean> {
     if (await hasCardFields(this.page)) return true;
-    const frames = await this.page
-      .locator('iframe[src]')
-      .evaluateAll((els) => els.map((e) => (e as HTMLIFrameElement).src))
-      .catch(() => [] as string[]);
-    if (frames.some((src) => this.blockedFrames.has(src))) return true;
+    if (await hasBlockedFrame(this.page, this.blockedFrames)) return true;
     const checkboxes = await this.page
       .locator('input[type="checkbox" i], [role="checkbox"]')
       .evaluateAll((els) =>

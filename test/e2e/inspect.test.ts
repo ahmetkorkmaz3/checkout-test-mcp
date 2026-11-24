@@ -524,6 +524,27 @@ describe('guarded actions', () => {
         'done',
       );
       expect(await guardedKey(page, 'Enter', base)).toBe('refused');
+
+      // A frame that the guard blocked makes every click unsafe.
+      await page.setContent(`<button onclick="window.hit.push('next')">Continue</button>
+<iframe src="https://pay.example.com/card"></iframe><script>window.hit = []</script>`);
+      await page.waitForTimeout(300);
+      const blockedFrames = new Set(['https://pay.example.com/card']);
+      expect(
+        await guardedClick(page, page.getByRole('button', { name: 'Continue' }), {
+          ...base,
+          allow: 'continue',
+          blockedFrames,
+        }),
+      ).toBe('refused');
+      expect(log.at(-1)?.[0]).toMatch(/frame that the guard blocked/);
+      expect(await page.evaluate(() => (window as unknown as { hit: string[] }).hit)).toEqual([]);
+      expect(
+        await guardedClick(page, page.getByRole('button', { name: 'Continue' }), {
+          ...base,
+          allow: 'continue',
+        }),
+      ).toBe('done');
       expect(await guardedKey(page, 'Escape', base)).toBe('done');
     } finally {
       await guarded.close();
@@ -547,6 +568,15 @@ const SAFETY_CASES: Record<string, string> = {
 <button onclick="fetch('/clicked/applepay',{method:'POST'})">Apple Pay</button></main>
 <script>document.getElementById('f').addEventListener('submit', async (e) => {
   e.preventDefault(); await fetch('/api/contact',{method:'POST'}); location.href = '/odeme/express-pay';
+});</script>`,
+  // An SMS marketing consent next to the phone field is not a verification step.
+  consent: `<main><h1>İletişim</h1><form id="f">
+<label for="ad">Ad Soyad</label><input id="ad">
+<label for="tel">Cep Telefonu</label><input id="tel" type="tel">
+<label><input type="checkbox" id="kampanya"> Kampanyalardan SMS ile haberdar olmak istiyorum</label>
+<button type="submit">Devam Et</button></form></main>
+<script>document.getElementById('f').addEventListener('submit', async (e) => {
+  e.preventDefault(); await fetch('/api/consent-contact',{method:'POST'}); location.href = '/odeme/express-pay';
 });</script>`,
   'express-pay': `<main><h1>Payment</h1><input autocomplete="cc-number" placeholder="Card number">
 <button onclick="fetch('/clicked/pay',{method:'POST'})">Pay now</button></main>`,
@@ -625,6 +655,12 @@ describe('checkout probe safety rules', () => {
     expect(r.payment?.pay_button).toBe('Pay now');
     expect(hits).toContain('POST /api/contact');
     expect(hits.filter((h) => h.startsWith('POST /clicked/'))).toEqual([]);
+  });
+
+  it('does not stop at an SMS marketing consent next to the phone field', async () => {
+    const r = await probe(caseTarget('consent'));
+    expect(r.stopped_reason).toBe('payment_step_reached');
+    expect(hits).toContain('POST /api/consent-contact');
   });
 
   it('stops before a continue click when the page with a phone field talks about an SMS code', async () => {
