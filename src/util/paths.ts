@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from 'node:fs';
+import { lstatSync, realpathSync, type Stats } from 'node:fs';
 import path from 'node:path';
 import { ToolError } from '../errors/tool-error.js';
 
@@ -22,9 +22,9 @@ function refuse(rel: string, reason: string): ToolError {
   });
 }
 
-function isInside(root: string, target: string): boolean {
+function insideOrEqual(root: string, target: string): boolean {
   const relative = path.relative(root, target);
-  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 /** Resolves `rel` under `root`. Throws PATH_REFUSED when the result could leave the real root. */
@@ -34,14 +34,41 @@ export function resolveInside(root: string, rel: string, opts: { pattern: RegExp
   if (rel.split('/').includes('..')) throw refuse(rel, 'the path has ".."');
   if (!opts.pattern.test(rel)) throw refuse(rel, 'the path does not match the allowed pattern');
 
-  const absolute = path.resolve(root, rel);
   // Compare real paths: the root itself may be a symlink (for example /tmp on macOS).
-  const realRoot = realpathSync(root);
-  let probe = path.dirname(absolute);
-  while (!existsSync(probe)) probe = path.dirname(probe);
-  const realParent = realpathSync(probe);
-  const rest = path.relative(probe, absolute);
-  const realTarget = path.join(realParent, rest);
-  if (!isInside(realRoot, realTarget)) throw refuse(rel, 'the path resolves outside the config folder');
-  return absolute;
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(root);
+  } catch {
+    throw refuse(rel, 'the config folder does not exist');
+  }
+
+  // Walk each component, the last one too. A symlink anywhere must resolve inside the root.
+  let current = realRoot;
+  for (const segment of rel.split('/')) {
+    const next = path.join(current, segment);
+    let stat: Stats;
+    try {
+      stat = lstatSync(next);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        current = next;
+        continue;
+      }
+      throw refuse(rel, 'the path cannot be checked');
+    }
+    if (stat.isSymbolicLink()) {
+      let resolved: string;
+      try {
+        resolved = realpathSync(next);
+      } catch {
+        throw refuse(rel, 'the path has a symlink that points nowhere');
+      }
+      if (!insideOrEqual(realRoot, resolved))
+        throw refuse(rel, 'the path resolves outside the config folder');
+      current = resolved;
+    } else {
+      current = next;
+    }
+  }
+  return path.resolve(root, rel);
 }

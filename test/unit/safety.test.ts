@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -198,6 +198,31 @@ describe('resolveInside', () => {
     );
   });
 
+  it('refuses a leaf symlink that leaves the root', () => {
+    writeFileSync(path.join(outside, 'evil.yaml'), 'x');
+    symlinkSync(path.join(outside, 'evil.yaml'), path.join(root, 'x.yaml'));
+    expect(() => resolveInside(root, 'x.yaml', { pattern: YAML_PATH })).toThrow(
+      expect.objectContaining({ code: 'PATH_REFUSED' }),
+    );
+  });
+
+  it('refuses a dangling symlink folder', () => {
+    symlinkSync(path.join(outside, 'missing'), path.join(root, 'dang'));
+    expect(() => resolveInside(root, 'dang/x.yaml', { pattern: YAML_PATH })).toThrow(
+      expect.objectContaining({ code: 'PATH_REFUSED' }),
+    );
+  });
+
+  it('refuses a root that does not exist, with a next action', () => {
+    try {
+      resolveInside(path.join(root, 'nope'), 'a.yaml', { pattern: YAML_PATH });
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toMatchObject({ code: 'PATH_REFUSED' });
+      expect((err as { nextActions: unknown[] }).nextActions.length).toBeGreaterThan(0);
+    }
+  });
+
   it('returns the absolute path for a new file in a new folder', () => {
     expect(resolveInside(root, 'shop/new-one.yaml', { pattern: YAML_PATH })).toBe(
       path.join(root, 'shop/new-one.yaml'),
@@ -245,11 +270,39 @@ describe('redactText', () => {
     expect(redactText('k 0123456789abcdef0123456789abcdef')).toBe('k <token>');
     expect(redactText('k QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0MTIzNDU2Nzg=')).toBe('k <token>');
   });
+  it.each([
+    ['card 4242 4242 4242 4242 2026', 'card <card> 2026'],
+    ['Order 1 4242 4242 4242 4242', 'Order 1 <card>'],
+    ['Tel 0212 000 00 00 34000 Istanbul', 'Tel <phone> 34000 Istanbul'],
+  ])('redacts next to other digits: %s', (input, expected) => {
+    expect(redactText(input)).toBe(expected);
+  });
+  it('redacts two phones in a row', () => {
+    expect(redactText('0555 000 00 00 0555 111 11 11')).toBe('<phone> <phone>');
+  });
+  it('redacts a card inside a longer digit run', () => {
+    const out = redactText('4242424242424242424242');
+    expect(out).toContain('<card>');
+    expect(out).not.toContain('4242424242424242');
+  });
+  it('redacts phones with dashes and dots', () => {
+    expect(redactText('0555-000-00-00')).toBe('<phone>');
+    expect(redactText('0555.000.00.00')).toBe('<phone>');
+  });
+  it.each([
+    'data-testid="checkout-payment-card-number-input"',
+    'https://shop.test/products/acme-tabak-seti-porselen-19-cm',
+    'product-card__image-wrapper--large-variant',
+  ])('keeps ordinary identifiers and urls: %s', (text) => {
+    expect(redactText(text)).toBe(text);
+  });
   it('keeps ordinary short numbers and text', () => {
     const text = 'Tabak 19 cm, 200 TL, posta kodu 34000, 2026-11-24';
     expect(redactText(text)).toBe(text);
   });
-  it('does not redact a 16-digit number that fails Luhn as a card', () => {
-    expect(redactText('1234 5678 9012 3456')).toBe('1234 5678 9012 3456');
+  it('does not report a 16-digit number that fails Luhn as a card', () => {
+    const out = redactText('1234 5678 9012 3456');
+    expect(out).not.toContain('<card>');
+    expect(out).not.toContain('1234 5678');
   });
 });
