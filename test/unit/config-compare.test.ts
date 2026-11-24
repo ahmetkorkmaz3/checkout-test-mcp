@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { compareRuns } from '../../src/compare/compare.js';
 import { ConfigError, parseConfig } from '../../src/config/load-config.js';
@@ -46,6 +47,46 @@ describe('config', () => {
 
   it('refuses unknown keys', () => {
     expect(() => parseConfig({ ...base, typo_key: 1 }, '/tmp')).toThrow(ConfigError);
+  });
+
+  describe('authoring and inspect blocks', () => {
+    const dir = '/tmp/proj';
+    const target = base.targets.local;
+
+    it('refuses authoring.dir outside scenario_dirs', () => {
+      expect(() => parseConfig({ ...base, authoring: { dir: '/tmp/elsewhere' } }, dir)).toThrow(
+        /authoring.dir must be inside one of scenario_dirs/,
+      );
+    });
+
+    it('accepts authoring.dir inside a scenario dir and resolves it', () => {
+      const c = parseConfig({ ...base, scenario_dirs: ['./s'], authoring: { dir: './s/local' } }, dir);
+      expect(c.authoring?.dir).toBe(path.join(dir, 's/local'));
+      expect(c.authoring?.test_data_dir_writable).toBe(false);
+    });
+
+    it('defaults the inspect block and keeps the probe off', () => {
+      const c = parseConfig({ ...base, targets: { t: { ...target, inspect: {} } } }, dir);
+      expect(c.targets.t?.inspect).toMatchObject({
+        start_paths: ['/'],
+        max_pages: 25,
+        probe_checkout: false,
+      });
+    });
+
+    it('resolves inspect.source_dirs to absolute paths', () => {
+      const c = parseConfig(
+        { ...base, targets: { t: { ...target, inspect: { source_dirs: ['./src-x'] } } } },
+        dir,
+      );
+      expect(c.targets.t?.inspect?.source_dirs).toEqual([path.join(dir, 'src-x')]);
+    });
+
+    it('refuses inspect.max_pages above 100', () => {
+      expect(() =>
+        parseConfig({ ...base, targets: { t: { ...target, inspect: { max_pages: 101 } } } }, dir),
+      ).toThrow(ConfigError);
+    });
   });
 });
 

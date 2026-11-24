@@ -8,6 +8,32 @@ const HostPattern = z
     'Use a host name like "staging.shop.test" or "*.shop.test", without scheme or port.',
   );
 
+/** Settings for inspect_target. Every field has a default, so an empty block is valid. */
+export const InspectConfig = z
+  .object({
+    /** Read-only source folders for the code scan. Relative to the config folder. */
+    source_dirs: z.array(z.string()).default([]),
+    start_paths: z.array(z.string().startsWith('/')).min(1).default(['/']),
+    product_paths: z.array(z.string().startsWith('/')).default([]),
+    max_pages: z.number().int().min(1).max(100).default(25),
+    /** The probe may click add-to-cart and the checkout button. It never clicks a pay button. */
+    probe_checkout: z.boolean().default(false),
+    // Task 7 narrows the keys to WordKind.
+    words: z.record(z.string(), z.array(z.string())).default({}),
+  })
+  .strict();
+export type InspectConfig = z.infer<typeof InspectConfig>;
+
+export const AuthoringConfig = z
+  .object({
+    /** Where save_scenario writes. Must be inside one of scenario_dirs. */
+    dir: z.string().min(1),
+    /** save_scenario never writes test data in v1. */
+    test_data_dir_writable: z.boolean().default(false),
+  })
+  .strict();
+export type AuthoringConfig = z.infer<typeof AuthoringConfig>;
+
 export const TargetConfig = z
   .object({
     description: z.string().default(''),
@@ -23,6 +49,7 @@ export const TargetConfig = z
       .default({}),
     http_credentials: z.object({ username_secret: z.string(), password_secret: z.string() }).optional(),
     locale: z.string().optional(),
+    inspect: InspectConfig.optional(),
   })
   .strict();
 export type TargetConfig = z.infer<typeof TargetConfig>;
@@ -37,6 +64,7 @@ export const ServerConfig = z
     headless: z.boolean().default(true),
     targets: z.record(z.string().regex(/^[a-z0-9][a-z0-9-]*$/), TargetConfig),
     production_hosts: z.array(HostPattern).default([]),
+    authoring: AuthoringConfig.optional(),
   })
   .strict();
 export type ServerConfig = z.infer<typeof ServerConfig>;

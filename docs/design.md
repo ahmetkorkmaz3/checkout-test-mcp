@@ -132,6 +132,16 @@ targets:
     secrets: # name in scenario -> env var name
       basic_auth_user: STAGING_BASIC_USER
       basic_auth_pass: STAGING_BASIC_PASS
+    inspect: # optional. Settings for inspect_target. All fields have defaults.
+      source_dirs: [../my-storefront] # read-only code scan. Relative to this file.
+      start_paths: ["/"] # crawl seeds
+      product_paths: [] # optional hint: product pages to try first
+      max_pages: 25 # 1..100
+      probe_checkout: false # true lets the probe click add-to-cart and checkout, never pay
+
+authoring: # optional. Without it, save_scenario refuses with AUTHORING_DISABLED.
+  dir: ./scenarios/local # must be inside one of scenario_dirs
+  test_data_dir_writable: false # save_scenario never writes test data in v1
 
 production_hosts: # always refused, even if listed above
   - example-shop.com

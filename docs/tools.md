@@ -79,6 +79,11 @@ export const ToolErrorCode = z.enum([
   'RUN_NOT_FINISHED', // compare_runs only
   'RUNS_NOT_COMPARABLE',
   'QUEUE_FULL',
+  'AUTHORING_DISABLED', // save_scenario: config has no authoring.dir
+  'SCENARIO_INVALID', // save_scenario: the draft fails the scenario schema
+  'PATH_REFUSED', // a file path leaves its allowed folder
+  'SCENARIO_EXISTS', // save_scenario: the id exists and overwrite is off
+  'INSPECTION_FAILED', // inspect_target: the job could not finish
   'INTERNAL_ERROR',
 ]);
 

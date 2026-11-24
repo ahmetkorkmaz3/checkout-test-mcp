@@ -16,6 +16,11 @@ export const ToolErrorCode = z.enum([
   'RUN_NOT_FINISHED',
   'RUNS_NOT_COMPARABLE',
   'QUEUE_FULL',
+  'AUTHORING_DISABLED',
+  'SCENARIO_INVALID',
+  'PATH_REFUSED',
+  'SCENARIO_EXISTS',
+  'INSPECTION_FAILED',
   'INTERNAL_ERROR',
 ]);
 export type ToolErrorCode = z.infer<typeof ToolErrorCode>;

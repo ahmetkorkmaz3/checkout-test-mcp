@@ -28,6 +28,15 @@ targets:
       username: SAUCEDEMO_USERNAME
       password: SAUCEDEMO_PASSWORD
 
+  # Each target can have an optional "inspect" block for inspect_target.
+  # All fields have defaults. An empty block is valid.
+  #   inspect:
+  #     source_dirs: [../my-storefront] # read-only code scan
+  #     start_paths: ["/"] # crawl seeds
+  #     product_paths: [] # optional hint
+  #     max_pages: 25 # 1..100
+  #     probe_checkout: false # true lets the probe click add-to-cart and checkout, never pay
+
   # Example for a company staging environment:
   # my-staging:
   #   description: Company staging, checkout v2 branch.
@@ -41,6 +50,11 @@ targets:
   #   http_credentials:
   #     username_secret: basic_auth_user
   #     password_secret: basic_auth_pass
+
+# Optional. Without this block, save_scenario refuses with AUTHORING_DISABLED.
+# authoring:
+#   dir: ./scenarios/local # must be inside one of scenario_dirs
+#   test_data_dir_writable: false # save_scenario never writes test data in v1
 
 # Always refused, even when a target lists them.
 production_hosts:

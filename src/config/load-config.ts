@@ -33,8 +33,16 @@ export function parseConfig(raw: unknown, configDir: string): ResolvedConfig {
     runs_dir: resolve(cfg.runs_dir),
     test_data_dir: resolve(cfg.test_data_dir),
     scenario_dirs: cfg.scenario_dirs.map(resolve),
+    targets: Object.fromEntries(
+      Object.entries(cfg.targets).map(([name, t]) => [
+        name,
+        t.inspect ? { ...t, inspect: { ...t.inspect, source_dirs: t.inspect.source_dirs.map(resolve) } } : t,
+      ]),
+    ),
+    ...(cfg.authoring ? { authoring: { ...cfg.authoring, dir: resolve(cfg.authoring.dir) } } : {}),
   };
   validateTargets(resolved);
+  validateAuthoring(resolved);
   return resolved;
 }
 
@@ -77,4 +85,15 @@ function validateTargets(cfg: ResolvedConfig): void {
     }
   }
   if (problems.length > 0) throw new ConfigError(`Config refused:\n- ${problems.join('\n- ')}`);
+}
+
+function validateAuthoring(cfg: ResolvedConfig): void {
+  if (!cfg.authoring) return;
+  const dir = cfg.authoring.dir;
+  const inside = cfg.scenario_dirs.some((s) => dir === s || dir.startsWith(s + path.sep));
+  if (!inside) {
+    throw new ConfigError(
+      `Config refused:\n- authoring.dir must be inside one of scenario_dirs. Got "${dir}".`,
+    );
+  }
 }
