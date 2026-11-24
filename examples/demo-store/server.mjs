@@ -38,7 +38,7 @@ iframe{border:1px solid #ccc;width:100%;max-width:380px}
 <header><a href="/products/${PRODUCT.slug}">Demo Store</a>
 <nav><a href="/products">Products</a> <a href="/checkout">Checkout</a> (<span data-testid="cart-count">${cartCount(session)}</span>)</nav></header>
 <main>${body}</main>
-<footer><a href="/account/verify-phone">Verify phone</a></footer>
+<footer><a href="/account/verify-phone">Verify phone</a> <a href="/account/returns">Return requests</a></footer>
 <script>${script}</script>
 </body></html>`;
 }
@@ -73,6 +73,19 @@ const listingPage = (s) =>
     s,
     `<h1>Products</h1>
 <ul><li><a href="/products/${PRODUCT.slug}">${PRODUCT.name}</a> ${tl(PRODUCT.price)}</li></ul>`,
+  );
+
+// A "Reject" button that is not a cookie banner. The crawl must never click it.
+const returnsPage = (s) =>
+  layout(
+    'Return requests',
+    s,
+    `<h1>Return requests</h1>
+<form id="f"><p>Request R-1: Ceramic Mug</p><button type="submit">Reject</button></form>`,
+    `document.getElementById('f').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  await fetch('/api/returns/reject',{method:'POST'});
+});`,
   );
 
 const checkoutStart = (s) =>
@@ -117,7 +130,8 @@ const verifyPhonePage = (s, textMode = false) =>
 <label for="code">Verification code</label><input id="code" inputmode="numeric" autocomplete="one-time-code">
 <button id="verify">Verify</button>
 <p id="ok" data-testid="phone-verified" hidden>Phone verified</p>
-<div id="error" role="alert" hidden></div>`,
+<div id="error" role="alert" hidden></div>
+<p><a href="https://example.com/help" target="_blank">Help center</a></p>`,
     `const err = document.getElementById('error');
 document.getElementById('send').addEventListener('click', async () => {
   if (${textMode}) {
@@ -206,7 +220,7 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
   const sessions = new Map();
   const payments = new Map();
   let activeBugs = new Set(bugs);
-  const stats = { orders: 0, payments: 0 };
+  const stats = { orders: 0, payments: 0, return_rejects: 0 };
   // Codes that send-code returned. Tests use them to check that results never show a code.
   const issuedOtps = [];
 
@@ -262,6 +276,11 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
       }
       s.cart = [{ slug: PRODUCT.slug, qty }];
       return json(res, 201, { count: cartCount(s) });
+    }
+    if (m === 'GET' && p === '/account/returns') return html(res, returnsPage(s));
+    if (m === 'POST' && p === '/api/returns/reject') {
+      stats.return_rejects++;
+      return json(res, 200, { ok: true });
     }
     if (m === 'GET' && p === '/account/verify-phone') return html(res, verifyPhonePage(s));
     if (m === 'GET' && p === '/account/verify-phone-text') return html(res, verifyPhonePage(s, true));

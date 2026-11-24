@@ -10,7 +10,7 @@ import type { InspectConfig } from '../../src/schemas/config.js';
 let demo: {
   url: string;
   close(): Promise<void>;
-  stats: { orders: number; payments: number };
+  stats: { orders: number; payments: number; return_rejects: number };
   issuedOtps: string[];
 };
 
@@ -44,6 +44,7 @@ function demoTarget(inspect: Partial<InspectConfig> = {}) {
 async function crawl(
   t: ReturnType<typeof demoTarget>,
   signal = new AbortController().signal,
+  messages: string[] = [],
 ): Promise<SiteReport> {
   const blocked = new BlockedHostCounter();
   const guarded = await openGuardedContext({
@@ -59,7 +60,7 @@ async function crawl(
       config: t.config,
       blocked,
       signal,
-      onProgress: () => {},
+      onProgress: (m) => messages.push(m),
     });
   } finally {
     await guarded.close();
@@ -95,6 +96,9 @@ describe('site crawl', () => {
     expect(verify?.landmarks).toEqual(expect.arrayContaining(['banner', 'main', 'contentinfo']));
     // The crawl must not click "Send code".
     expect(demo.issuedOtps.length).toBe(before);
+    // "Reject" on the returns page is a form button, not a cookie banner.
+    expect(paths).toContain('/account/returns');
+    expect(demo.stats.return_rejects).toBe(0);
     expect(demo.stats.payments).toBe(0);
   });
 
@@ -114,15 +118,16 @@ describe('site crawl', () => {
 // A small site with a cookie banner, a third-party script, and links the crawl must not follow.
 const BANNER_PAGE = `<!doctype html><html><head><title>Banner</title>
 <script src="https://cdn.example.com/tracker.js"></script></head><body>
-<div role="dialog" aria-label="Cookie settings">
-<button onclick="fetch('/clicked/accept')">Accept all</button>
-<button onclick="fetch('/clicked/reject');this.parentElement.remove()">Reject all</button>
-</div>
 <main><h1>Welcome</h1>
+<form onsubmit="event.preventDefault();fetch('/clicked/form-reject')"><button>Reject</button></form>
 <a href="//other.example.com/x">Other host</a>
 <a href="/logout">Log out</a>
 <a href="/next">Next</a>
-</main></body></html>`;
+</main>
+<div role="dialog" aria-label="Cookie settings"><p>We use cookies.</p>
+<button onclick="fetch('/clicked/accept')">Accept all</button>
+<button onclick="fetch('/clicked/reject');this.parentElement.remove()">Reject all</button>
+</div></body></html>`;
 
 describe('site crawl rules', () => {
   let server: Server;
@@ -132,6 +137,21 @@ describe('site crawl rules', () => {
   beforeAll(async () => {
     server = createServer((req, res) => {
       hits.push(req.url ?? '');
+      if (req.url?.startsWith('/dead')) {
+        req.socket.destroy();
+        return;
+      }
+      if (/^\/r\d+$/.test(req.url ?? '')) {
+        res.writeHead(302, { location: '/loop' });
+        res.end();
+        return;
+      }
+      if (req.url === '/loop') {
+        res.writeHead(200, { 'content-type': 'text/html' });
+        const links = Array.from({ length: 20 }, (_, i) => `<a href="/r${i}">r${i}</a>`).join('');
+        res.end(`<!doctype html><title>Loop</title><main>${links}</main>`);
+        return;
+      }
       res.writeHead(200, { 'content-type': 'text/html' });
       res.end(req.url === '/' ? BANNER_PAGE : '<!doctype html><title>Next</title><h1>Next</h1>');
     });
@@ -159,8 +179,34 @@ describe('site crawl rules', () => {
     expect(report.blocked_hosts).toEqual([{ host: 'cdn.example.com', count: 1 }]);
     expect(hits).toContain('/clicked/reject');
     expect(hits).not.toContain('/clicked/accept');
+    expect(hits).not.toContain('/clicked/form-reject');
     expect(hits).not.toContain('/logout');
     expect(report.pages.map((p) => p.path_pattern)).toEqual(['/', '/next']);
     expect(report.pages[0]?.dialogs).toEqual([]);
+  });
+
+  function siteTarget(inspect: Record<string, unknown>) {
+    const config = parseConfig(
+      { targets: { site: { profile: 'p', base_url: base, allowed_hosts: ['localhost'], inspect } } },
+      '/tmp',
+    );
+    const target = config.targets.site;
+    if (!target?.inspect) throw new Error('test config has no inspect block');
+    return { config, target, inspect: target.inspect };
+  }
+
+  it('stops after three page loads for each page, also when loads only redirect', async () => {
+    const before = hits.filter((h) => /^\/r\d+$/.test(h)).length;
+    const report = await crawl(siteTarget({ start_paths: ['/loop'], max_pages: 2 }));
+    expect(report.pages.map((p) => p.path_pattern)).toEqual(['/loop']);
+    // Six loads in all: "/loop" and five redirects back to it.
+    expect(hits.filter((h) => /^\/r\d+$/.test(h)).length - before).toBe(5);
+  });
+
+  it('cuts the query from URLs in progress messages', async () => {
+    const messages: string[] = [];
+    await crawl(siteTarget({ start_paths: ['/dead?session=abc123secret'] }), undefined, messages);
+    expect(messages.join('\n')).toContain('Could not open /dead');
+    expect(messages.join('\n')).not.toContain('abc123secret');
   });
 });

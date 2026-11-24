@@ -58,6 +58,27 @@ steps:
     goto: https://example.com/
 `;
 
+const POPUP_SCENARIO = `
+schema_version: 1
+id: blocked-popup-check
+title: Clicks a link that opens a blocked host in a new tab
+summary: Safety test. The guard blocks the popup, and the run goes on.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open
+    title: Open the phone check page
+    goto: /account/verify-phone
+  - id: open_help
+    title: Open the help center in a new tab
+    click: { role: link, name: Help center }
+  - id: still_here
+    title: The run page stays usable
+    click: { role: button, name: Send code }
+    expect:
+      - visible: { role: heading, name: Verify your phone }
+`;
+
 const NO_MATCH_SCENARIO = `
 schema_version: 1
 id: capture-regex-no-match
@@ -96,6 +117,7 @@ beforeAll(async () => {
     ...loaded.list(),
     parseScenario(BLOCKED_SCENARIO, 'inline.yaml'),
     parseScenario(NO_MATCH_SCENARIO, 'inline-no-match.yaml'),
+    parseScenario(POPUP_SCENARIO, 'inline-popup.yaml'),
   ]);
   const runStore = new RunStore(config.runs_dir);
   await runStore.init();
@@ -235,5 +257,18 @@ describe('demo store', () => {
     expect(res.structuredContent.verdict).toBe('blocked');
     expect(res.structuredContent.failure.category).toBe('blocked_by_safety');
     expect(res.structuredContent.blocked_requests[0].url).toContain('example.com');
+  });
+
+  it('lists a blocked popup and does not stop the run', async () => {
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'blocked-popup-check',
+      idempotency_key: 'e2e-blocked-popup-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict, JSON.stringify(out.failure)).toBe('passed');
+    expect(out.blocked_requests).toContainEqual(
+      expect.objectContaining({ url: expect.stringContaining('example.com/help'), step_id: 'open_help' }),
+    );
   });
 });

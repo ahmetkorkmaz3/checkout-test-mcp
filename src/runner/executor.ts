@@ -518,10 +518,11 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       config: input.config,
       target,
       ...(input.httpCredentials ? { httpCredentials: input.httpCredentials } : {}),
-      onBlocked: (url, isMainFrameNavigation) => {
+      onBlocked: (url, frame, isNavigation) => {
         blockedUrls.add(url);
         blocked.push({ url: redactQuery(url), step_id: currentStepId });
-        if (isMainFrameNavigation && page) blockedNavigation = redactQuery(url);
+        // Only a navigation of the run's own page stops the run. A popup has no frame yet, so it is only listed.
+        if (isNavigation && page && frame === page.mainFrame()) blockedNavigation = redactQuery(url);
       },
     });
     // After a run timeout the cleanup has run already, so this browser must close here.

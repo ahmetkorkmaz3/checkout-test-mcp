@@ -53,6 +53,7 @@ export const CRAWL_LIMITS = {
   selects: 50,
   fields: 200,
   headings: 50,
+  landmarks: 30,
   links: 500,
   iframes: 50,
   dialogs: 20,
@@ -62,6 +63,10 @@ export const CRAWL_LIMITS = {
 const NAV_TIMEOUT_MS = 15_000;
 const IDLE_TIMEOUT_MS = 5_000;
 const READ_TIMEOUT_MS = 2_000;
+/** Failed gotos and redirects count too, so a site full of broken links cannot keep the crawl busy. */
+const NAVIGATIONS_PER_PAGE = 3;
+/** Words that mark a container as a cookie or consent banner. */
+const COOKIE_CONTAINER = 'cookie|cookies|çerez|consent|datenschutz';
 
 /** Counts the hosts that the browser guard blocked. Pass `onBlocked` to openGuardedContext. */
 export class BlockedHostCounter {
@@ -165,13 +170,19 @@ const LANDMARK_ROLES = [
 
 const clean = (s: string | null | undefined): string => redactText((s ?? '').replace(/\s+/g, ' ').trim());
 
+/** First line of an error message, with the query and fragment cut from every URL in it. */
 function firstLine(msg: string): string {
-  return (msg.split('\n')[0] ?? msg).slice(0, 300);
+  return (msg.split('\n')[0] ?? msg)
+    .replace(/(\bhttps?:\/\/[^\s?#"'<>]*)[?#][^\s"'<>]*/gi, '$1')
+    .slice(0, 300);
 }
 
-/** Reads the accessible name from the element's ARIA snapshot, for example `- button "Add to cart"`. */
+/**
+ * Reads the accessible name from the element's ARIA snapshot, for example `- button "Add to cart"`.
+ * Use it for small elements only. Landmarks and dialogs use labelName.
+ */
 async function accessibleName(loc: Locator): Promise<string> {
-  const snap = await loc.ariaSnapshot({ timeout: READ_TIMEOUT_MS }).catch(() => '');
+  const snap = await loc.ariaSnapshot({ depth: 1, timeout: READ_TIMEOUT_MS }).catch(() => '');
   let first: unknown;
   try {
     const parsed: unknown = parseYaml(snap);
@@ -190,11 +201,61 @@ async function accessibleName(loc: Locator): Promise<string> {
   }
 }
 
-async function namesOf(page: Page, role: Parameters<Page['getByRole']>[0], cap: number): Promise<string[]> {
+/** The name of a landmark or dialog from aria-label or aria-labelledby. It does not read the subtree. */
+async function labelName(loc: Locator): Promise<string> {
+  return loc
+    .evaluate(
+      (e) =>
+        e.getAttribute('aria-label') ||
+        (e.getAttribute('aria-labelledby') ?? '')
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((id) => document.getElementById(id)?.textContent ?? '')
+          .join(' '),
+      undefined,
+      { timeout: READ_TIMEOUT_MS },
+    )
+    .catch(() => '');
+}
+
+async function namesOf(
+  page: Page,
+  role: Parameters<Page['getByRole']>[0],
+  cap: number,
+  read: (loc: Locator) => Promise<string> = accessibleName,
+): Promise<string[]> {
   const out: string[] = [];
-  for (const loc of (await page.getByRole(role).all()).slice(0, cap))
-    out.push(clean(await accessibleName(loc)));
+  for (const loc of (await page.getByRole(role).all()).slice(0, cap)) out.push(clean(await read(loc)));
   return out;
+}
+
+/**
+ * True when the button is inside a dialog, alertdialog, banner or region, or inside a small
+ * container whose text names cookies or consent. A "Reject" button in a normal form is not a banner.
+ */
+async function isInCookieContainer(loc: Locator): Promise<boolean> {
+  return loc
+    .evaluate(
+      (e, words) => {
+        const cookieText = new RegExp(words, 'i');
+        for (
+          let el = e.parentElement, depth = 0;
+          el && el !== document.body && depth < 8;
+          el = el.parentElement, depth++
+        ) {
+          const role = el.getAttribute('role');
+          if (role === 'dialog' || role === 'alertdialog' || role === 'banner' || role === 'region')
+            return true;
+          if (el.tagName === 'DIALOG') return true;
+          const text = el.textContent ?? '';
+          if (text.length <= 2000 && cookieText.test(text)) return true;
+        }
+        return false;
+      },
+      COOKIE_CONTAINER,
+      { timeout: READ_TIMEOUT_MS },
+    )
+    .catch(() => false);
 }
 
 /** Clicks one visible cookie button that rejects. It never clicks a button that accepts. */
@@ -204,6 +265,7 @@ async function rejectCookieBanner(page: Page, words: InspectConfig['words']): Pr
     const name = await accessibleName(b);
     if (!matchesKind('cookie_reject', name, words) || matchesKind('cookie_accept', name, words)) continue;
     if (!(await b.isVisible().catch(() => false))) continue;
+    if (!(await isInCookieContainer(b))) continue;
     try {
       await b.click({ timeout: READ_TIMEOUT_MS });
       await page.waitForTimeout(300);
@@ -227,8 +289,8 @@ interface RawField {
 /** Reads form controls by their properties. Password fields have no ARIA role, so role queries miss them. */
 async function readFields(page: Page): Promise<RawField[]> {
   return page.locator('input, select, textarea').evaluateAll(
-    (els, maxOptions) =>
-      els.map((el) => {
+    (els, max) =>
+      els.slice(0, max.fields).map((el) => {
         const e = el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
         // No named helper here: tsx adds a __name() call to it, and the page has no __name.
         const labelledBy = (e.getAttribute('aria-labelledby') ?? '')
@@ -248,7 +310,7 @@ async function readFields(page: Page): Promise<RawField[]> {
         const options =
           e instanceof HTMLSelectElement
             ? Array.from(e.options)
-                .slice(0, maxOptions)
+                .slice(0, max.options)
                 .map((o) => o.textContent ?? '')
             : null;
         return {
@@ -260,7 +322,7 @@ async function readFields(page: Page): Promise<RawField[]> {
           options,
         };
       }),
-    CRAWL_LIMITS.options,
+    { fields: CRAWL_LIMITS.fields, options: CRAWL_LIMITS.options },
   );
 }
 
@@ -288,8 +350,9 @@ async function snapshotPage(
 
   const landmarks: string[] = [];
   for (const role of LANDMARK_ROLES) {
-    for (const loc of await page.getByRole(role).all()) {
-      const name = clean(await accessibleName(loc));
+    const locs = (await page.getByRole(role).all()).slice(0, CRAWL_LIMITS.landmarks - landmarks.length);
+    for (const loc of locs) {
+      const name = clean(await labelName(loc));
       landmarks.push(name ? `${role}: ${name}` : role);
     }
   }
@@ -325,7 +388,7 @@ async function snapshotPage(
     }
   }
 
-  const raw = (await readFields(page)).slice(0, CRAWL_LIMITS.fields);
+  const raw = await readFields(page);
   const formsByIndex = new Map<number, PageSnapshot['forms'][number]>();
   const selects: PageSnapshot['selects'] = [];
   for (const f of raw) {
@@ -369,8 +432,8 @@ async function snapshotPage(
 
   const dialogs = [
     ...openedDialogs,
-    ...(await namesOf(page, 'dialog', CRAWL_LIMITS.dialogs)).map((n) => `dialog: ${n}`),
-    ...(await namesOf(page, 'alertdialog', CRAWL_LIMITS.dialogs)).map((n) => `alertdialog: ${n}`),
+    ...(await namesOf(page, 'dialog', CRAWL_LIMITS.dialogs, labelName)).map((n) => `dialog: ${n}`),
+    ...(await namesOf(page, 'alertdialog', CRAWL_LIMITS.dialogs, labelName)).map((n) => `alertdialog: ${n}`),
   ].slice(0, CRAWL_LIMITS.dialogs);
 
   const hasPasswordField = raw.some((f) => f.type === 'password');
@@ -434,7 +497,10 @@ export async function crawlSite(ctx: CrawlContext): Promise<SiteReport> {
   const kindByVisit = new Map<number, PageKind>();
   let visit = -1;
   let openedDialogs: string[] = [];
-  let cookieBannerClosed = false;
+  // The cookie click is tried on the first page only. A later "Reject" is a page action, not a banner.
+  let cookieBannerTried = false;
+  let navigations = 0;
+  const maxNavigations = inspect.max_pages * NAVIGATIONS_PER_PAGE;
 
   const page = await ctx.context.newPage();
   page.on('dialog', (d) => {
@@ -467,6 +533,11 @@ export async function crawlSite(ctx: CrawlContext): Promise<SiteReport> {
         ctx.onProgress('The crawl stopped because the job was cancelled.');
         break;
       }
+      if (navigations >= maxNavigations) {
+        ctx.onProgress(`The crawl stopped after ${navigations} page loads.`);
+        break;
+      }
+      navigations++;
       const url = queue.shift() as URL;
       const wanted = pathPattern(url.pathname);
       visit++;
@@ -486,7 +557,10 @@ export async function crawlSite(ctx: CrawlContext): Promise<SiteReport> {
       // A redirect can land on a pattern that the crawl read before.
       if (read.has(landedPattern)) continue;
 
-      if (!cookieBannerClosed) cookieBannerClosed = await rejectCookieBanner(page, inspect.words);
+      if (!cookieBannerTried) {
+        cookieBannerTried = true;
+        await rejectCookieBanner(page, inspect.words);
+      }
 
       let snap: PageSnapshot;
       try {

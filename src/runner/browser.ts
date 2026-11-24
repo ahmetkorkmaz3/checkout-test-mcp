@@ -1,4 +1,4 @@
-import { type Browser, type BrowserContext, chromium, selectors } from 'playwright';
+import { type Browser, type BrowserContext, chromium, type Frame, selectors } from 'playwright';
 import { isUrlAllowed } from '../safety/hosts.js';
 import type { ResolvedConfig, TargetConfig } from '../schemas/config.js';
 
@@ -6,8 +6,11 @@ export interface GuardedContextInput {
   config: Pick<ResolvedConfig, 'production_hosts' | 'headless'>;
   target: TargetConfig;
   httpCredentials?: { username: string; password: string };
-  /** Called for each request the guard aborts. The URL can hold a query, so redact it before you store it. */
-  onBlocked: (url: string, isMainFrameNavigation: boolean) => void;
+  /**
+   * Called for each request the guard aborts. The URL can hold a query, so redact it before you store it.
+   * `frame` is null when Playwright has no frame for the request, for example a popup navigation.
+   */
+  onBlocked: (url: string, frame: Frame | null, isNavigation: boolean) => void;
 }
 
 export interface GuardedContext {
@@ -35,10 +38,19 @@ export async function openGuardedContext(input: GuardedContextInput): Promise<Gu
       const req = route.request();
       const url = req.url();
       if (isUrlAllowed(url, target, config)) return route.continue();
-      // A navigation request always has a frame. Only the top frame of a page has no parent.
-      const mainFrameNavigation = req.isNavigationRequest() && req.frame().parentFrame() === null;
-      input.onBlocked(url, mainFrameNavigation);
-      return route.abort('blockedbyclient');
+      // Record first, and abort in finally: an error here must never let a blocked request go on or hang.
+      try {
+        let frame: Frame | null = null;
+        try {
+          frame = req.frame();
+        } catch {
+          // Playwright throws for a navigation that starts before its frame exists, such as a popup.
+          frame = null;
+        }
+        input.onBlocked(url, frame, req.isNavigationRequest());
+      } finally {
+        await route.abort('blockedbyclient');
+      }
     });
     return {
       browser,
