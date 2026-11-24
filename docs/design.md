@@ -317,7 +317,7 @@ Decisions taken with the go-ahead on 2026-11-22. They follow the recommendations
 - Q1: the repo bundles `examples/demo-store` (no dependencies) with a mock card provider and a 3DS challenge. It also has fault injection (`skip-3ds`) so tests can show a real regression.
 - Q2: `idempotency_key` is required. The request hash uses the arguments as sent, so a retry matches before any other work.
 - Q11: `engines.node` is `>=22.12`, the Vitest 5 minimum. Develop on Node 26.
-- Q3, Q8, Q9: still open. The card registry has Stripe test cards only. iyzico cards need a verified source URL first.
+- Q3, Q8, Q9: still open. The card registry has Stripe and iyzico test cards. Each iyzico card cites the official page https://docs.iyzico.com/en/add-ons/test-cards. Craftgate cards are not in the registry yet, because the Craftgate docs need a login.
 
 Format details that the design did not fix:
 

@@ -13,7 +13,7 @@ import {
   isUrlAllowed,
 } from '../../src/safety/hosts.js';
 import { looksLikeSecret, Redactor, redactQuery } from '../../src/safety/secrets.js';
-import { TEST_CARDS } from '../../src/safety/test-cards.js';
+import { providerForPackage, TEST_CARDS } from '../../src/safety/test-cards.js';
 import type { TargetConfig } from '../../src/schemas/config.js';
 
 const target = (over: Partial<TargetConfig> = {}): TargetConfig => ({
@@ -38,6 +38,20 @@ describe('test card registry', () => {
 
   it('has unique ids', () => {
     expect(new Set(TEST_CARDS.map((c) => c.id)).size).toBe(TEST_CARDS.length);
+  });
+
+  it('has a success and a decline card for iyzico, each with a source', () => {
+    const cards = TEST_CARDS.filter((c) => c.provider === 'iyzico');
+    expect(cards.some((c) => c.behaviour === 'success')).toBe(true);
+    expect(cards.some((c) => c.behaviour.startsWith('declined'))).toBe(true);
+    for (const c of cards) expect(c.source_url).toMatch(/^https:\/\/docs\.iyzico\.com\//);
+  });
+
+  it('maps payment packages to providers', () => {
+    expect(providerForPackage('@stripe/stripe-js')).toBe('stripe');
+    expect(providerForPackage('iyzipay')).toBe('iyzico');
+    expect(providerForPackage('@craftgate/craftgate')).toBe('craftgate');
+    expect(providerForPackage('left-pad')).toBeUndefined();
   });
 });
 
