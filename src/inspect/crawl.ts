@@ -590,6 +590,13 @@ export async function crawlSite(ctx: CrawlContext): Promise<SiteReport> {
       }
 
       const landed = new URL(page.url());
+      // A redirect to a host outside the target lands on the 403 page of the guard proxy. It is no site page.
+      if (!isUrlAllowed(landed.href, target, config)) {
+        ctx.onProgress(
+          clean(`Skipped ${wanted}: it redirects to ${hostOf(landed.href)}, which the guard blocks.`),
+        );
+        continue;
+      }
       const landedPattern = pathPattern(landed.pathname);
       // A redirect can land on a pattern that the crawl read before.
       if (read.has(landedPattern)) continue;

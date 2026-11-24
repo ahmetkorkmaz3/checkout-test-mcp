@@ -1,7 +1,8 @@
+import { createSocket as createUdpSocket } from 'node:dgram';
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer as createNetServer } from 'node:net';
-import os from 'node:os';
+import os, { networkInterfaces } from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
@@ -31,6 +32,7 @@ let store: {
   issuedOtps: string[];
   authRequests: { host: string; path: string; authorization: boolean }[];
   outsideHits: string[];
+  wsHits: string[];
 };
 let client: Client;
 
@@ -97,6 +99,34 @@ steps:
   - id: open_redirect
     title: Open the redirect
     goto: /go/out
+`;
+
+const TLS_OUT_SCENARIO = `
+schema_version: 1
+id: redirect-tls-check
+title: Opens an allowed URL that redirects to an https host outside the allowlist
+summary: Safety test. Must end with verdict blocked.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open_tls
+    title: Open the https redirect
+    goto: /go/out-tls
+`;
+
+const SPOOF_SCENARIO = `
+schema_version: 1
+id: spoof-header-check
+title: Opens a page that sends the guard proxy error header
+summary: Runner test. A site cannot fake a proxy error.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open
+    title: Open the page
+    goto: /spoof-header
+    expect:
+      - visible: { role: heading, name: Spoof }
 `;
 
 const CHAIN_GET_SCENARIO = `
@@ -268,6 +298,8 @@ beforeAll(async () => {
     parseScenario(COOKIE_SCENARIO, 'inline-redirect-cookie.yaml'),
     parseScenario(BASIC_AUTH_SCENARIO, 'inline-basic-auth.yaml'),
     parseScenario(CHAIN_GET_SCENARIO, 'inline-chain-get.yaml'),
+    parseScenario(TLS_OUT_SCENARIO, 'inline-tls-out.yaml'),
+    parseScenario(SPOOF_SCENARIO, 'inline-spoof.yaml'),
     parseScenario(CHAIN_POST_SCENARIO, 'inline-chain-post.yaml'),
   ]);
   const runStore = new RunStore(config.runs_dir);
@@ -528,6 +560,30 @@ describe('redirects through the host guard', () => {
     expect(out.verdict, JSON.stringify(out.failure)).toBe('passed');
   });
 
+  it('blocks an https hop to a host outside the allowlist with one blocked request', async () => {
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'redirect-tls-check',
+      idempotency_key: 'e2e-redirect-tls-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict, JSON.stringify(out.failure)).toBe('blocked');
+    expect(out.failure.category).toBe('blocked_by_safety');
+    expect(out.blocked_requests).toEqual([
+      { url: `${outside().replace('http:', 'https:')}/`, step_id: 'open_tls' },
+    ]);
+  });
+
+  it('does not trust a proxy error header that a site sends', async () => {
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'spoof-header-check',
+      idempotency_key: 'e2e-spoof-header-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict, JSON.stringify(out.failure)).toBe('passed');
+  });
+
   it('classifies an unreachable target as target_unreachable, not as blocked', async () => {
     const res = await runToEnd({
       target: 'demo-down',
@@ -617,6 +673,84 @@ describe('redirects through the host guard', () => {
       }
     }
     expect(store.outsideHits.length).toBe(hits);
+  });
+});
+
+describe('other channels through the host guard', () => {
+  async function guardedDemo(onBlocked: (url: string) => void = () => {}) {
+    const config = parseConfig(
+      { targets: { t: { profile: 'demo-store', base_url: store.url, allowed_hosts: ['localhost'] } } },
+      dir,
+    );
+    const target = config.targets.t;
+    if (!target) throw new Error('test config has no target');
+    return openGuardedContext({ config, target, onBlocked: (url) => onBlocked(url) });
+  }
+
+  it('sends no WebRTC UDP packet past the proxy', async () => {
+    const udp = createUdpSocket('udp4');
+    const packets: string[] = [];
+    udp.on('message', (_m, r) => packets.push(r.address));
+    await new Promise<void>((r) => udp.bind(0, '0.0.0.0', () => r()));
+    const udpPort = udp.address().port;
+    const lan = Object.values(networkInterfaces())
+      .flat()
+      .find((i) => i && i.family === 'IPv4' && !i.internal)?.address;
+    const guarded = await guardedDemo();
+    try {
+      const page = await guarded.context.newPage();
+      await page.goto('/products');
+      await page.evaluate(
+        async ([hosts, port]) => {
+          for (const h of hosts) {
+            const pc = new RTCPeerConnection({ iceServers: [{ urls: `stun:${h}:${port}` }] });
+            pc.createDataChannel('x');
+            await pc.setLocalDescription(await pc.createOffer());
+            await new Promise((r) => setTimeout(r, 1500));
+            pc.close();
+          }
+        },
+        [[...(lan ? [lan] : []), '127.0.0.1'], udpPort] as const,
+      );
+      expect(packets).toEqual([]);
+    } finally {
+      await guarded.close();
+      udp.close();
+    }
+  });
+
+  it('connects a WebSocket to an allowed host and refuses one to a host outside the allowlist', async () => {
+    const blocked: string[] = [];
+    const guarded = await guardedDemo((url) => blocked.push(url));
+    const hits = store.wsHits.length;
+    try {
+      const page = await guarded.context.newPage();
+      await page.goto('/products');
+      const outsideWs = store.url.replace('http://localhost', 'ws://127.0.0.1');
+      const states = await page.evaluate(
+        async (urls) =>
+          Promise.all(
+            urls.map(
+              (u) =>
+                new Promise<string>((resolve) => {
+                  const ws = new WebSocket(u);
+                  ws.onopen = () => {
+                    resolve('open');
+                    ws.close();
+                  };
+                  ws.onerror = () => resolve('error');
+                  setTimeout(() => resolve('timeout'), 5000);
+                }),
+            ),
+          ),
+        [`${store.url.replace('http:', 'ws:')}/ws`, `${outsideWs}/ws`],
+      );
+      expect(states).toEqual(['open', 'error']);
+      expect(store.wsHits.slice(hits).every((h) => h.startsWith('localhost'))).toBe(true);
+      expect(blocked).toContain(`https://127.0.0.1:${store.port}/`);
+    } finally {
+      await guarded.close();
+    }
   });
 });
 

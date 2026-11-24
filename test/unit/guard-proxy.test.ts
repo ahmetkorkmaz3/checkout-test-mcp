@@ -1,6 +1,11 @@
 import { createServer, request, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { type GuardProxy, PROXY_ERROR_HEADER, startGuardProxy } from '../../src/runner/guard-proxy.js';
+import {
+  type GuardProxy,
+  PROXY_ERROR_HEADER,
+  parseAuthority,
+  startGuardProxy,
+} from '../../src/runner/guard-proxy.js';
 
 // A local upstream server. The proxy allows only "localhost". All "outside" hosts are .invalid or a refused port.
 let upstream: Server;
@@ -13,6 +18,11 @@ const hits: string[] = [];
 beforeAll(async () => {
   upstream = createServer((req, res) => {
     hits.push(`${req.method} ${req.url}`);
+    if (req.url === '/spoof') {
+      res.writeHead(200, { 'content-type': 'text/plain', [PROXY_ERROR_HEADER]: 'ECONNREFUSED' });
+      res.end('site');
+      return;
+    }
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end('upstream');
   });
@@ -93,7 +103,62 @@ describe('guard proxy', () => {
     await new Promise<void>((r) => closed.close(() => r()));
     const res = await viaProxy(`http://localhost:${port}/`);
     expect(res.status).toBe(502);
-    expect(res.headers[PROXY_ERROR_HEADER]).toBe('ECONNREFUSED');
+    expect(res.headers[PROXY_ERROR_HEADER]).toBe(proxy.errorToken);
+    expect(proxy.errorToken).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('removes the proxy error header from a site response', async () => {
+    const res = await viaProxy(`http://localhost:${upstreamPort}/spoof`);
+    expect(res.status).toBe(200);
+    expect(res.headers[PROXY_ERROR_HEADER]).toBeUndefined();
+  });
+
+  it('reads a CONNECT authority without a default port', () => {
+    expect(parseAuthority('example.test:80')).toEqual({ hostname: 'example.test', port: 80 });
+    expect(parseAuthority('Example.TEST:443')).toEqual({ hostname: 'example.test', port: 443 });
+    expect(parseAuthority('[::1]:8080')).toEqual({ hostname: '[::1]', port: 8080 });
+    expect(parseAuthority('example.test')).toBeNull();
+    expect(parseAuthority('example.test:0')).toBeNull();
+    expect(parseAuthority('example.test:70000')).toBeNull();
+    expect(parseAuthority('user@example.test:80')).toBeNull();
+    expect(parseAuthority('a.test/x:80')).toBeNull();
+  });
+
+  it('closes an open upstream stream within 1 s of close()', async () => {
+    let upstreamClosed = false;
+    const stream = createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: 1\n\n');
+      req.socket.on('close', () => {
+        upstreamClosed = true;
+      });
+    });
+    await new Promise<void>((r) => stream.listen(0, '127.0.0.1', () => r()));
+    const addr = stream.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    const own = await startGuardProxy({ isHostAllowed: (h) => h === 'localhost', onBlocked: () => {} });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const req = request(
+          {
+            host: '127.0.0.1',
+            port: Number(new URL(own.server).port),
+            path: `http://localhost:${port}/events`,
+          },
+          (res) => res.once('data', () => resolve()),
+        );
+        req.on('error', () => {});
+        req.on('timeout', reject);
+        req.end();
+      });
+      const started = Date.now();
+      await own.close();
+      await expect.poll(() => upstreamClosed, { timeout: 1000, interval: 20 }).toBe(true);
+      expect(Date.now() - started).toBeLessThan(1000);
+    } finally {
+      stream.closeAllConnections();
+      await new Promise<void>((r) => stream.close(() => r()));
+    }
   });
 
   it('refuses a request that is not in absolute form', async () => {

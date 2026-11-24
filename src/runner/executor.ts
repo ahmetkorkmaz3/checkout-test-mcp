@@ -114,6 +114,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
 
   /** Closes the browser and its guard proxy. */
   let closeGuarded: (() => Promise<void>) | undefined;
+  let proxyErrorToken: string | undefined;
   let context: BrowserContext | undefined;
   let page: Page | undefined;
   let failure: Failure | null = null;
@@ -155,11 +156,11 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       try {
         const res = await p.goto(action.goto, { timeout, waitUntil: 'load' });
         checkBlockedNavigation();
-        const proxyError = res ? await res.headerValue(PROXY_ERROR_HEADER) : null;
-        if (res && proxyError) {
+        // Only the guard proxy knows its token, so a site cannot fake this error.
+        if (res && res.status() === 502 && (await res.headerValue(PROXY_ERROR_HEADER)) === proxyErrorToken) {
           throw new StepFailure(
             'target_unreachable',
-            `The guard proxy could not reach ${redactQuery(res.url())}: ${proxyError}.`,
+            `The guard proxy could not reach ${redactQuery(res.url())}.`,
           );
         }
         if (res && res.status() >= 500) {
@@ -531,7 +532,9 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       target,
       ...(input.httpCredentials ? { httpCredentials: input.httpCredentials } : {}),
       onBlocked: (url, frame, isNavigation) => {
-        blocked.push({ url: redactQuery(stripUserInfo(url)), step_id: currentStepId });
+        const entry = { url: redactQuery(stripUserInfo(url)), step_id: currentStepId };
+        // Chromium can open several CONNECT tunnels for one https host. One entry for each step is enough.
+        if (!blocked.some((b) => b.url === entry.url && b.step_id === entry.step_id)) blocked.push(entry);
         // Only a navigation of the run's own page stops the run. A popup has no frame yet, so it is only listed.
         if (isNavigation && page && frame === page.mainFrame())
           blockedNavigation = redactQuery(stripUserInfo(url));
@@ -543,6 +546,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       return;
     }
     closeGuarded = guarded.close;
+    proxyErrorToken = guarded.proxyErrorToken;
     context = guarded.context;
     if (options.trace) await context.tracing.start({ screenshots: true, snapshots: true });
 

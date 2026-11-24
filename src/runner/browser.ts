@@ -19,6 +19,8 @@ export interface GuardedContextInput {
 export interface GuardedContext {
   browser: Browser;
   context: BrowserContext;
+  /** The value of PROXY_ERROR_HEADER on a 502 that the guard proxy sent itself. */
+  proxyErrorToken: string;
   close(): Promise<void>;
 }
 
@@ -43,6 +45,8 @@ export async function openGuardedContext(input: GuardedContextInput): Promise<Gu
       headless: config.headless,
       // "<-loopback>" turns off the loopback bypass of Chromium, so the proxy also checks localhost hosts.
       proxy: { server: proxy.server, bypass: '<-loopback>' },
+      // WebRTC sends UDP (for example STUN) past an HTTP proxy. This policy allows proxied traffic only.
+      args: ['--force-webrtc-ip-handling-policy=disable_non_proxied_udp'],
     });
     const context = await browser.newContext({
       baseURL: target.base_url,
@@ -66,6 +70,7 @@ export async function openGuardedContext(input: GuardedContextInput): Promise<Gu
     return {
       browser: opened,
       context,
+      proxyErrorToken: proxy.errorToken,
       close: async () => {
         await opened.close().catch(() => {});
         await proxy.close();

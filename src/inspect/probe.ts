@@ -4,7 +4,7 @@ import { stripUserInfo } from '../runner/browser.js';
 import { cardInputs } from '../safety/card-inputs.js';
 import { hostOf, isUrlAllowed } from '../safety/hosts.js';
 import { redactPath, redactText } from '../safety/redact-text.js';
-import type { InspectConfig, TargetConfig } from '../schemas/config.js';
+import type { InspectConfig, ResolvedConfig, TargetConfig } from '../schemas/config.js';
 import {
   type ActionLog,
   type ActionResult,
@@ -87,6 +87,7 @@ export interface ProbeResult {
 export interface ProbeContext {
   context: BrowserContext;
   target: TargetConfig;
+  config: Pick<ResolvedConfig, 'production_hosts'>;
   inspect: InspectConfig;
   signal: AbortSignal;
   onProgress(msg: string): void;
@@ -509,6 +510,8 @@ class Probe {
   private email: string | null = null;
   /** True after the guard refused an action. The stop reason is then blocked_by_safety. */
   private refused = false;
+  /** True after the main frame went to a host outside the target. */
+  private mainFrameBlocked = false;
   /** True after a field of the address was filled in the current form. */
   private filledAddress = false;
   /** Dialogs that opened after a probe action. The next step entry writes them first. */
@@ -614,6 +617,15 @@ class Probe {
 
   private check(): void {
     if (this.signal.aborted) throw new ProbeStop('timeout');
+    if (this.mainFrameBlocked) throw new ProbeStop('blocked_by_safety');
+  }
+
+  /**
+   * Called when the page itself goes to a host outside the target, for example by a redirect. The page
+   * then shows the 403 of the guard proxy. The probe stops before its next action.
+   */
+  noteBlockedMainFrame(): void {
+    this.mainFrameBlocked = true;
   }
 
   private addEffect(effect: string): void {
@@ -636,6 +648,8 @@ class Probe {
       return false;
     }
     await settle(this.page);
+    // A redirect to a blocked host leaves the guard page in the main frame. The probe reads nothing there.
+    this.check();
     await this.noteDialogs(false);
     return true;
   }
@@ -653,6 +667,7 @@ class Probe {
     );
     if (r === 'done') {
       await settle(this.page);
+      this.check();
       await this.noteDialogs(true);
     }
     return r;
@@ -1139,14 +1154,15 @@ export async function probeCheckout(ctx: ProbeContext): Promise<ProbeResult> {
   // the guard proxy blocks a redirect hop. The proxy has no frame, so the probe marks the frame here.
   page.on('request', (req) => {
     if (!req.isNavigationRequest() || !/^https?:/.test(req.url())) return;
-    if (isUrlAllowed(req.url(), ctx.target, { production_hosts: [] })) return;
+    if (isUrlAllowed(req.url(), ctx.target, ctx.config)) return;
     let frame: ReturnType<typeof req.frame> | null = null;
     try {
       frame = req.frame();
     } catch {
       frame = null;
     }
-    if (frame && frame !== page.mainFrame()) probe.noteBlockedFrame(stripUserInfo(req.url()), frame);
+    if (frame === page.mainFrame()) probe.noteBlockedMainFrame();
+    else if (frame) probe.noteBlockedFrame(stripUserInfo(req.url()), frame);
   });
   const work = probe.run().then(
     () => 'form_not_understood' as StopReason,

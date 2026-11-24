@@ -554,6 +554,7 @@ export class InspectionManager {
                 probe = await this.phases.probe({
                   context: guarded.context,
                   target,
+                  config: this.deps.config,
                   inspect,
                   signal,
                   onProgress: progress,

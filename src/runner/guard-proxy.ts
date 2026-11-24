@@ -1,4 +1,5 @@
-import { createServer, request as httpRequest, type IncomingMessage } from 'node:http';
+import { randomBytes } from 'node:crypto';
+import { Agent, createServer, request as httpRequest, type IncomingMessage } from 'node:http';
 import { connect, type Socket } from 'node:net';
 import type { Duplex } from 'node:stream';
 
@@ -12,6 +13,11 @@ export interface GuardProxyInput {
 export interface GuardProxy {
   /** The proxy address for Playwright, for example "http://127.0.0.1:53111". */
   server: string;
+  /**
+   * A random value for each proxy. The proxy sends it in PROXY_ERROR_HEADER on its own 502 response,
+   * and removes that header from every upstream response. So a site cannot fake a proxy error.
+   */
+  errorToken: string;
   close(): Promise<void>;
 }
 
@@ -49,6 +55,9 @@ const HOP_HEADERS = new Set([
  * A host that fails the host rule gets 403 and never gets a request.
  */
 export async function startGuardProxy(input: GuardProxyInput): Promise<GuardProxy> {
+  const errorToken = randomBytes(16).toString('hex');
+  // One agent for each proxy, so close() can end its kept-alive upstream connections.
+  const agent = new Agent({ keepAlive: true });
   const sockets = new Set<Duplex>();
   const track = (s: Duplex) => {
     sockets.add(s);
@@ -81,11 +90,12 @@ export async function startGuardProxy(input: GuardProxyInput): Promise<GuardProx
         method: req.method,
         path: `${target.pathname}${target.search}`,
         headers,
+        agent,
       },
       (up) => {
         const out: Record<string, string | string[]> = {};
         for (const [k, v] of Object.entries(up.headers)) {
-          if (v !== undefined && !HOP_HEADERS.has(k)) out[k] = v;
+          if (v !== undefined && !HOP_HEADERS.has(k) && k !== PROXY_ERROR_HEADER) out[k] = v;
         }
         res.writeHead(up.statusCode ?? 502, up.statusMessage, out);
         up.pipe(res);
@@ -98,10 +108,14 @@ export async function startGuardProxy(input: GuardProxyInput): Promise<GuardProx
         res.destroy();
         return;
       }
-      res.writeHead(502, { 'content-type': 'text/plain', [PROXY_ERROR_HEADER]: err.code ?? 'error' });
+      res.writeHead(502, { 'content-type': 'text/plain', [PROXY_ERROR_HEADER]: errorToken });
       res.end('The checkout-test-mcp guard proxy could not reach the host.');
     });
-    req.on('aborted', () => upstream.destroy());
+    upstream.on('socket', track);
+    // A browser that closes the connection early, for example for a stream, also ends the upstream request.
+    res.on('close', () => {
+      if (!res.writableFinished) upstream.destroy();
+    });
     req.pipe(upstream);
   });
 
@@ -110,20 +124,18 @@ export async function startGuardProxy(input: GuardProxyInput): Promise<GuardProx
   server.on('connect', (req: IncomingMessage, client: Duplex, head: Buffer) => {
     track(client);
     client.on('error', () => client.destroy());
-    let target: URL;
-    try {
-      target = new URL(`http://${req.url ?? ''}`);
-    } catch {
+    const authority = parseAuthority(req.url ?? '');
+    if (!authority) {
       client.end('HTTP/1.1 400 Bad Request\r\n\r\n');
       return;
     }
-    const port = Number(target.port || 443);
-    if (!input.isHostAllowed(target.hostname)) {
-      report(input, `https://${target.hostname}${port === 443 ? '' : `:${port}`}/`);
+    const { hostname, port } = authority;
+    if (!input.isHostAllowed(hostname)) {
+      report(input, `https://${hostname}${port === 443 ? '' : `:${port}`}/`);
       client.end('HTTP/1.1 403 Forbidden\r\n\r\n');
       return;
     }
-    const upstream: Socket = connect({ host: target.hostname.replace(/^\[|\]$/g, ''), port }, () => {
+    const upstream: Socket = connect({ host: hostname.replace(/^\[|\]$/g, ''), port }, () => {
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head.length > 0) upstream.write(head);
       upstream.pipe(client);
@@ -155,12 +167,26 @@ export async function startGuardProxy(input: GuardProxyInput): Promise<GuardProx
   const port = typeof addr === 'object' && addr ? addr.port : 0;
   return {
     server: `http://127.0.0.1:${port}`,
+    errorToken,
     close: () =>
       new Promise<void>((resolve) => {
         for (const s of sockets) s.destroy();
+        agent.destroy();
         server.close(() => resolve());
       }),
   };
+}
+
+/**
+ * Reads "host:port" of a CONNECT request. It does not use URL with an http scheme, because that drops a
+ * default port: "host:80" would then tunnel to 443.
+ */
+export function parseAuthority(authority: string): { hostname: string; port: number } | null {
+  const m = /^(\[[0-9a-fA-F:.]+\]|[^\s:/?#@[\]]+):(\d{1,5})$/.exec(authority);
+  if (!m?.[1] || !m[2]) return null;
+  const port = Number(m[2]);
+  if (port < 1 || port > 65535) return null;
+  return { hostname: m[1].toLowerCase(), port };
 }
 
 function report(input: GuardProxyInput, url: string): void {

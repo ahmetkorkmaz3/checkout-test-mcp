@@ -15,7 +15,7 @@
 // /staging-only needs HTTP basic auth with the fixed test user from startDemoStore({ basicAuth }).
 // /third-party/* answers 401 with a basic auth challenge and records if a request had an Authorization header.
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 
@@ -405,6 +405,11 @@ export function startDemoStore({
       outsideHits.push(`${m} ${p}`);
       return send(res, 200, 'text/plain', 'outside');
     }
+    if (m === 'GET' && p === '/spoof-header') {
+      // A site page that sends the error header of the guard proxy. The runner must not trust it.
+      res.setHeader('x-checkout-test-guard-error', 'ECONNREFUSED');
+      return html(res, layout('Spoof', s, '<h1>Spoof</h1>'));
+    }
     if (m === 'GET' && p === '/go/out') return redirect(res, `${outside}/landing`);
     if (m === 'GET' && p === '/img/out') return redirect(res, `${outside}/img`);
     if (m === 'GET' && p === '/go/out-tls') {
@@ -549,6 +554,25 @@ export function startDemoStore({
     return html(res, layout('Not found', s, '<h1>Not found</h1>'), 404);
   });
 
+  // A minimal WebSocket endpoint at /ws: it answers the handshake and records the host. It sends no frames.
+  const wsHits = [];
+  const wsSockets = new Set();
+  server.on('upgrade', (req, socket) => {
+    const key = req.headers['sec-websocket-key'];
+    if (new URL(req.url ?? '/', 'http://localhost').pathname !== '/ws' || typeof key !== 'string') {
+      socket.end('HTTP/1.1 404 Not Found\r\n\r\n');
+      return;
+    }
+    wsHits.push(req.headers.host ?? '');
+    wsSockets.add(socket);
+    socket.on('close', () => wsSockets.delete(socket));
+    const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+    socket.write(
+      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+    );
+    socket.on('error', () => socket.destroy());
+  });
+
   return new Promise((resolve) => {
     server.listen(port, host, () => {
       const addr = server.address();
@@ -560,10 +584,17 @@ export function startDemoStore({
         issuedOtps,
         authRequests,
         outsideHits,
+        wsHits,
         setBugs: (list) => {
           activeBugs = new Set(list);
         },
-        close: () => new Promise((r) => server.close(() => r())),
+        close: () =>
+          new Promise((r) => {
+            // An upgraded WebSocket stays open until it is destroyed, and server.close() waits for it.
+            for (const ws of wsSockets) ws.destroy();
+            server.close(() => r());
+            server.closeAllConnections();
+          }),
       });
     });
   });

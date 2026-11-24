@@ -100,6 +100,7 @@ async function probe(
     return await probeCheckout({
       context: guarded.context,
       target: t.target,
+      config: t.config,
       inspect: t.inspect,
       signal,
       onProgress: () => {},
@@ -165,6 +166,14 @@ describe('checkout probe', () => {
     ]);
   });
 
+  it('stops with blocked_by_safety and acts on nothing when the page redirects to a blocked host', async () => {
+    const contacts = demo.stats.contacts;
+    const r = await probe(demoTarget({ probe_checkout: true, product_paths: ['/go/out'] }));
+    expect(r.stopped_reason).toBe('blocked_by_safety');
+    expect(r.steps.filter((s) => s.result === 'done')).toEqual([]);
+    expect(demo.stats.contacts).toBe(contacts);
+  });
+
   it('stops at a login wall without a guest option', async () => {
     demo.setBugs(['login-wall']);
     const r = await probe(demoTarget({ probe_checkout: true }));
@@ -183,6 +192,19 @@ describe('checkout probe', () => {
 });
 
 describe('site crawl', () => {
+  it('skips a link that redirects to a blocked host and does not read the guard page', async () => {
+    const messages: string[] = [];
+    const report = await crawl(
+      demoTarget({ start_paths: ['/go/out', '/products'], max_pages: 3 }),
+      undefined,
+      messages,
+    );
+    expect(messages.join('\n')).toContain('Skipped /go/out: it redirects to 127.0.0.1');
+    expect(report.pages.map((p) => p.path_pattern)).not.toContain('/outside/landing');
+    expect(report.pages.map((p) => p.path_pattern)).toContain('/products');
+    expect(report.blocked_hosts).toContainEqual({ host: '127.0.0.1', count: 1 });
+  });
+
   it('crawls the demo store and finds the product page and its API call', async () => {
     const { pages, api_calls, blocked_hosts } = await crawl(demoTarget({ max_pages: 10 }));
     expect(blocked_hosts).toEqual([]);
