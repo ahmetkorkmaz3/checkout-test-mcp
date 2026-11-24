@@ -444,6 +444,12 @@ steps:
     }
   });
 
+  it('describes the prompts for any configured target, not only a test target', async () => {
+    const c = await setup({ probe: true });
+    const { prompts } = await c.listPrompts();
+    for (const p of prompts) expect(p.description, p.name).not.toMatch(/test target/);
+  });
+
   it('has no production text on a test target', async () => {
     const c = await setup({ probe: true });
     const text = await promptText(c, 'setup_checkout_tests', { target: 'demo-local' });

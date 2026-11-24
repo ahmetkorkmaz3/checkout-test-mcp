@@ -60,12 +60,13 @@ async function setup() {
           base_url: 'http://localhost:4173',
           allowed_hosts: ['localhost'],
         },
-        // A production target on localhost. No test calls a real host.
+        // A production target on a local host. No test calls a real host.
+        // A test target never shares a host with a production target, so this one is not "localhost".
         'demo-live': {
           profile: 'demo-store',
           environment: 'production',
-          base_url: 'http://localhost:4173',
-          allowed_hosts: ['localhost'],
+          base_url: 'http://live.localhost:4173',
+          allowed_hosts: ['live.localhost'],
           live_cards: {
             'company-visa': {
               number_env: 'LIVE_VISA_NUMBER',
@@ -151,6 +152,10 @@ describe('run_scenario on a production target', () => {
         tool: 'run_scenario',
         arguments: { confirm_production: true },
       }),
+    );
+    const change = error.next_actions.find((a: { kind: string }) => a.kind === 'change_argument');
+    expect(change.description).toBe(
+      'After the user agrees, call run_scenario for target "demo-live" and scenario "card-success" with confirm_production: true.',
     );
     expect(store.getKey(args.idempotency_key)).toBeUndefined();
     const entries = await readdir(config.runs_dir).catch(() => [] as string[]);
@@ -243,7 +248,7 @@ describe('list_scenarios with a production target', () => {
       name: 'demo-live',
       description: '',
       profile: 'demo-store',
-      base_url: 'http://localhost:4173',
+      base_url: 'http://live.localhost:4173',
       environment: 'production',
       warning: PRODUCTION_WARNING,
       live_cards: [

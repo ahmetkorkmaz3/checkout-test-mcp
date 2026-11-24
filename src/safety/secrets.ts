@@ -38,8 +38,14 @@ export class Redactor {
   private readonly values = new Set<string>();
   /** Card numbers and expiry forms. They match also when a page formats them. */
   private readonly patterns = new Map<string, RegExp>();
-  /** CVC values. They are short, so they are redacted only in failure fields. */
+  /** CVC values. They are short, so they are redacted only in failure fields, unless a live card is in the run. */
   private readonly cvcs = new Map<string, RegExp>();
+  private cvcEverywhere = false;
+
+  /** True when a live CVC is registered. Then the whole run output loses a standalone CVC. */
+  get redactsCvcEverywhere(): boolean {
+    return this.cvcEverywhere;
+  }
 
   register(value: string | undefined): void {
     if (value && value.length >= 4) this.values.add(value);
@@ -54,7 +60,11 @@ export class Redactor {
     this.patterns.set(`card:${digits}`, new RegExp(digits.split('').join('[ -]?'), 'g'));
   }
 
-  /** Registers an expiry in its common forms: MM/YY, MM / YY, MM-YY, MMYY, MM/YYYY, MM / YYYY. */
+  /**
+   * Registers an expiry in its common forms: MM/YY, MM / YY, MM-YY, MMYY, MM/YYYY, MM / YYYY.
+   * Only for live cards. A test card registers its exact expiry with register(), because the short
+   * forms also match order numbers and dates.
+   */
   registerExpiry(expiry: string | undefined): void {
     if (!expiry) return;
     this.register(expiry);
@@ -77,9 +87,11 @@ export class Redactor {
     }
   }
 
-  registerCvc(cvc: string | undefined): void {
+  /** `everywhere` is for a live CVC: redactExecuteOutput then removes it from the whole output. */
+  registerCvc(cvc: string | undefined, opts: { everywhere?: boolean } = {}): void {
     if (!cvc || !/^\d{3,4}$/.test(cvc)) return;
     this.cvcs.set(cvc, new RegExp(`(?<!\\d)${cvc}(?!\\d)`, 'g'));
+    if (opts.everywhere) this.cvcEverywhere = true;
   }
 
   redact(text: string): string {
@@ -96,12 +108,12 @@ export class Redactor {
     return out;
   }
 
-  redactDeep<T>(value: T): T {
-    if (typeof value === 'string') return this.redact(value) as T;
-    if (Array.isArray(value)) return value.map((v) => this.redactDeep(v)) as T;
+  redactDeep<T>(value: T, text: (s: string) => string = (s) => this.redact(s)): T {
+    if (typeof value === 'string') return text(value) as T;
+    if (Array.isArray(value)) return value.map((v) => this.redactDeep(v, text)) as T;
     if (value && typeof value === 'object') {
       const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(value)) out[k] = this.redactDeep(v);
+      for (const [k, v] of Object.entries(value)) out[k] = this.redactDeep(v, text);
       return out as T;
     }
     return value;

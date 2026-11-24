@@ -13,7 +13,7 @@ import type { ServerDeps } from '../server.js';
  */
 
 export const SETUP_CHECKOUT_TESTS_DESCRIPTION = [
-  'First setup of checkout tests for a configured test target.',
+  'First setup of checkout tests for a configured target. On a production target, the agent asks the user before each run.',
   'The agent inspects the target, writes fragments and the baseline scenarios, saves and runs each scenario, fixes failures (3 tries for each scenario), and ends with a summary table.',
   'It asks the user only for what the tools cannot answer.',
 ].join(' ');

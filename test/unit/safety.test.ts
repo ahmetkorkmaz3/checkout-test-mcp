@@ -158,6 +158,33 @@ describe('executor output redaction', () => {
   });
 });
 
+describe('executor output redaction with a live card', () => {
+  const output = (r: Redactor) =>
+    redactExecuteOutput(r, {
+      verdict: 'passed',
+      failure: null,
+      steps: [],
+      outcome_checks: [],
+      console_errors: [{ level: 'error', text: 'cvc 123 refused', step_id: 's', count: 1, relevant: true }],
+      network_failures: [],
+      blocked_requests: [],
+      screenshots: [],
+      trace_path: null,
+    });
+
+  it('removes a standalone CVC from the whole output', () => {
+    const r = new Redactor();
+    r.registerCvc('123', { everywhere: true });
+    expect(output(r).console_errors[0]?.text).toBe('cvc [REDACTED] refused');
+  });
+
+  it('keeps a standalone CVC outside failure fields for a test card', () => {
+    const r = new Redactor();
+    r.registerCvc('123');
+    expect(output(r).console_errors[0]?.text).toBe('cvc 123 refused');
+  });
+});
+
 describe('host checks', () => {
   it('knows local hosts', () => {
     for (const h of ['localhost', '127.0.0.1', '[::1]', 'shop.localhost', 'shop.test'])

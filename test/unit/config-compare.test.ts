@@ -51,6 +51,60 @@ describe('config', () => {
       expect(() => parseConfig(raw, '/tmp')).toThrow(/is in production_hosts/);
     });
 
+    describe('test target hosts that belong to a production target', () => {
+      const live = prod({
+        allowed_hosts: ['www.shop.example', 'api.shop.example'],
+        third_party_hosts: ['js.pay.test'],
+      });
+      const test = (over: Record<string, unknown> = {}) => ({
+        profile: 'p',
+        base_url: 'http://shop.test',
+        allowed_hosts: ['shop.test'],
+        allow_unlabeled_host: true,
+        ...over,
+      });
+      const config = (t: Record<string, unknown>) => ({
+        production_hosts: ['example.org'],
+        targets: { live, t },
+      });
+
+      it('refuses a production host in allowed_hosts of a test target', () => {
+        const raw = config(test({ allowed_hosts: ['shop.test', 'api.shop.example'] }));
+        expect(() => parseConfig(raw, '/tmp')).toThrow(
+          'Target "t": host "api.shop.example" belongs to production target "live".',
+        );
+      });
+
+      it('refuses a production host in third_party_hosts of a test target', () => {
+        const raw = config(test({ third_party_hosts: ['www.shop.example'] }));
+        expect(() => parseConfig(raw, '/tmp')).toThrow(
+          'Target "t": host "www.shop.example" belongs to production target "live".',
+        );
+      });
+
+      it('refuses a wildcard overlap in both directions', () => {
+        const wide = config(test({ third_party_hosts: ['*.shop.example'] }));
+        expect(() => parseConfig(wide, '/tmp')).toThrow(
+          'Target "t": host "*.shop.example" belongs to production target "live".',
+        );
+        const prodWide = {
+          production_hosts: ['example.org'],
+          targets: {
+            live: prod({ allowed_hosts: ['www.shop.example', '*.cdn.shop.example'] }),
+            t: test({ third_party_hosts: ['img.cdn.shop.example'] }),
+          },
+        };
+        expect(() => parseConfig(prodWide, '/tmp')).toThrow(
+          'Target "t": host "img.cdn.shop.example" belongs to production target "live".',
+        );
+      });
+
+      it('accepts a third-party host that the production target shares', () => {
+        const raw = config(test({ third_party_hosts: ['js.pay.test'] }));
+        expect(() => parseConfig(raw, '/tmp')).not.toThrow();
+      });
+    });
+
     it('refuses live_cards on a test target', () => {
       const card = {
         number_env: 'LIVE_NUMBER',

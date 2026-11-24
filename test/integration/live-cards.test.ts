@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseConfig } from '../../src/config/load-config.js';
 import type { ToolError } from '../../src/errors/tool-error.js';
 import { type Logger, silentLogger } from '../../src/logger.js';
-import type { ExecuteInput, ExecuteOutput } from '../../src/runner/executor.js';
+import { type ExecuteInput, type ExecuteOutput, redactExecuteOutput } from '../../src/runner/executor.js';
 import { RunManager } from '../../src/runs/manager.js';
 import { RunStore } from '../../src/runs/store.js';
 import { ScenarioRegistry } from '../../src/scenarios/registry.js';
@@ -38,6 +38,18 @@ const LIVE_ENV = {
   LIVE_VISA_NUMBER: '4242424242424242',
   LIVE_VISA_EXPIRY: '12 / 34',
   LIVE_VISA_CVC: '123',
+};
+
+const EMPTY_OUTPUT = {
+  verdict: 'passed',
+  failure: null,
+  steps: [],
+  outcome_checks: [],
+  console_errors: [],
+  network_failures: [],
+  blocked_requests: [],
+  screenshots: [],
+  trace_path: null,
 };
 
 function execute(input: ExecuteInput): Promise<ExecuteOutput> {
@@ -272,7 +284,39 @@ describe('live cards in a run', () => {
     });
     await vi.waitFor(() => expect(executions).toHaveLength(1));
     const r = (executions[0] as ExecuteInput).redactor;
-    expect(r.redact('4242-4242-4242-4242 12/2034')).toBe('[REDACTED] [REDACTED]');
+    expect(r.redact('4242-4242-4242-4242 12 / 34')).toBe('[REDACTED] [REDACTED]');
+    // A test card keeps the card number pattern and the exact expiry only.
+    expect(r.redact('Order #1234 placed. Date 12-34.')).toBe('Order #1234 placed. Date 12-34.');
+    expect(r.redact('12/2034')).toBe('12/2034');
+    await m.idle();
+  });
+
+  it('removes the live CVC from the whole output, and keeps test card runs as before', async () => {
+    const m = await manager({ ...LIVE_ENV });
+    await m.start({
+      target: 'live',
+      confirm_production: true,
+      scenario_id: 'pay',
+      params: { card: 'live/company-visa' },
+      idempotency_key: 'live-cvc-01',
+    });
+    await m.start({
+      target: 'live',
+      confirm_production: true,
+      scenario_id: 'pay',
+      params: {},
+      idempotency_key: 'live-cvc-02',
+    });
+    await vi.waitFor(() => expect(executions).toHaveLength(2));
+    const out = (input: ExecuteInput) =>
+      redactExecuteOutput(input.redactor, {
+        ...(EMPTY_OUTPUT as ExecuteOutput),
+        console_errors: [{ level: 'error', text: 'cvc 123', step_id: 'open', count: 1, relevant: true }],
+      }).console_errors[0]?.text;
+    const live = executions.find((e) => e.allowedCardNumbers.size > 0) as ExecuteInput;
+    const test = executions.find((e) => e.allowedCardNumbers.size === 0) as ExecuteInput;
+    expect(out(live)).toBe('cvc [REDACTED]');
+    expect(out(test)).toBe('cvc 123');
     await m.idle();
   });
 

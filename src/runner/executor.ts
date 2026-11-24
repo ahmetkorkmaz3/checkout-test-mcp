@@ -775,9 +775,10 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
 
 /**
  * Redacts registered values in the whole output. failure.expected and failure.actual quote page text,
- * so they also lose a CVC that stands alone.
+ * so they also lose a CVC that stands alone. With a live card in the run, every text loses it.
  */
 export function redactExecuteOutput(redactor: Redactor, out: ExecuteOutput): ExecuteOutput {
+  if (redactor.redactsCvcEverywhere) return redactor.redactDeep(out, (s) => redactor.redactFailureText(s));
   const redacted = redactor.redactDeep(out);
   const f = redacted.failure;
   if (!f) return redacted;

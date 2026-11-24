@@ -277,8 +277,7 @@ export class RunManager {
         },
         {
           kind: 'change_argument',
-          description:
-            'Only after the user says yes: call run_scenario again with the same arguments and confirm_production: true.',
+          description: `After the user agrees, call run_scenario for target "${input.target}" and scenario "${input.scenario_id}" with confirm_production: true.`,
           tool: 'run_scenario',
           arguments: { confirm_production: true },
         },
@@ -540,11 +539,14 @@ export class RunManager {
 
     const data = await this.loadData(scenario.data, scenario.id);
     const cardList = Object.values(params.cards);
-    // Live cards and test cards alike. A page can show the number in groups and the expiry in another form.
+    // A page can show the number in groups. The short expiry forms and a standalone CVC also match
+    // order numbers and dates, so only a live card gets them.
     for (const c of cardList) {
+      const live = c.id.startsWith(LIVE_CARD_PREFIX);
       redactor.registerCardNumber(c.number);
-      redactor.registerExpiry(c.expiry);
-      redactor.registerCvc(c.cvc);
+      if (live) redactor.registerExpiry(c.expiry);
+      else redactor.register(c.expiry);
+      redactor.registerCvc(c.cvc, { everywhere: live });
     }
     const ctx = {
       params: params.values,

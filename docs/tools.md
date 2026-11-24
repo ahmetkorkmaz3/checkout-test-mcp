@@ -383,7 +383,7 @@ Example: a new run on a production target without the flag.
       },
       {
         "kind": "change_argument",
-        "description": "Only after the user says yes: call run_scenario again with the same arguments and confirm_production: true.",
+        "description": "After the user agrees, call run_scenario for target \"shop-live\" and scenario \"card-success\" with confirm_production: true.",
         "tool": "run_scenario",
         "arguments": { "confirm_production": true }
       }
@@ -395,7 +395,9 @@ Example: a new run on a production target without the flag.
 
 `retryable` is false, because the same call without the yes of the user never works.
 
-Live cards. A production target can declare `live_cards`. A `test_card` param takes the id `live/<name>`. The server reads the number, expiry, and CVC from the env vars of that entry when the run starts, and only for the live cards that the params name. The `behaviour` constraint of the param applies to live cards too. The executor card guard accepts the live numbers of this run and no other number that is not in the registry. The redactor removes the live number and the expiry, also in formatted forms such as a number in groups of four or an expiry such as `12/34`. It removes the CVC in failure texts.
+Live cards. A production target can declare `live_cards`. A `test_card` param takes the id `live/<name>`. The server reads the number, expiry, and CVC from the env vars of that entry when the run starts, and only for the live cards that the params name. The `behaviour` constraint of the param applies to live cards too. The executor card guard accepts the live numbers of this run and no other number that is not in the registry. The redactor removes the live number and the expiry, also in formatted forms such as a number in groups of four or an expiry such as `12/34`. With a live card in the run, it removes a standalone CVC from the whole run output, also from `console_errors`. A test card run keeps the number pattern and the exact expiry string, and removes the CVC only in `failure.expected` and `failure.actual`.
+
+The config load refuses a test target when a host in its `allowed_hosts` or `third_party_hosts` overlaps a host of a production target (its `base_url` host or `allowed_hosts`). The message is `Target "<test>": host "<h>" belongs to production target "<prod>".` The `third_party_hosts` of a production target do not count.
 
 Errors on a production target:
 
@@ -1023,5 +1025,5 @@ The prompt names the key of the latest finished inspection of the target that re
 4. **Types in the schema, business rules in the server.** The SDK rejects a wrong type before the handler runs. Rules that need config (target exists, card behaviour fits) give a `ToolError` with a fix.
 5. **Verdict and category are enums.** The agent can branch on them without text parsing. `summary` is for the human reading the agent transcript.
 6. **`relevant` flags and caps in summary mode.** A checkout page can log hundreds of console lines. The model gets at most ten items of each kind, ordered by relevance.
-7. **Annotations are honest.** `run_scenario`, `inspect_target`, and `save_scenario` are not read-only. All three are open-world: they open a test site in a browser, and `save_scenario` can start a validation run. `save_scenario` also writes files, so it is marked destructive. Clients that ask the user before side effects ask for these tools only.
+7. **Annotations are honest.** `run_scenario`, `inspect_target`, and `save_scenario` are not read-only. All three are open-world: they open the site of a target in a browser, and `save_scenario` can start a validation run. That site can be a test site or a production site. `save_scenario` also writes files, so it is marked destructive. A client can use these hints to ask the user before a side effect. Clients differ in how they use them. `run_scenario` keeps `destructiveHint: false`, because the server itself asks for `confirm_production: true` on each new production run. A run on a test target makes only test orders.
 8. **`tools/list` snapshot test.** A test stores the generated JSON of all tools. Any change to a description or schema shows in review as a diff.

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
-import { checkTargetHost, hostOf, matchesAny } from '../safety/hosts.js';
+import { checkTargetHost, hostMatches, hostOf, matchesAny } from '../safety/hosts.js';
 import { type ResolvedConfig, ServerConfig } from '../schemas/config.js';
 
 export class ConfigError extends Error {
@@ -90,7 +90,33 @@ function validateTargets(cfg: ResolvedConfig): void {
       }
     }
   }
+  problems.push(...sharedProductionHosts(cfg));
   if (problems.length > 0) throw new ConfigError(`Config refused:\n- ${problems.join('\n- ')}`);
+}
+
+/** True when one host pattern matches the other. A "*." wildcard can be on either side. */
+function hostsOverlap(a: string, b: string): boolean {
+  return hostMatches(a, b) || hostMatches(b, a);
+}
+
+/**
+ * A test target must never reach a host that a production target owns.
+ * The third_party_hosts of a production target do not count: a CDN or a payment host can be shared.
+ */
+function sharedProductionHosts(cfg: ResolvedConfig): string[] {
+  const problems: string[] = [];
+  const production = Object.entries(cfg.targets)
+    .filter(([, t]) => t.environment === 'production')
+    .map(([name, t]) => ({ name, hosts: [hostOf(t.base_url), ...t.allowed_hosts] }));
+  for (const [name, target] of Object.entries(cfg.targets)) {
+    if (target.environment === 'production') continue;
+    for (const host of new Set([...target.allowed_hosts, ...target.third_party_hosts])) {
+      const owner = production.find((p) => p.hosts.some((h) => hostsOverlap(host, h)));
+      if (owner)
+        problems.push(`Target "${name}": host "${host}" belongs to production target "${owner.name}".`);
+    }
+  }
+  return problems;
 }
 
 function validateAuthoring(cfg: ResolvedConfig): void {

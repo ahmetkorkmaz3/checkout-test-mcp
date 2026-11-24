@@ -16,7 +16,7 @@ import {
 } from './setup-checkout-tests.js';
 
 export const CREATE_SCENARIO_DESCRIPTION = [
-  'Writes one new checkout test scenario that the user asks for, on a configured test target.',
+  'Writes one new checkout test scenario that the user asks for, on a configured target. On a production target, the agent asks the user before each run.',
   'The agent reuses the fragments in the authoring folder and the latest inspection of the target, saves and runs the scenario, and fixes failures (3 tries).',
   'It asks the user only for what the inspection cannot answer.',
 ].join(' ');
