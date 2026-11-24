@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { guessPageKind } from '../../src/inspect/page-kind.js';
-import { type WordKind, wordsFor } from '../../src/inspect/words.js';
+import { matchesKind, WORD_LISTS, type WordKind, wordsFor } from '../../src/inspect/words.js';
 import { InspectConfig } from '../../src/schemas/config.js';
 
 const m = (kind: WordKind, text: string): boolean => wordsFor(kind).test(text);
@@ -60,9 +60,9 @@ describe('wordsFor', () => {
   });
 
   it('adds extra phrases and escapes them', () => {
-    const re = wordsFor('pay', { pay: ['Buy (now)'] });
-    expect(re.test('Buy (now)')).toBe(true);
-    expect(re.test('Buy now')).toBe(false);
+    const re = wordsFor('pay', { pay: ['Buy (later)'] });
+    expect(re.test('Buy (later)')).toBe(true);
+    expect(re.test('Buy later')).toBe(false);
   });
 
   // Safety: the probe must never click a pay button, and must never confuse kinds.
@@ -72,7 +72,7 @@ describe('wordsFor', () => {
     'Ödeme Adımına Geç',
     'Proceed to checkout',
     'Zur Kasse',
-    'Ir a pagar',
+    'Continue to payment',
   ])('pay does not match %s', (text) => expect(m('pay', text)).toBe(false));
   it.each(['Güvenli Öde', 'Place order', 'Jetzt bezahlen'])('add_to_cart does not match %s', (text) =>
     expect(m('add_to_cart', text)).toBe(false),
@@ -126,5 +126,117 @@ describe('guessPageKind', () => {
   it('never puts page text in the reasons', () => {
     const r = guessPageKind({ ...base, headings: ['Siparişin alındı'] });
     expect(r.reasons.join(' ')).not.toContain('Sipariş');
+  });
+});
+
+describe('pay wins', () => {
+  const others = (Object.keys(WORD_LISTS) as WordKind[]).filter((k) => k !== 'pay');
+  it('has no phrase in another kind that matches pay', () => {
+    const bad: string[] = [];
+    for (const kind of others) {
+      for (const phrase of WORD_LISTS[kind]) {
+        if (wordsFor('pay').test(phrase)) bad.push(`${kind}: ${phrase}`);
+      }
+    }
+    expect(bad).toEqual([]);
+  });
+  it.each([
+    ['checkout', 'Commander et payer'],
+    ['checkout', 'Checkout and pay'],
+    ['checkout', 'Pay and checkout'],
+    ['add_to_cart', 'Sepete ekle ve öde'],
+    ['checkout', 'Complete checkout'],
+    ['checkout', 'Checkout with PayPal'],
+    ['checkout', 'Express checkout'],
+    ['checkout', 'Commander'],
+    ['checkout', 'Alışverişi Tamamla'],
+    ['checkout', 'Finalizar compra'],
+    ['checkout', 'Afrekenen'],
+    ['checkout', 'Ir a pagar'],
+  ] as [WordKind, string][])('%s is false and pay is true for %s', (kind, text) => {
+    expect(matchesKind(kind, text)).toBe(false);
+    expect(matchesKind('pay', text)).toBe(true);
+  });
+  it('still matches explicit checkout steps', () => {
+    for (const t of [
+      'Proceed to checkout',
+      'Zur Kasse',
+      'Naar de kassa',
+      'Passer à la caisse',
+      'Ödeme Adımına Geç',
+      'Tramitar pedido',
+      "Procedi all'ordine",
+      'Passer commande',
+      'Continue to payment',
+      'Weiter zur Zahlung',
+    ]) {
+      expect(matchesKind('checkout', t), t).toBe(true);
+    }
+  });
+  it.each([
+    'Buy now',
+    'Order now',
+    'Jetzt kaufen',
+    'Kaufen',
+    'Bestellen',
+    'Zahlungspflichtig bestellen',
+    'Acheter',
+    'Comprar',
+    'Pagar',
+    'Satın Al',
+    'Hemen Al',
+    'Ödeme Yap',
+    'Sipariş Ver',
+    'Siparişi Onayla',
+    'Ödemeyi Tamamla',
+    'Acquista ora',
+    'Ordina adesso',
+    'Koop nu',
+    'Bestelling bevestigen',
+  ])('pay matches %s', (t) => expect(matchesKind('pay', t)).toBe(true));
+});
+
+describe('input folding', () => {
+  it('matches a curly apostrophe', () => {
+    expect(matchesKind('pay', 'Effettua l\u2019ordine')).toBe(true);
+    expect(matchesKind('guest', 'Continuer en tant qu\u2019invité')).toBe(true);
+  });
+  it('matches NFD text', () => {
+    expect(matchesKind('pay', 'Ödeme Yap'.normalize('NFD'))).toBe(true);
+  });
+});
+
+describe('guessPageKind details', () => {
+  const base = {
+    path: '/x',
+    title: 'X',
+    headings: ['X'],
+    buttons: [],
+    hasPasswordField: false,
+    hasCardFields: false,
+  };
+  it('does not read a word inside a path segment as a result', () => {
+    expect(guessPageKind({ ...base, path: '/urun/merci-kalem' }).kind).toBe('product');
+  });
+  it('reads a result path segment', () => {
+    expect(guessPageKind({ ...base, path: '/checkout/success' }).kind).toBe('result');
+  });
+  it('does not call a stock warning a result', () => {
+    const r = guessPageKind({
+      ...base,
+      path: '/urun/x',
+      headings: ['Yetersiz stok'],
+      buttons: ['Sepete Ekle'],
+    });
+    expect(r.kind).toBe('product');
+  });
+  it('a deeper checkout segment wins over the cart segment', () => {
+    expect(guessPageKind({ ...base, path: '/sepet/odeme' }).kind).toBe('checkout');
+    expect(guessPageKind({ ...base, path: '/sepet' }).kind).toBe('cart');
+  });
+  it('a product page with a buy now button stays a product', () => {
+    expect(guessPageKind({ ...base, path: '/urun/x', buttons: ['Buy now', 'Add to cart'] }).kind).toBe(
+      'product',
+    );
   });
 });

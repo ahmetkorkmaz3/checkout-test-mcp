@@ -18,11 +18,12 @@ export type WordKind = z.infer<typeof WordKind>;
 /**
  * Phrases per kind in English, Turkish, German, French, Spanish, Italian and Dutch.
  * The `pay` list decides what the probe must never click. It lists full phrases, so a
- * checkout step button such as "Ödeme Adımına Geç" does not match. Phrases that can be
- * either a checkout step or a pay button (for example "Valider la commande") stay in `pay`.
+ * checkout step button such as "Ödeme Adımına Geç" does not match. Any phrase that can be
+ * a pay button on some shop (for example "Commander" or "Complete checkout") stays in `pay`.
+ * `checkout` keeps only explicit step phrases. Use matchesKind: pay wins on every overlap.
  * `cookie_accept` exists only so the probe can avoid it.
  */
-const WORDS: Record<WordKind, readonly string[]> = {
+export const WORD_LISTS: Record<WordKind, readonly string[]> = {
   add_to_cart: [
     'add to cart',
     'add to bag',
@@ -64,31 +65,27 @@ const WORDS: Record<WordKind, readonly string[]> = {
     'winkelmand',
   ],
   checkout: [
-    'checkout',
     'proceed to checkout',
     'go to checkout',
     'continue to checkout',
-    'secure checkout',
+    'continue to payment',
     'ödeme adımına geç',
     'ödemeye geç',
-    'alışverişi tamamla',
     'sepeti onayla',
     'zur kasse',
     'zur kasse gehen',
     'zum checkout',
+    'weiter zur zahlung',
     'passer à la caisse',
     'passer la commande',
-    'commander',
+    'passer commande',
     'ir a la caja',
-    'ir a pagar',
-    'finalizar compra',
     'tramitar pedido',
     'proceder al pago',
     'vai alla cassa',
     'procedi al checkout',
-    'afrekenen',
+    "procedi all'ordine",
     'naar de kassa',
-    'doorgaan naar afrekenen',
   ],
   guest: [
     'continue as guest',
@@ -103,11 +100,9 @@ const WORDS: Record<WordKind, readonly string[]> = {
     'üyeliksiz devam et',
     'als gast fortfahren',
     'weiter als gast',
-    'als gast bestellen',
     'ohne registrierung fortfahren',
     "continuer en tant qu'invité",
     'continuer sans compte',
-    "commander en tant qu'invité",
     'continuar como invitado',
     'continuar sin cuenta',
     'compra como invitado',
@@ -117,7 +112,6 @@ const WORDS: Record<WordKind, readonly string[]> = {
     'doorgaan als gast',
     'verder als gast',
     'doorgaan zonder account',
-    'afrekenen als gast',
   ],
   login: [
     'log in',
@@ -138,6 +132,33 @@ const WORDS: Record<WordKind, readonly string[]> = {
   ],
   pay: [
     'pay',
+    'buy now',
+    'order now',
+    'jetzt kaufen',
+    'kaufen',
+    'bestellen',
+    'acheter',
+    'comprar',
+    'pagar',
+    'satın al',
+    'hemen al',
+    'ödeme yap',
+    'sipariş ver',
+    'acquista ora',
+    'ordina adesso',
+    'koop nu',
+    'bestelling bevestigen',
+    'commander',
+    'commander maintenant',
+    'alışverişi tamamla',
+    'finalizar compra',
+    'pagar y finalizar compra',
+    'afrekenen',
+    'complete checkout',
+    'checkout with paypal',
+    'express checkout',
+    'secure checkout',
+    'buy now and checkout',
     'pay now',
     'pay securely',
     'pay with card',
@@ -320,6 +341,7 @@ const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
  */
 function phrasePattern(phrase: string): string {
   return escapeRe(phrase.trim())
+    .replace(/['’]/g, "['’]")
     .replace(/ß/g, 'ss')
     .replace(/ss/gi, '(?:ss|ß)')
     .replace(/[iıİI]/g, '[iıİI]')
@@ -332,8 +354,34 @@ function phrasePattern(phrase: string): string {
  * use letter and digit classes. The pattern has no g flag, so .test is safe to repeat.
  */
 export function wordsFor(kind: WordKind, extra: Partial<Record<WordKind, string[]>> = {}): RegExp {
-  const phrases = [...WORDS[kind], ...(extra[kind] ?? [])].filter((p) => p.trim() !== '');
+  const phrases = [...WORD_LISTS[kind], ...(extra[kind] ?? [])].filter((p) => p.trim() !== '');
   // Longest first, so the alternation prefers the most specific phrase.
   const parts = [...new Set(phrases)].sort((a, b) => b.length - a.length).map(phrasePattern);
   return new RegExp(`(?<![\\p{L}\\p{N}])(?:${parts.join('|')})(?![\\p{L}\\p{N}])`, 'iu');
+}
+
+const defaults = new Map<WordKind, RegExp>();
+function compiled(kind: WordKind, extra?: Partial<Record<WordKind, string[]>>): RegExp {
+  if (extra && Object.keys(extra).length > 0) return wordsFor(kind, extra);
+  let re = defaults.get(kind);
+  if (!re) {
+    re = wordsFor(kind);
+    defaults.set(kind, re);
+  }
+  return re;
+}
+
+/**
+ * Decides whether a text is of one kind. Use it for every clickable decision.
+ * Pay wins: for any kind except `pay`, a text that also matches `pay` is not a match.
+ * It also folds text to NFC, so decomposed letters match.
+ */
+export function matchesKind(
+  kind: WordKind,
+  text: string,
+  extra?: Partial<Record<WordKind, string[]>>,
+): boolean {
+  const t = text.normalize('NFC');
+  if (kind !== 'pay' && compiled('pay', extra).test(t)) return false;
+  return compiled(kind, extra).test(t);
 }
