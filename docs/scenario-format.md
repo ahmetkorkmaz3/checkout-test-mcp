@@ -271,11 +271,11 @@ Outcome checks run after the last step. Each one has an `id`, one expectation, a
 | `param-described` | error | Every param has a `description`, and a `default` or `required: true`. Every fragment arg has a `description`. |
 | `outcome-proves-order` | error | `expected_outcome: order_placed` needs one `response` or `url` outcome check, and one `visible` or `text` outcome check. A check with `when` does not count. |
 | `outcome-proves-no-success` | error | `payment_declined` and `validation_error` need one `hidden` or `no_response` outcome check without `when`. |
-| `no-literal-personal-data` | error | No literal email, phone number, or password in a `fill` value, a `fill_form` value, a param default, or a `with` value. A value with `{{` is a template, not a literal. Use `{{secrets.<name>}}`, `{{data.<name>.<field>}}`, or `{{params.<name>}}`. |
+| `no-literal-personal-data` | error | No literal email, phone number, or password in a `fill` value (also inside `then`), a `fill_form` value, a param default, a fragment arg default, or a `with` value. A password target is a locator that mentions password, şifre, or parola in its label, name, placeholder, test id, role, or css. A value with `{{` is a template, not a literal. Use `{{secrets.<name>}}`, `{{data.<name>.<field>}}`, or `{{params.<name>}}`. |
 | `id-format` | error | The scenario id is kebab-case. Step ids are snake_case. Two underscores in a row are reserved for expanded fragment steps. |
 | `prefer-semantic-locator` | warning | A `css` locator. Use role, test id, label, placeholder, or text. |
 | `payment-step-hint` | warning | A step whose title or locator has a pay word, such as "pay", "place order", or "öde", and no `on_failure.hint`. |
-| `url-glob-query` | warning | A `url.matches` glob that ends with `**`. The glob also matches a query string such as `?return=/sepet`. Use `regex` with `^https?://[^/]+/path/?(\?.*)?$`. |
+| `url-glob-query` | warning | A `url.matches` glob that contains `**`, also at the start. The glob also matches a query string such as `?return=/sepet`. Use `regex` with `^https?://[^/]+/path/?(\?.*)?$`. |
 
 Rules run on the scenario file as written. They also run on the steps that come from fragments. The issue `path` of a fragment step is the `include` step in the scenario file.
 

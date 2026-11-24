@@ -1,11 +1,11 @@
-import { parseDocument } from 'yaml';
+import { isMap, parseDocument } from 'yaml';
 import type { Fragment, Scenario, Step } from '../schemas/scenario.js';
 import { checkTestData } from './test-data.js';
 
 export interface RuleIssue {
   rule: string;
   severity: 'error' | 'warning';
-  /** Dotted YAML path, for example "steps.3.fill" or "params.email.default". Test data issues use "line N". */
+  /** Dotted YAML path, for example "steps.3.value" or "params.email.default". Test data issues use "line N". */
   path: string;
   message: string;
   fix: string;
@@ -27,12 +27,18 @@ export function applyFixes(
   const fixes: string[] = [];
   let out = text;
   const doc = parseDocument(text);
-  if (doc.errors.length === 0 && doc.contents !== null && doc.has('schema_version') === false) {
-    const lines = out.split('\n');
-    let at = lines.findIndex((l) => !/^\s*(#.*)?$/.test(l) && !/^---\s*$/.test(l));
-    if (at === -1) at = lines.length;
-    lines.splice(at, 0, 'schema_version: 1');
-    out = lines.join('\n');
+  const root = doc.contents;
+  if (doc.errors.length === 0 && isMap(root) && !root.has('schema_version')) {
+    if (root.flow) {
+      root.items.unshift(doc.createPair('schema_version', 1));
+      out = doc.toString();
+    } else {
+      const lines = out.split('\n');
+      let at = lines.findIndex((l) => !/^\s*(#.*)?$/.test(l) && !/^---\s*$/.test(l));
+      if (at === -1) at = lines.length;
+      lines.splice(at, 0, 'schema_version: 1');
+      out = lines.join('\n');
+    }
     fixes.push('Added "schema_version: 1".');
   }
   if (!SCHEMA_LINE.test(out)) {
@@ -56,6 +62,9 @@ const SECRET_WORDS = /password|şifre|sifre|parola/i;
 // A small local list. The shared word list of the inspect module replaces it.
 const PAY_WORDS =
   /(?<![\p{L}])(pay|place order|complete order|öde|güvenli öde|siparişi tamamla)(?![\p{L}])/iu;
+
+/** Tests a word list on the text and on its Turkish lower case, because "İ" does not fold to "i" in JS. */
+const hasWord = (re: RegExp, s: string): boolean => re.test(s) || re.test(s.toLocaleLowerCase('tr-TR'));
 
 const isLiteral = (v: string): boolean => v.trim() !== '' && !v.includes('{{');
 
@@ -117,6 +126,13 @@ function locatorStrings(loc: unknown): string[] {
   return ['name', 'label', 'text', 'placeholder', 'test_id'].flatMap((k) => textOf(l[k]));
 }
 
+/** Like locatorStrings, plus role and css. Only the password check uses it, never the pay check. */
+function secretTargetStrings(loc: unknown): string[] {
+  if (!loc || typeof loc !== 'object') return [];
+  const l = loc as Rec;
+  return [...locatorStrings(loc), ...['role', 'css'].flatMap((k) => textOf(l[k]))];
+}
+
 const LOCATOR_ACTIONS = ['click', 'fill', 'select', 'check', 'uncheck', 'press'] as const;
 
 function actionLocatorStrings(action: Rec): string[] {
@@ -127,9 +143,9 @@ function checkFillValues(action: Rec, path: string, issues: RuleIssue[]): void {
   if (action.fill !== undefined && (typeof action.value === 'string' || typeof action.value === 'number')) {
     const value = String(action.value);
     const kind = personalKind(value);
-    const secret = isLiteral(value) && locatorStrings(action.fill).some((s) => SECRET_WORDS.test(s));
-    if (kind) issues.push(personalIssue(kind, `${path}.fill`, `The "fill" action at ${path}`));
-    else if (secret) issues.push(personalIssue('password', `${path}.fill`, `The "fill" action at ${path}`));
+    const secret = isLiteral(value) && secretTargetStrings(action.fill).some((s) => hasWord(SECRET_WORDS, s));
+    if (kind) issues.push(personalIssue(kind, `${path}.value`, `The "fill" action at ${path}`));
+    else if (secret) issues.push(personalIssue('password', `${path}.value`, `The "fill" action at ${path}`));
   }
   if (Array.isArray(action.fill_form)) {
     action.fill_form.forEach((f, i) => {
@@ -137,7 +153,8 @@ function checkFillValues(action: Rec, path: string, issues: RuleIssue[]): void {
       if (typeof field.value !== 'string') return;
       const p = `${path}.fill_form.${i}.value`;
       const kind = personalKind(field.value);
-      const secret = isLiteral(field.value) && locatorStrings(field.field).some((s) => SECRET_WORDS.test(s));
+      const secret =
+        isLiteral(field.value) && secretTargetStrings(field.field).some((s) => hasWord(SECRET_WORDS, s));
       if (kind) issues.push(personalIssue(kind, p, `The "fill_form" value at ${p}`));
       else if (secret) issues.push(personalIssue('password', p, `The "fill_form" value at ${p}`));
     });
@@ -158,7 +175,7 @@ function checkWith(step: Step, path: string, issues: RuleIssue[]): number {
     const value = String(v);
     const kind = personalKind(value);
     if (kind) issues.push(personalIssue(kind, p, `The "with" value at ${p}`));
-    else if (isLiteral(value) && SECRET_WORDS.test(name)) {
+    else if (isLiteral(value) && hasWord(SECRET_WORDS, name)) {
       issues.push(personalIssue('password', p, `The "with" value at ${p}`));
     }
   }
@@ -196,12 +213,12 @@ function checkLocatorsAndUrls(root: unknown, path: string, issues: RuleIssue[]):
     }
     if (key === 'url' && v && typeof v === 'object') {
       const glob = (v as Rec).matches;
-      if (typeof glob === 'string' && glob.endsWith('**')) {
+      if (typeof glob === 'string' && glob.includes('**')) {
         issues.push({
           rule: 'url-glob-query',
           severity: 'warning',
           path: `${p}.matches`,
-          message: `The glob "${glob}" ends with "**". It also matches a query string. For a path such as /sepet, the URL of another page with "?return=/sepet" matches too.`,
+          message: `The glob "${glob}" contains "**". It also matches a query string. For a path such as /sepet, the URL of another page with "?return=/sepet" matches too.`,
           fix: 'Use "regex" with "^https?://[^/]+/path/?(\\?.*)?$". Replace "path" with the page path.',
         });
       }
@@ -217,7 +234,7 @@ function checkPayHint(step: Step, path: string, issues: RuleIssue[]): void {
     ...actionLocatorStrings(step as Rec),
     ...(step.then ?? []).flatMap((a) => actionLocatorStrings(a as Rec)),
   ];
-  if (!strings.some((s) => PAY_WORDS.test(s))) return;
+  if (!strings.some((s) => hasWord(PAY_WORDS, s))) return;
   issues.push({
     rule: 'payment-step-hint',
     severity: 'warning',
@@ -287,13 +304,33 @@ function checkParams(s: Scenario, issues: RuleIssue[]): void {
         fix: 'Add a "default", or set "required: true".',
       });
     }
-    if (typeof p.default === 'string') {
-      const kind = personalKind(p.default);
-      if (kind) issues.push(personalIssue(kind, `${base}.default`, `The default of param "${name}"`));
-      else if (isLiteral(p.default) && (SECRET_WORDS.test(name) || SECRET_WORDS.test(p.description ?? ''))) {
-        issues.push(personalIssue('password', `${base}.default`, `The default of param "${name}"`));
-      }
+    if (typeof p.default === 'string' || typeof p.default === 'number') {
+      checkDefault(
+        p.default,
+        name,
+        p.description,
+        `${base}.default`,
+        `The default of param "${name}"`,
+        issues,
+      );
     }
+  }
+}
+
+/** A default is a literal in the file. It must not hold personal data or a password. */
+function checkDefault(
+  value: string | number,
+  name: string,
+  description: string | undefined,
+  path: string,
+  where: string,
+  issues: RuleIssue[],
+): void {
+  const text = String(value);
+  const kind = personalKind(text);
+  if (kind) issues.push(personalIssue(kind, path, where));
+  else if (isLiteral(text) && (hasWord(SECRET_WORDS, name) || hasWord(SECRET_WORDS, description ?? ''))) {
+    issues.push(personalIssue('password', path, where));
   }
 }
 
@@ -307,6 +344,16 @@ function checkFragmentArgs(f: Fragment, issues: RuleIssue[]): void {
         message: `Fragment arg "${name}" has no description.`,
         fix: 'Add a "description" that says what the value means.',
       });
+    }
+    if (a.default !== undefined) {
+      checkDefault(
+        a.default,
+        name,
+        a.description,
+        `args.${name}.default`,
+        `The default of fragment arg "${name}"`,
+        issues,
+      );
     }
   }
 }

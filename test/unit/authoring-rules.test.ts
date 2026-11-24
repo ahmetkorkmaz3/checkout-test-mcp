@@ -125,7 +125,7 @@ describe('no-literal-personal-data', () => {
   it('fails on a literal email in fill', () => {
     const t = scenario({ steps: stepsWith('fill: { label: Email }, value: "a@b.co"') });
     const i = check(t).find((x) => x.rule === 'no-literal-personal-data');
-    expect(i?.path).toBe('steps.0.fill');
+    expect(i?.path).toBe('steps.0.value');
     expect(i?.message).not.toContain('a@b.co');
   });
   it('fails on a literal phone in fill', () => {
@@ -254,9 +254,10 @@ describe('payment-step-hint', () => {
 });
 
 describe('url-glob-query', () => {
-  it('passes with a glob that ends in a path', () => {
+  it('passes with a regex url check', () => {
     const t = scenario({
-      outcome: '  - { id: u, url: { matches: "**/thanks" } }\n  - { id: v, visible: { role: alert } }',
+      outcome:
+        '  - { id: u, url: { regex: "^https?://[^/]+/thanks/?(?.*)?$" } }\n  - { id: v, visible: { role: alert } }',
     });
     expect(rules(check(t))).not.toContain('url-glob-query');
   });
@@ -323,5 +324,105 @@ describe('applyFixes', () => {
     const { text, fixes } = applyFixes('schema_version: 1\nid: a\n', 'fragment', 's.json');
     expect(text).toBe('# yaml-language-server: $schema=s.json\nschema_version: 1\nid: a\n');
     expect(fixes).toHaveLength(1);
+  });
+});
+
+describe('fix round 1', () => {
+  const fragmentOf = (over: Record<string, unknown>) =>
+    Fragment.parse({
+      schema_version: 1,
+      kind: 'fragment',
+      id: 'f',
+      description: 'd',
+      steps: [{ id: 's', title: 'S', goto: '/' }],
+      ...over,
+    });
+  const frag = (over: Record<string, unknown>) =>
+    checkHouseRules({ kind: 'fragment', raw: fragmentOf(over) });
+  const withSteps = (steps: string) => scenario({ steps });
+
+  it('fragment arg default: email, phone, password name', () => {
+    const a = (name: string, d: string | number) => ({ args: { [name]: { description: 'x', default: d } } });
+    expect(frag(a('email', 'someone@gmail.com'))[0]).toMatchObject({
+      rule: 'no-literal-personal-data',
+      path: 'args.email.default',
+    });
+    expect(rules(frag(a('phone', 5321234567)))).toContain('no-literal-personal-data');
+    expect(rules(frag(a('password', 'hunter2')))).toContain('no-literal-personal-data');
+    expect(rules(frag(a('qty', 2)))).toEqual([]);
+  });
+  it('password check covers css and role targets', () => {
+    const fill = withSteps(
+      '  - { id: s1, title: S, fill: { css: \'input[name="password"]\' }, value: "hunter2" }',
+    );
+    expect(check(fill).find((x) => x.rule === 'no-literal-personal-data')?.path).toBe('steps.0.value');
+    const form = withSteps(
+      '  - { id: s1, title: S, fill_form: [{ field: { css: \'input[name="password"]\' }, value: "hunter2" }] }',
+    );
+    expect(check(form).find((x) => x.rule === 'no-literal-personal-data')?.path).toBe(
+      'steps.0.fill_form.0.value',
+    );
+    const role = withSteps('  - { id: s1, title: S, fill: { role: textbox, name: "Parola" }, value: "x1" }');
+    expect(rules(check(role))).toContain('no-literal-personal-data');
+  });
+  it('css pay words do not count for the pay hint', () => {
+    const t = withSteps('  - { id: s1, title: Open, click: { css: ".pay" } }');
+    expect(rules(check(t))).not.toContain('payment-step-hint');
+  });
+  it('Turkish uppercase: ŞİFRE and SİPARİŞİ TAMAMLA', () => {
+    const pw = withSteps('  - { id: s1, title: S, fill: { label: "ŞİFRE" }, value: "hunter2" }');
+    expect(rules(check(pw))).toContain('no-literal-personal-data');
+    const pay = withSteps('  - { id: s1, title: "SİPARİŞİ TAMAMLA", click: { role: button, name: Go } }');
+    expect(rules(check(pay))).toContain('payment-step-hint');
+  });
+  it('flow map root stays valid YAML', () => {
+    const { text, fixes } = applyFixes('{id: a, title: T}\n', 'scenario', 's.json');
+    const parsed = parse(text) as Record<string, unknown>;
+    expect(parsed).toMatchObject({ schema_version: 1, id: 'a', title: 'T' });
+    expect(fixes).toHaveLength(2);
+  });
+  it('scalar or sequence root gets no schema_version', () => {
+    expect(applyFixes('- a\n- b\n', 'scenario', 's.json').fixes).toHaveLength(1);
+    expect(applyFixes('just text\n', 'scenario', 's.json').text).not.toContain('schema_version');
+  });
+  it('number param default that looks like a phone', () => {
+    const t = scenario({ params: '  phone: { type: integer, default: 5321234567, description: d }' });
+    expect(check(t).find((x) => x.rule === 'no-literal-personal-data')?.path).toBe('params.phone.default');
+  });
+  it('url-glob-query: any ** glob, also a leading one', () => {
+    const t = scenario({
+      outcome: '  - { id: u, url: { matches: "**/sepet" } }\n  - { id: v, visible: { role: alert } }',
+    });
+    expect(rules(check(t))).toContain('url-glob-query');
+    const ok = scenario({
+      outcome:
+        '  - { id: u, url: { matches: "https://x.test/sepet" } }\n  - { id: v, visible: { role: alert } }',
+    });
+    expect(rules(check(ok))).not.toContain('url-glob-query');
+  });
+  it('fragment kind: id-format, css, pay hint', () => {
+    const f = fragmentOf({
+      steps: [
+        { id: 'a__b', title: 'Pay now', click: { css: '.go' } },
+        {
+          id: 'ok_step',
+          title: 'Pay now',
+          click: { role: 'button', name: 'Pay' },
+          on_failure: { hint: 'h' },
+        },
+      ],
+    });
+    f.id = 'Bad_Id';
+    const issues = checkHouseRules({ kind: 'fragment', raw: f });
+    const at = (r: string) => issues.filter((i) => i.rule === r).map((i) => i.path);
+    expect(at('id-format')).toEqual(['id', 'steps.0.id']);
+    expect(at('prefer-semantic-locator')).toEqual(['steps.0.click.css']);
+    expect(at('payment-step-hint')).toEqual(['steps.0']);
+  });
+  it('then-nested fill values', () => {
+    const t = withSteps(
+      '  - { id: s1, title: S, click: { role: button, name: Go }, then: [{ fill: { label: Mail }, value: "a@b.co" }] }',
+    );
+    expect(check(t).find((x) => x.rule === 'no-literal-personal-data')?.path).toBe('steps.0.then.0.value');
   });
 });
