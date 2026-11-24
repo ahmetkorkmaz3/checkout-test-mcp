@@ -18,6 +18,7 @@ import type { ResolvedConfig, TargetConfig } from '../schemas/config.js';
 import { RunOptions, type RunRecord } from '../schemas/run.js';
 import type { OutcomeCheck, Step } from '../schemas/scenario.js';
 import { closest } from '../util/closest.js';
+import { BrowserSlots } from './browser-slots.js';
 import type { RunStore } from './store.js';
 import { buildSummary } from './summary.js';
 
@@ -37,6 +38,8 @@ export interface RunManagerDeps {
   execute?: (input: ExecuteInput) => Promise<ExecuteOutput>;
   env?: NodeJS.ProcessEnv;
   now?: () => Date;
+  /** Shared with InspectionManager. Default: a new set of max_parallel_runs slots. */
+  slots?: BrowserSlots;
 }
 
 interface Prepared {
@@ -56,17 +59,20 @@ export function newRunId(): string {
 export class RunManager {
   private readonly events = new EventEmitter();
   private readonly queue: Prepared[] = [];
-  private running = 0;
   private readonly execute: (input: ExecuteInput) => Promise<ExecuteOutput>;
   private readonly env: NodeJS.ProcessEnv;
   private readonly now: () => Date;
   private readonly active = new Set<Promise<void>>();
+  private readonly slots: BrowserSlots;
 
   constructor(private readonly deps: RunManagerDeps) {
     this.execute = deps.execute ?? executeRun;
     this.env = deps.env ?? process.env;
     this.now = deps.now ?? (() => new Date());
     this.events.setMaxListeners(0);
+    this.slots = deps.slots ?? new BrowserSlots(deps.config.max_parallel_runs);
+    // An inspection that ends frees a slot. A queued run can then start.
+    this.slots.onFree(() => this.pump());
   }
 
   /** Call once at startup. Marks runs that were in progress as finished with verdict "error". */
@@ -518,13 +524,12 @@ export class RunManager {
   }
 
   private pump(): void {
-    while (this.running < this.deps.config.max_parallel_runs && this.queue.length > 0) {
+    while (this.queue.length > 0 && this.slots.tryAcquire()) {
       const next = this.queue.shift() as Prepared;
-      this.running++;
       const p = this.runOne(next).finally(() => {
-        this.running--;
         this.active.delete(p);
-        this.pump();
+        // release() calls pump() through onFree when no inspection waits for the slot.
+        this.slots.release();
       });
       this.active.add(p);
     }

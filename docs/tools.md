@@ -12,7 +12,8 @@ Contents:
 5. `get_run_result`
 6. `compare_runs`
 7. `save_scenario`
-8. Reasons behind the choices
+8. `inspect_target`
+9. Reasons behind the choices
 
 ## 1. Shared schemas
 
@@ -84,7 +85,7 @@ export const ToolErrorCode = z.enum([
   'SCENARIO_INVALID', // save_scenario: schema, house rule, or trial load issues in details.issues
   'PATH_REFUSED', // a file path leaves its allowed folder
   'SCENARIO_EXISTS', // save_scenario: the file exists with other content and overwrite is off
-  'INSPECTION_FAILED', // inspect_target: the job could not finish
+  'INSPECTION_FAILED', // inspect_target: a phase of the job stopped. A report warning, not a tool error
   'INTERNAL_ERROR',
 ]);
 
@@ -681,9 +682,188 @@ Errors:
 | `INVALID_PARAMS` | `validate_on` with a kind other than `scenario`. |
 | Errors of `run_scenario` | The file is saved, but the validation run did not start. |
 
-`INSPECTION_FAILED` belongs to `inspect_target`.
+## 8. `inspect_target`
 
-## 8. Reasons behind the choices
+The tool reads a test target and suggests scenarios. One tool starts the background job and long polls it, like `run_scenario` plus `get_run_result` in one call. Source: `src/tools/inspect-target.ts` (tool), `src/inspect/manager.ts` (jobs), `src/inspect/report.ts` (report schema and trim), and `src/inspect/suggest.ts` (rules). Design: [scenario authoring spec](superpowers/specs/2026-11-24-scenario-authoring-design.md), sections 7.2 and 7.4.
+
+```ts
+server.registerTool(
+  'inspect_target',
+  {
+    title: 'Inspect a test target',
+    description: INSPECT_TARGET_DESCRIPTION, // see the source, reviewed through the tools/list snapshot
+    inputSchema: z.object({
+      target: z.string().min(1),
+      idempotency_key: z.string().regex(/^[A-Za-z0-9._:-]{8,128}$/), // same regex as run_scenario
+      scope: z.enum(['site', 'code', 'both']).default('both'),
+      wait_s: z.number().int().min(0).max(20).default(20),
+    }),
+    outputSchema: InspectionReport.extend({
+      reused_existing_inspection: z.boolean(),
+      next: NextAction,
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  handler,
+);
+
+const InspectionReport = z.object({
+  inspection_id: z.string().regex(/^insp_[A-Za-z0-9_-]{16}$/),
+  target: z.string(),
+  status: z.enum(['queued', 'running', 'finished']),
+  interrupted: z.boolean(), // the server stopped during the job. It was not repeated.
+  progress: z.string(),
+  site: SiteReport.nullable(), // pages, api_calls, blocked_hosts
+  checkout_probe: ProbeResult.nullable(), // reached, stopped_reason, steps, dialogs, guest_option, payment, side_effects
+  code: CodeReport.nullable(), // frameworks, routes, ui_strings, test_ids, payment_hints, otp_hints, stats, warnings
+  suggested_scenarios: z.array(Suggestion),
+  warnings: z.array(z.string()),
+  side_effects: z.array(z.string()),
+  report_path: z.string(), // runs_dir/inspections/<id>.json
+});
+
+const Suggestion = z.object({
+  id: z.string(), // "<target>-guest-card"
+  title: z.string(),
+  expected_outcome: ExpectedOutcome,
+  baseline: z.boolean(), // write and run in the first setup with no question
+  why: z.string(),
+  evidence: z.array(z.string()), // report paths, for example "checkout_probe.payment.test_card_select"
+  missing: z.array(z.string()), // inputs to ask the user for
+  card_source: z
+    .discriminatedUnion('kind', [
+      z.object({ kind: z.literal('site_select'), option: z.string() }),
+      z.object({ kind: z.literal('registry'), card_id: z.string() }),
+    ])
+    .nullable(),
+});
+```
+
+`ProbeResult.stopped_reason` is one of `payment_step_reached`, `login_required`, `no_product`, `no_add_to_cart`, `no_checkout_button`, `form_not_understood`, `timeout`, `blocked_by_safety`, `verification_required`. `ProbeResult.dialogs` lists the dialogs that opened during the probe.
+
+The server does these steps in this order:
+
+1. Unknown target: `UNKNOWN_TARGET`. A target host in `production_hosts`: `PRODUCTION_HOST_REFUSED` (the config load refuses it too). A host without a test label: `HOST_NOT_ALLOWED`. `scope: "code"` without `inspect.source_dirs`: `INVALID_PARAMS`.
+2. The key has an inspection with the same target and scope: the server returns it with `reused_existing_inspection: true`. Other arguments: `IDEMPOTENCY_CONFLICT`. `wait_s` is not part of the comparison.
+3. `http_credentials` secrets that are not set: `MISSING_ENV_SECRET`.
+4. The job waits in the queue. One inspection runs at a time, and it needs a browser slot that it shares with the runs (`max_parallel_runs`).
+5. Site phase (`scope` "site" or "both"): the crawl. Then the checkout probe, only with `inspect.probe_checkout: true`. Without the flag, `checkout_probe` is null and a warning names the flag and the side effects.
+6. Code phase (`scope` "code" or "both"): the scan of `inspect.source_dirs`. With `scope: "both"` and no source folders, the scan does not run and a warning says so.
+7. Suggestions from the rules in the spec, section 7.4. Then `status: "finished"`.
+
+A phase that crashes does not give a tool error. The job keeps the parts that are done, finishes, and adds a warning that starts with `INSPECTION_FAILED`. The warning has the phase, the error class, and a short message without URLs or absolute paths.
+
+After a restart, an inspection that was `queued` or `running` becomes `finished` with `interrupted: true` and a warning. The server does not repeat it.
+
+The tool result stays under 40 000 characters of report JSON. The server cuts page `elements` first, then `code.ui_strings`, then `site.api_calls`, and adds a warning that names `report_path`. The file has the full report.
+
+`next`: while the status is not `finished`, a `call_tool` of `inspect_target` with the same arguments. When it is finished, a `call_tool` of `save_scenario` if a baseline suggestion exists, else `ask_human` for the missing inputs.
+
+Example: a finished inspection (trimmed).
+
+```json
+{
+  "inspection_id": "insp_Q2x8LmN4pR7sTv0a",
+  "target": "demo-local",
+  "status": "finished",
+  "interrupted": false,
+  "progress": "Finished.",
+  "site": {
+    "pages": [
+      { "path_pattern": "/products/*", "url_path": "/products/ceramic-mug", "kind": "product", "title": "Ceramic mug", "...": "..." },
+      { "path_pattern": "/checkout", "url_path": "/checkout", "kind": "checkout", "...": "..." }
+    ],
+    "api_calls": [
+      { "method": "GET", "path_pattern": "/api/products/*", "status": 200, "content_type": "application/json", "page_kind": "product" }
+    ],
+    "blocked_hosts": []
+  },
+  "checkout_probe": {
+    "reached": "payment",
+    "stopped_reason": "payment_step_reached",
+    "steps": [{ "action": "add to cart: \"Add to cart\"", "page_kind": "product", "url_path": "/", "result": "done" }],
+    "dialogs": [],
+    "guest_option": true,
+    "payment": {
+      "methods": [],
+      "card_form": true,
+      "card_iframe_hosts": ["localhost"],
+      "test_card_select": null,
+      "agreement_checkbox": "I accept the terms",
+      "pay_button": "Pay now"
+    },
+    "side_effects": ["cart item", "guest account inspect-0a1b2c3d@example.test", "address"]
+  },
+  "code": {
+    "frameworks": [],
+    "routes": [],
+    "ui_strings": [],
+    "test_ids": [{ "value": "pay-button", "file": "app/checkout/page.tsx", "line": 9 }],
+    "payment_hints": [{ "provider": "stripe", "package": "@stripe/stripe-js", "file": "package.json" }],
+    "otp_hints": [],
+    "stats": { "files": 2, "skipped": 0, "truncated": false },
+    "warnings": []
+  },
+  "suggested_scenarios": [
+    {
+      "id": "demo-local-guest-card",
+      "title": "Guest checkout with a test card that succeeds",
+      "expected_outcome": "order_placed",
+      "baseline": true,
+      "why": "Proves that a guest can place an order with a card. It is the main checkout path.",
+      "evidence": ["checkout_probe.reached (payment)", "checkout_probe.guest_option", "code.payment_hints[0] (@stripe/stripe-js)"],
+      "missing": [],
+      "card_source": { "kind": "registry", "card_id": "stripe/visa-success" }
+    },
+    {
+      "id": "demo-local-member-card",
+      "title": "Member login and checkout with a test card that succeeds",
+      "expected_outcome": "order_placed",
+      "baseline": false,
+      "why": "Proves that a logged-in member can place an order with a card.",
+      "evidence": ["code.payment_hints[0] (@stripe/stripe-js)"],
+      "missing": ["a login page on the site", "member secrets: map member_email and member_password in the target secrets config"],
+      "card_source": { "kind": "registry", "card_id": "stripe/visa-success" }
+    }
+  ],
+  "warnings": [],
+  "side_effects": ["cart item", "guest account inspect-0a1b2c3d@example.test", "address"],
+  "report_path": "/home/me/shop-tests/.checkout-test-mcp/runs/inspections/insp_Q2x8LmN4pR7sTv0a.json",
+  "reused_existing_inspection": false,
+  "next": {
+    "kind": "call_tool",
+    "description": "Write each baseline scenario in suggested_scenarios, then save it with save_scenario and validate_on on this target.",
+    "tool": "save_scenario"
+  }
+}
+```
+
+Suggestion rules (spec section 7.4):
+
+| Suggestion | Baseline when |
+|---|---|
+| `<target>-guest-card` | The probe reached the payment step, and a test card source has a success card. |
+| `<target>-card-declined` | The same, and the source has a decline card. |
+| `<target>-terms-required` | The payment step has an agreement checkbox. |
+| `<target>-member-card` | A login page exists, the target maps `member_email` and `member_password` in `secrets`, and a test card source has a success card. |
+| `<target>-otp-login` (offer) | A page has a one-time code field, or the code scan found OTP hints. |
+| `<target>-gift-card`, `<target>-wallet-<name>` (offers) | The payment step lists these methods. |
+
+The four baseline rows are always in the list. A row with missing evidence has `baseline: false` and says what is missing. Test card source order: the site test card select (decline options match the `decline` word list), then the first `code.payment_hints` provider with registry cards, then a `card_iframe_hosts` host that contains a provider name. A provider without published cards, for example Craftgate, gives `card_source: null` and a `missing` entry.
+
+Errors:
+
+| Code | When |
+|---|---|
+| `UNKNOWN_TARGET` | The target is not in the config. |
+| `PRODUCTION_HOST_REFUSED` | A target host is in `production_hosts`. |
+| `HOST_NOT_ALLOWED` | A target host has no test label. |
+| `INVALID_PARAMS` | `scope: "code"` without `inspect.source_dirs`. |
+| `IDEMPOTENCY_CONFLICT` | The key has an inspection with another target or scope. |
+| `MISSING_ENV_SECRET` | An `http_credentials` secret is not set. |
+| `INSPECTION_FAILED` | Not a tool error. A warning in the report when a phase stopped. |
+
+## 9. Reasons behind the choices
 
 1. **The description tells the model the order of calls.** Each description says which tool comes before it, which comes after it, and what not to do ("Do not call run_scenario again to check progress"). Models follow sequence text in descriptions well.
 2. **Examples inside `.describe()`.** A concrete example value ("pr-4812-3ds-fail-after-deploy") gives the model the format at once. This lowers first-call errors more than a long rule.

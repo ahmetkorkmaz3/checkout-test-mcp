@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 // @ts-expect-error plain JS example without types
 import { startDemoStore } from '../../examples/demo-store/server.mjs';
 import { parseConfig } from '../../src/config/load-config.js';
+import { InspectionManager } from '../../src/inspect/manager.js';
 import { silentLogger } from '../../src/logger.js';
 import { RunManager } from '../../src/runs/manager.js';
 import { RunStore } from '../../src/runs/store.js';
@@ -122,7 +123,13 @@ beforeAll(async () => {
   const runStore = new RunStore(config.runs_dir);
   await runStore.init();
   const manager = new RunManager({ config, registry, store: runStore, logger: silentLogger });
-  const server = createServer({ config, registry, manager, logger: silentLogger });
+  const server = createServer({
+    config,
+    registry,
+    manager,
+    inspections: new InspectionManager({ config, logger: silentLogger }),
+    logger: silentLogger,
+  });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st);
   client = new Client({ name: 'e2e', version: '0.0.0' });

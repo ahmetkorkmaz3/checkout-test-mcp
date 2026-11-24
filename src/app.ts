@@ -1,5 +1,7 @@
 import { loadConfig } from './config/load-config.js';
+import { InspectionManager } from './inspect/manager.js';
 import { createLogger, type Logger } from './logger.js';
+import { BrowserSlots } from './runs/browser-slots.js';
 import { RunManager } from './runs/manager.js';
 import { RunStore } from './runs/store.js';
 import { ScenarioRegistry } from './scenarios/registry.js';
@@ -17,13 +19,17 @@ export async function bootstrap(opts: {
   const registry = await ScenarioRegistry.load(config.scenario_dirs);
   const store = new RunStore(config.runs_dir);
   const interrupted = await store.init();
-  const manager = new RunManager({ config, registry, store, logger });
+  // Runs and inspections share the browser slots, so the server never opens more than max_parallel_runs browsers.
+  const slots = new BrowserSlots(config.max_parallel_runs);
+  const manager = new RunManager({ config, registry, store, logger, slots });
   await manager.recover(interrupted);
+  const inspections = new InspectionManager({ config, logger, slots });
+  await inspections.init();
   logger.info('ready', {
     targets: Object.keys(config.targets),
     scenarios: registry.ids(),
     runs_dir: config.runs_dir,
     recovered_runs: interrupted.length,
   });
-  return { config, registry, manager, logger };
+  return { config, registry, manager, inspections, logger };
 }

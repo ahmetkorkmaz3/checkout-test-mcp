@@ -1,11 +1,17 @@
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 // @ts-expect-error plain JS example without types
 import { startDemoStore } from '../../examples/demo-store/server.mjs';
 import { parseConfig } from '../../src/config/load-config.js';
 import { guardedClick, guardedFill, guardedKey } from '../../src/inspect/actions.js';
 import { BlockedHostCounter, crawlSite, type SiteReport } from '../../src/inspect/crawl.js';
+import { InspectionManager } from '../../src/inspect/manager.js';
 import { type ProbeResult, probeCheckout } from '../../src/inspect/probe.js';
+import type { InspectionReport } from '../../src/inspect/report.js';
+import { silentLogger } from '../../src/logger.js';
 import { openGuardedContext } from '../../src/runner/browser.js';
 import type { InspectConfig } from '../../src/schemas/config.js';
 
@@ -689,5 +695,77 @@ describe('checkout probe safety rules', () => {
     const r = await probe(caseTarget('sms'));
     expect(r.stopped_reason).toBe('verification_required');
     expect(hits.filter((h) => h.startsWith('POST /clicked/'))).toEqual([]);
+  });
+});
+
+describe('inspection job on the demo store', () => {
+  let dir = '';
+  let manager: InspectionManager | undefined;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'ctm-e2e-inspect-'));
+  });
+
+  afterAll(async () => {
+    await manager?.idle();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function inspectToEnd(input: { target: string; idempotency_key: string }): Promise<InspectionReport> {
+    const config = parseConfig(
+      {
+        runs_dir: path.join(dir, 'runs'),
+        targets: {
+          'demo-local': {
+            profile: 'demo-store',
+            base_url: demo.url,
+            allowed_hosts: ['localhost'],
+            inspect: {
+              max_pages: 10,
+              probe_checkout: true,
+              source_dirs: [path.resolve(import.meta.dirname, '../../examples/demo-store/src')],
+            },
+          },
+        },
+      },
+      dir,
+    );
+    manager = new InspectionManager({ config, logger: silentLogger });
+    await manager.init();
+    const { report } = await manager.start({ ...input, scope: 'both' });
+    let r = report;
+    while (r.status !== 'finished') r = await manager.wait(r.inspection_id, 20);
+    return r;
+  }
+
+  it('inspects the demo store and suggests the baseline set', async () => {
+    const orders = demo.stats.orders;
+    const payments = demo.stats.payments;
+    const r = await inspectToEnd({ target: 'demo-local', idempotency_key: 'e2e-inspect-01' });
+    expect(r.warnings.filter((w) => w.startsWith('INSPECTION_FAILED'))).toEqual([]);
+    expect(r.suggested_scenarios.filter((s) => s.baseline).map((s) => s.id)).toEqual(
+      expect.arrayContaining([
+        'demo-local-guest-card',
+        'demo-local-card-declined',
+        'demo-local-terms-required',
+      ]),
+    );
+    expect(r.suggested_scenarios.find((s) => s.id === 'demo-local-guest-card')?.card_source).toEqual({
+      kind: 'registry',
+      card_id: 'stripe/visa-success',
+    });
+    expect(r.site?.pages.map((p) => p.kind)).toEqual(expect.arrayContaining(['product', 'checkout']));
+    expect(r.checkout_probe?.guest_option).toBe(true);
+    expect(r.checkout_probe?.reached).toBe('payment');
+    expect(r.code?.payment_hints).toContainEqual(expect.objectContaining({ package: '@stripe/stripe-js' }));
+    // The guest email may appear only in side_effects.
+    expect(JSON.stringify({ site: r.site, code: r.code, probe: r.checkout_probe?.payment })).not.toMatch(
+      /4242|@example\.test/,
+    );
+    expect(r.side_effects.join('\n')).toMatch(/@example\.test/);
+    expect(demo.stats.orders).toBe(orders);
+    expect(demo.stats.payments).toBe(payments);
+    const onDisk = JSON.parse(await readFile(r.report_path, 'utf8'));
+    expect(onDisk.status).toBe('finished');
   });
 });

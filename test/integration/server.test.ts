@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseConfig } from '../../src/config/load-config.js';
+import { InspectionManager } from '../../src/inspect/manager.js';
 import { silentLogger } from '../../src/logger.js';
 import type { ExecuteInput, ExecuteOutput } from '../../src/runner/executor.js';
 import { RunManager } from '../../src/runs/manager.js';
@@ -89,7 +90,13 @@ async function setup(env: NodeJS.ProcessEnv = {}) {
       env,
     }),
   );
-  const server = createServer({ config, registry, manager, logger: silentLogger });
+  const server = createServer({
+    config,
+    registry,
+    manager,
+    inspections: new InspectionManager({ config, logger: silentLogger }),
+    logger: silentLogger,
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   client = new Client({ name: 'test', version: '0.0.0' });
@@ -131,6 +138,7 @@ describe('tools/list', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'compare_runs',
       'get_run_result',
+      'inspect_target',
       'list_scenarios',
       'run_scenario',
       'save_scenario',
@@ -145,6 +153,14 @@ describe('tools/list', () => {
       expect.arrayContaining(['target', 'scenario_id', 'idempotency_key']),
     );
     expect(run?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: true });
+    const inspect = tools.find((t) => t.name === 'inspect_target');
+    expect(inspect?.inputSchema.required).toEqual(['target', 'idempotency_key']);
+    expect(inspect?.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    });
     await expect(JSON.stringify(tools, null, 2)).toMatchFileSnapshot('./__snapshots__/tools-list.json');
   });
 });

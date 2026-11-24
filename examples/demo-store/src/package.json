@@ -1,0 +1,8 @@
+{
+  "name": "demo-store-src",
+  "private": true,
+  "description": "Source fixture for the inspect_target code scan. Nobody installs it.",
+  "dependencies": {
+    "@stripe/stripe-js": "10.3.0"
+  }
+}

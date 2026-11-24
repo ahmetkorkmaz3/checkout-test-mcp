@@ -1384,5 +1384,890 @@
       "idempotentHint": true,
       "openWorldHint": true
     }
+  },
+  {
+    "name": "inspect_target",
+    "title": "Inspect a test target",
+    "description": "Inspects a configured test target and suggests checkout test scenarios with the evidence for each. It reads the site pages and API calls through the host guard, and it reads the shop source code when the target config has inspect.source_dirs. Only when the target config has inspect.probe_checkout: true, a checkout probe goes up to the payment step with fictional test data. It never pays and never sends a phone number for a code. Side effects of the probe on the test site: a cart item, a guest account with an example.test email, an address, and possibly an unpaid order draft. The report lists them in side_effects. The call starts a background job and waits up to wait_s seconds. While status is not \"finished\", call inspect_target again with the same target, idempotency_key, and scope. The same key never starts a second inspection, also after a restart. Read warnings and suggested_scenarios[].missing to know what to ask the user. Then write the baseline scenarios and save each with save_scenario.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Target name from list_scenarios.targets, for example \"my-staging\". Never a URL."
+        },
+        "idempotency_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{8,128}$",
+          "description": "8 to 128 characters: letters, digits, \".\", \"_\", \":\", \"-\". Same key = same inspection, for example \"setup-my-staging-01\"."
+        },
+        "scope": {
+          "default": "both",
+          "description": "\"site\" reads the site only. \"code\" reads the source folders only. \"both\" (default) reads both.",
+          "type": "string",
+          "enum": [
+            "site",
+            "code",
+            "both"
+          ]
+        },
+        "wait_s": {
+          "default": 20,
+          "description": "Seconds to wait for the inspection to finish before the call returns. 0 to 20.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        }
+      },
+      "required": [
+        "target",
+        "idempotency_key"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "inspection_id": {
+          "type": "string",
+          "pattern": "^insp_[A-Za-z0-9_-]{16}$",
+          "description": "Inspection id, for example \"insp_Q2x8LmN4pR7sTv0a\"."
+        },
+        "target": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "running",
+            "finished"
+          ]
+        },
+        "interrupted": {
+          "type": "boolean",
+          "description": "True when the server stopped during the inspection. It was not repeated."
+        },
+        "progress": {
+          "type": "string"
+        },
+        "site": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "pages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path_pattern": {
+                        "type": "string",
+                        "description": "URL path with ids and slugs as \"*\". No query."
+                      },
+                      "url_path": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "home",
+                          "listing",
+                          "product",
+                          "cart",
+                          "login",
+                          "checkout",
+                          "result",
+                          "other"
+                        ]
+                      },
+                      "kind_reasons": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "headings": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "landmarks": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "elements": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "role": {
+                              "type": "string"
+                            },
+                            "name": {
+                              "type": "string"
+                            },
+                            "label": {
+                              "type": "string"
+                            },
+                            "test_id": {
+                              "type": "string"
+                            },
+                            "visible": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "role",
+                            "name",
+                            "visible"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "forms": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "fields": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "type": "string"
+                                  },
+                                  "autocomplete": {
+                                    "type": "string"
+                                  },
+                                  "required": {
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": [
+                                  "label",
+                                  "type",
+                                  "required"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "fields"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "selects": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "label": {
+                              "type": "string"
+                            },
+                            "options": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "required": [
+                            "label",
+                            "options"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "iframes": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "host": {
+                              "type": "string"
+                            },
+                            "title": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "host"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "dialogs": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "path_pattern",
+                      "url_path",
+                      "kind",
+                      "kind_reasons",
+                      "title",
+                      "headings",
+                      "landmarks",
+                      "elements",
+                      "forms",
+                      "selects",
+                      "iframes",
+                      "dialogs"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "api_calls": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "method": {
+                        "type": "string"
+                      },
+                      "path_pattern": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "number"
+                      },
+                      "content_type": {
+                        "type": "string"
+                      },
+                      "page_kind": {
+                        "type": "string",
+                        "enum": [
+                          "home",
+                          "listing",
+                          "product",
+                          "cart",
+                          "login",
+                          "checkout",
+                          "result",
+                          "other"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "method",
+                      "path_pattern",
+                      "status",
+                      "content_type",
+                      "page_kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "blocked_hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "host": {
+                        "type": "string"
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "host",
+                      "count"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "description": "Hosts that the guard blocked. Ask the user before you add one to third_party_hosts."
+                }
+              },
+              "required": [
+                "pages",
+                "api_calls",
+                "blocked_hosts"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null when scope is \"code\" or the crawl did not run."
+        },
+        "checkout_probe": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reached": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "product",
+                    "cart",
+                    "checkout",
+                    "payment"
+                  ]
+                },
+                "stopped_reason": {
+                  "type": "string",
+                  "enum": [
+                    "payment_step_reached",
+                    "login_required",
+                    "no_product",
+                    "no_add_to_cart",
+                    "no_checkout_button",
+                    "form_not_understood",
+                    "timeout",
+                    "blocked_by_safety",
+                    "verification_required"
+                  ]
+                },
+                "steps": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string"
+                      },
+                      "page_kind": {
+                        "type": "string",
+                        "enum": [
+                          "home",
+                          "listing",
+                          "product",
+                          "cart",
+                          "login",
+                          "checkout",
+                          "result",
+                          "other"
+                        ]
+                      },
+                      "url_path": {
+                        "type": "string"
+                      },
+                      "result": {
+                        "type": "string",
+                        "enum": [
+                          "done",
+                          "skipped"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "page_kind",
+                      "url_path",
+                      "result"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "dialogs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Dialogs that opened during the probe, by name or first line."
+                },
+                "guest_option": {
+                  "type": "boolean"
+                },
+                "payment": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "methods": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "card_form": {
+                          "type": "boolean"
+                        },
+                        "card_iframe_hosts": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "test_card_select": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "label": {
+                                  "type": "string"
+                                },
+                                "options": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                }
+                              },
+                              "required": [
+                                "label",
+                                "options"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "agreement_checkbox": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "pay_button": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "methods",
+                        "card_form",
+                        "card_iframe_hosts",
+                        "test_card_select",
+                        "agreement_checkbox",
+                        "pay_button"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "side_effects": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "reached",
+                "stopped_reason",
+                "steps",
+                "dialogs",
+                "guest_option",
+                "payment",
+                "side_effects"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null when the config does not allow the probe, or scope is \"code\"."
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "frameworks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "reason": {
+                        "type": "string"
+                      },
+                      "file": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "reason",
+                      "file"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "routes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "file": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "file"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "ui_strings": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "file": {
+                        "type": "string"
+                      },
+                      "line": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "text",
+                      "file",
+                      "line"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "test_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "value": {
+                        "type": "string"
+                      },
+                      "file": {
+                        "type": "string"
+                      },
+                      "line": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "value",
+                      "file",
+                      "line"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "payment_hints": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "provider": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "package": {
+                        "type": "string"
+                      },
+                      "file": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "provider",
+                      "package",
+                      "file"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "otp_hints": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "type": "string"
+                      },
+                      "file": {
+                        "type": "string"
+                      },
+                      "line": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "text",
+                      "file",
+                      "line"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "stats": {
+                  "type": "object",
+                  "properties": {
+                    "files": {
+                      "type": "number"
+                    },
+                    "skipped": {
+                      "type": "number"
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "files",
+                    "skipped",
+                    "truncated"
+                  ],
+                  "additionalProperties": false
+                },
+                "warnings": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "frameworks",
+                "routes",
+                "ui_strings",
+                "test_ids",
+                "payment_hints",
+                "otp_hints",
+                "stats",
+                "warnings"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null without source_dirs, or when scope is \"site\"."
+        },
+        "suggested_scenarios": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Scenario id to use, for example \"my-staging-guest-card\"."
+              },
+              "title": {
+                "type": "string"
+              },
+              "expected_outcome": {
+                "type": "string",
+                "enum": [
+                  "order_placed",
+                  "payment_declined",
+                  "validation_error",
+                  "custom"
+                ]
+              },
+              "baseline": {
+                "type": "boolean",
+                "description": "True: write and run this scenario in the first setup with no question to the user."
+              },
+              "why": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Report paths that this suggestion rests on."
+              },
+              "missing": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Inputs that are missing. Ask the user for them."
+              },
+              "card_source": {
+                "anyOf": [
+                  {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "site_select"
+                          },
+                          "option": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "option"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "registry"
+                          },
+                          "card_id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "card_id"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "site_select: select this option text in the site test card select. registry: use this test card id in a test_card param."
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "expected_outcome",
+              "baseline",
+              "why",
+              "evidence",
+              "missing",
+              "card_source"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "side_effects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What the inspection made on the test site."
+        },
+        "report_path": {
+          "type": "string",
+          "description": "The full report on disk. The tool result can be shorter."
+        },
+        "reused_existing_inspection": {
+          "type": "boolean",
+          "description": "True when this idempotency_key already had an inspection. No new inspection started."
+        },
+        "next": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "call_tool",
+                "change_argument",
+                "wait_and_retry",
+                "fix_scenario",
+                "treat_as_regression",
+                "ask_human"
+              ]
+            },
+            "description": {
+              "type": "string",
+              "description": "One sentence the agent can act on."
+            },
+            "tool": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "after_s": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "kind",
+            "description"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "inspection_id",
+        "target",
+        "status",
+        "interrupted",
+        "progress",
+        "site",
+        "checkout_probe",
+        "code",
+        "suggested_scenarios",
+        "warnings",
+        "side_effects",
+        "report_path",
+        "reused_existing_inspection",
+        "next"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    }
   }
 ]

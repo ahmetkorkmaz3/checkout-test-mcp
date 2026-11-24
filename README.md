@@ -54,8 +54,34 @@ Other bug flags: `cookie-banner` shows a consent dialog over every page. `login-
 | `run_scenario`   | Starts a run in the background and returns a `run_id` at once. Needs an `idempotency_key`: the same key never starts a second checkout.                                    |
 | `get_run_result` | Status, verdict (`passed`, `failed`, `error`, `blocked`), failing step, likely causes, next actions, screenshots, console and network failures. `wait_s` waits up to 20 s. |
 | `compare_runs`   | Diffs two runs of the same scenario and reports regressions, fixes, and slower steps.                                                                                      |
+| `inspect_target` | Reads a test target (site and, when configured, source code) and suggests scenarios with evidence. One tool starts the job and long polls it with the same key.           |
+| `save_scenario`  | Checks and writes a scenario, fragment, or test data file, and can start a validation run.                                                                                 |
 
 Full definitions: [docs/tools.md](docs/tools.md).
+
+## Authoring and inspection
+
+An agent can write scenarios for a new target. It calls `inspect_target`, reads the suggested scenarios and warnings, writes the YAML, and saves each file with `save_scenario`. Two config blocks turn this on:
+
+```yaml
+authoring:
+  dir: ./scenarios/local # save_scenario writes here. Must be inside one of scenario_dirs.
+  test_data_dir_writable: false
+
+targets:
+  my-staging:
+    # ...
+    inspect:
+      source_dirs: [../my-storefront] # optional, read-only code scan
+      start_paths: ["/"]
+      max_pages: 25
+      probe_checkout: false
+```
+
+- Without `authoring`, `save_scenario` refuses with `AUTHORING_DISABLED`.
+- Without `inspect`, `inspect_target` crawls from `/` with defaults, skips the code scan, and does not run the checkout probe.
+- `probe_checkout: true` lets the probe go to the payment step with fictional data. It never pays. On the test site it makes a cart item, a guest account with an `example.test` email, an address, and possibly an unpaid order draft. Turn it on only when this is acceptable.
+- Reports go to `runs_dir/inspections/<id>.json`.
 
 ## Scenarios
 

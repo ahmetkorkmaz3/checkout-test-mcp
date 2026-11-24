@@ -341,6 +341,19 @@ Many test environments return an SMS or email code in the API response of the pa
 
 Two tools let an agent write scenarios: `inspect_target` reads a test target and suggests scenarios, and `save_scenario` checks and writes a scenario, fragment, or test data file. The design is in the [scenario authoring spec](superpowers/specs/2026-11-24-scenario-authoring-design.md). The tool contract of `save_scenario` is in [tools.md](tools.md), section 7.
 
+### Inspection jobs and browser slots
+
+`InspectionManager` (`src/inspect/manager.ts`) runs the `inspect_target` jobs. It stores each report in `runs_dir/inspections/<id>.json` and the key index in `runs_dir/inspections/idempotency.json`, with atomic writes (temp file, then rename). The same key gives the same inspection, also after a restart. At startup, an inspection that was `queued` or `running` becomes `finished` with `interrupted: true`, and the server does not repeat it.
+
+Runs and inspections share one `BrowserSlots` object (`src/runs/browser-slots.ts`) with `max_parallel_runs` slots. So the server never has more browsers open than the config allows. Rules:
+
+- One inspection runs at a time. The jobs wait on one chain.
+- An inspection waits for a free slot. With the default `max_parallel_runs: 1`, an inspection never runs while a run is active, and a run waits while an inspection is active.
+- A freed slot goes to a waiting inspection before a queued run, so a stream of runs cannot keep an inspection waiting for ever. A run starts when the inspection frees its slot.
+- A `scope: "code"` inspection takes a slot too. It is short, and one rule is simpler than two.
+
+A phase that crashes (browser start, crawl, probe, code scan) adds a warning that starts with `INSPECTION_FAILED`. The job keeps the other parts and finishes. The warning has the error class and a short message without URLs or absolute paths.
+
 ### Checkout probe
 
 The probe (`src/inspect/probe.ts`) goes through the checkout of a test target up to the payment step with fictional data. Every click, fill, select, and key press goes through `src/inspect/actions.ts`:

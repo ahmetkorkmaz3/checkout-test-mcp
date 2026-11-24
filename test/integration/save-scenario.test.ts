@@ -7,6 +7,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { schemaPathFor } from '../../src/authoring/save.js';
 import { parseConfig } from '../../src/config/load-config.js';
+import { InspectionManager } from '../../src/inspect/manager.js';
 import { silentLogger } from '../../src/logger.js';
 import type { ExecuteInput, ExecuteOutput } from '../../src/runner/executor.js';
 import { RunManager } from '../../src/runs/manager.js';
@@ -79,7 +80,13 @@ async function setup(authoring: Authoring = 'on') {
   const store = new RunStore(config.runs_dir);
   await store.init();
   manager = new RunManager({ config, registry, store, logger: silentLogger, execute: fakeExecute, env: {} });
-  const server = createServer({ config, registry, manager, logger: silentLogger });
+  const server = createServer({
+    config,
+    registry,
+    manager,
+    inspections: new InspectionManager({ config, logger: silentLogger }),
+    logger: silentLogger,
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   client = new Client({ name: 'test', version: '0.0.0' });
