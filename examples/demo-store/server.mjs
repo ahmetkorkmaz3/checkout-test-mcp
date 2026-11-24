@@ -8,8 +8,10 @@
 // Bugs: skip-3ds (no 3DS challenge), cookie-banner (a consent dialog over every page until the user
 // chooses), login-wall (checkout needs a sign-in and has no guest option), redirect-frame (the payment
 // page has an iframe that redirects to a payment host outside the allowlist).
-// Redirect routes for the host guard tests: /go/out, /go/in, /frame/out, /api/redirect-out, /login-cookie.
-// No test follows a redirect to an outside host. The guard must block it before the browser sends it.
+// Redirect routes for the host guard tests: /go/out, /go/in, /frame/out, /api/redirect-out, /img/out,
+// /events/out, /chain/*, /tp/redirect, and /login-cookie. The "outside" host is 127.0.0.1 on the same port, or
+// a .invalid host. A request that reaches /outside/* on 127.0.0.1 goes into outsideHits, so a test can
+// show that the guard stopped it. No route sends a browser to a real remote host.
 // /staging-only needs HTTP basic auth with the fixed test user from startDemoStore({ basicAuth }).
 // /third-party/* answers 401 with a basic auth challenge and records if a request had an Authorization header.
 
@@ -259,9 +261,11 @@ const redirectsPage = (s) =>
     s,
     `<h1>Partner content</h1>
 <iframe title="Partner frame" src="/frame/out" height="60"></iframe>
+<img alt="Partner pixel" src="/img/out" width="1" height="1">
 <button id="load">Load data</button>
 <p id="state" data-testid="load-state">Not loaded</p>`,
-    `document.getElementById('load').addEventListener('click', async () => {
+    `new EventSource('/events/out').onerror = (e) => e.target.close();
+document.getElementById('load').addEventListener('click', async () => {
   const state = document.getElementById('state');
   try {
     await fetch('/api/redirect-out');
@@ -270,6 +274,13 @@ const redirectsPage = (s) =>
     state.textContent = 'Request failed';
   }
 });`,
+  );
+
+const chainFormPage = (s) =>
+  layout(
+    'Send form',
+    s,
+    `<h1>Send form</h1><form method="post" action="/chain/post"><input name="note" value="test"><button>Send</button></form>`,
   );
 
 const sessionPage = (s, signedIn) =>
@@ -320,6 +331,7 @@ export function startDemoStore({
   const issuedOtps = [];
   // One entry for each request to a basic auth route: the host and if the request had an Authorization header.
   const authRequests = [];
+  const outsideHits = [];
 
   function session(req, res) {
     const sid = /(?:^|;\s*)sid=([A-Za-z0-9_-]+)/.exec(req.headers.cookie ?? '')?.[1];
@@ -359,8 +371,8 @@ export function startDemoStore({
     res.writeHead(status, { 'content-type': type });
     res.end(body);
   };
-  const redirect = (res, location) => {
-    res.writeHead(302, { location });
+  const redirect = (res, location, status = 302) => {
+    res.writeHead(status, { location });
     res.end();
   };
   const html = (res, body, status = 200) => send(res, status, 'text/html; charset=utf-8', body);
@@ -375,10 +387,7 @@ export function startDemoStore({
     const loginRequired = activeBugs.has('login-wall');
     s.redirectFrame = activeBugs.has('redirect-frame');
 
-    if (
-      m === 'GET' &&
-      (p === '/staging-only' || p === '/staging-only/api' || p.startsWith('/third-party/'))
-    ) {
+    if (m === 'GET' && (p.startsWith('/staging-only') || p.startsWith('/third-party/'))) {
       const header = req.headers.authorization;
       authRequests.push({ host: req.headers.host ?? '', path: p, authorization: header !== undefined });
       const expected = `Basic ${Buffer.from(`${basicAuth.username}:${basicAuth.password}`).toString('base64')}`;
@@ -387,13 +396,31 @@ export function startDemoStore({
         return res.end('Unauthorized');
       }
       if (p === '/staging-only/api') return json(res, 200, { ok: true });
+      if (p === '/staging-only/go') return redirect(res, '/staging-only');
       const thirdParty = `http://127.0.0.1:${(req.headers.host ?? '').split(':')[1] ?? ''}`;
       return html(res, stagingPage(s, thirdParty));
     }
-    if (m === 'GET' && p === '/go/out') return redirect(res, 'https://example.com/landing');
+    const outside = `http://127.0.0.1:${(req.headers.host ?? '').split(':')[1] ?? ''}/outside`;
+    if (p.startsWith('/outside/') && (req.headers.host ?? '').startsWith('127.0.0.1')) {
+      outsideHits.push(`${m} ${p}`);
+      return send(res, 200, 'text/plain', 'outside');
+    }
+    if (m === 'GET' && p === '/go/out') return redirect(res, `${outside}/landing`);
+    if (m === 'GET' && p === '/img/out') return redirect(res, `${outside}/img`);
+    if (m === 'GET' && p === '/go/out-tls') {
+      return redirect(res, `${outside.replace('http:', 'https:')}/tls`);
+    }
+    if (m === 'GET' && p === '/events/out') return redirect(res, `${outside}/events`);
+    if (m === 'GET' && p === '/chain/a') return redirect(res, '/chain/b');
+    if (m === 'GET' && p === '/chain/b') return redirect(res, '/chain/c');
+    if (m === 'GET' && p === '/chain/c') return redirect(res, `${outside}/chain`);
+    if (m === 'GET' && p === '/chain/form') return html(res, chainFormPage(s));
+    if (m === 'POST' && p === '/chain/post') return redirect(res, '/chain/post2', 307);
+    if (m === 'POST' && p === '/chain/post2') return redirect(res, `${outside}/post`, 307);
+    if (m === 'GET' && p === '/tp/redirect') return redirect(res, 'http://blocked.invalid/tp');
     if (m === 'GET' && p === '/go/in') return redirect(res, `/products/${PRODUCT.slug}`);
-    if (m === 'GET' && p === '/frame/out') return redirect(res, 'https://pay.example.net/card');
-    if (m === 'GET' && p === '/api/redirect-out') return redirect(res, 'https://example.com/api');
+    if (m === 'GET' && p === '/frame/out') return redirect(res, 'http://pay.example.invalid/card');
+    if (m === 'GET' && p === '/api/redirect-out') return redirect(res, `${outside}/api`);
     if (m === 'GET' && p === '/redirects') return html(res, redirectsPage(s));
     if (m === 'GET' && p === '/login-cookie') {
       const prev = res.getHeader('set-cookie');
@@ -532,6 +559,7 @@ export function startDemoStore({
         stats,
         issuedOtps,
         authRequests,
+        outsideHits,
         setBugs: (list) => {
           activeBugs = new Set(list);
         },

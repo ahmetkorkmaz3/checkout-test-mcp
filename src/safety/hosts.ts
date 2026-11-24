@@ -66,7 +66,17 @@ export function isUrlAllowed(
   }
   if (parsed.protocol === 'data:' || parsed.protocol === 'blob:' || parsed.protocol === 'about:') return true;
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-  const host = normalizeHost(parsed.hostname);
+  return isHostAllowed(parsed.hostname, target, config);
+}
+
+/** Host rule of the guard: a host in allowed_hosts or third_party_hosts, and never a production host. */
+export function isHostAllowed(
+  hostname: string,
+  target: TargetConfig,
+  config: Pick<ResolvedConfig, 'production_hosts'>,
+): boolean {
+  const host = normalizeHost(hostname);
+  if (host === '') return false;
   if (matchesAny(host, config.production_hosts)) return false;
   return matchesAny(host, target.allowed_hosts) || matchesAny(host, target.third_party_hosts);
 }

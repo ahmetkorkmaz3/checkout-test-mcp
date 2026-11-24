@@ -161,7 +161,7 @@ describe('checkout probe', () => {
     expect(r.reached).toBe('payment');
     expect(r.payment?.card_frames).toEqual([
       { host: 'localhost', title: 'Secure card payment input' },
-      { host: 'pay.example.net', title: '' },
+      { host: 'pay.example.invalid', title: '' },
     ]);
   });
 

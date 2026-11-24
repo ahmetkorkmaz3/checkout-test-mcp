@@ -1,9 +1,9 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { type Browser, type BrowserContext, errors, type Locator, type Page } from 'playwright';
+import { type BrowserContext, errors, type Locator, type Page } from 'playwright';
 import { cardInputs } from '../safety/card-inputs.js';
 import { containsUnregisteredCardNumber } from '../safety/cards.js';
-import { hostOf } from '../safety/hosts.js';
+import { hostOf, isUrlAllowed } from '../safety/hosts.js';
 import { type Redactor, redactQuery } from '../safety/secrets.js';
 import { readJsonPath, renderCaptured, TemplateError } from '../scenarios/template.js';
 import type { FailureCategory, Verdict } from '../schemas/common.js';
@@ -18,8 +18,9 @@ import type {
   StepResult,
 } from '../schemas/run.js';
 import type { Action, Capture, Expectation, OutcomeCheck, Scenario, Step } from '../schemas/scenario.js';
-import { openGuardedContext } from './browser.js';
+import { openGuardedContext, stripUserInfo } from './browser.js';
 import { classify } from './classify.js';
+import { PROXY_ERROR_HEADER } from './guard-proxy.js';
 import { describeLocator, scopeFor, toLocator } from './locator.js';
 import {
   describeResponseMatch,
@@ -69,8 +70,10 @@ class StepFailure extends Error {
 }
 
 const BLOCKED_BY_GUARD = 'net::ERR_BLOCKED_BY_CLIENT';
+// ERR_TUNNEL_CONNECTION_FAILED: the guard proxy could not open a tunnel to an allowed host. A host that the
+// proxy refused is a blocked navigation, which the runner checks first.
 const UNREACHABLE =
-  /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_CONNECTION_TIMED_OUT|ERR_INTERNET_DISCONNECTED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_|ERR_SSL_/;
+  /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_CONNECTION_TIMED_OUT|ERR_INTERNET_DISCONNECTED|ERR_ADDRESS_UNREACHABLE|ERR_TUNNEL_CONNECTION_FAILED|ERR_CERT_|ERR_SSL_/;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -109,7 +112,8 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   const consoleIgnored = (text: string) => scenario.ignore.console.some((i) => text.includes(i.pattern));
   const networkIgnored = (url: string) => scenario.ignore.network.some((i) => urlMatchesGlob(url, i.url));
 
-  let browser: Browser | undefined;
+  /** Closes the browser and its guard proxy. */
+  let closeGuarded: (() => Promise<void>) | undefined;
   let context: BrowserContext | undefined;
   let page: Page | undefined;
   let failure: Failure | null = null;
@@ -151,6 +155,13 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       try {
         const res = await p.goto(action.goto, { timeout, waitUntil: 'load' });
         checkBlockedNavigation();
+        const proxyError = res ? await res.headerValue(PROXY_ERROR_HEADER) : null;
+        if (res && proxyError) {
+          throw new StepFailure(
+            'target_unreachable',
+            `The guard proxy could not reach ${redactQuery(res.url())}: ${proxyError}.`,
+          );
+        }
         if (res && res.status() >= 500) {
           throw new StepFailure(
             'navigation_failed',
@@ -520,9 +531,10 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       target,
       ...(input.httpCredentials ? { httpCredentials: input.httpCredentials } : {}),
       onBlocked: (url, frame, isNavigation) => {
-        blocked.push({ url: redactQuery(url), step_id: currentStepId });
+        blocked.push({ url: redactQuery(stripUserInfo(url)), step_id: currentStepId });
         // Only a navigation of the run's own page stops the run. A popup has no frame yet, so it is only listed.
-        if (isNavigation && page && frame === page.mainFrame()) blockedNavigation = redactQuery(url);
+        if (isNavigation && page && frame === page.mainFrame())
+          blockedNavigation = redactQuery(stripUserInfo(url));
       },
     });
     // After a run timeout the cleanup has run already, so this browser must close here.
@@ -530,7 +542,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       await guarded.close();
       return;
     }
-    browser = guarded.browser;
+    closeGuarded = guarded.close;
     context = guarded.context;
     if (options.trace) await context.tracing.start({ screenshots: true, snapshots: true });
 
@@ -546,8 +558,23 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       const text = redactor.redact(`Uncaught ${err.name}: ${err.message}`).slice(0, 500);
       if (!consoleIgnored(text)) addConsole('error', text, undefined);
     });
+    // The route handler sees only the first URL of a redirect chain. The proxy refuses a later hop to a
+    // host outside the allowlist, but it has no frame. This listener marks such a hop of the main frame.
+    page.on('request', (req) => {
+      if (!page || !req.isNavigationRequest() || !/^https?:/.test(req.url())) return;
+      if (isUrlAllowed(req.url(), target, input.config)) return;
+      let frame: ReturnType<typeof req.frame> | null = null;
+      try {
+        frame = req.frame();
+      } catch {
+        frame = null;
+      }
+      if (frame === page.mainFrame()) blockedNavigation = redactQuery(stripUserInfo(req.url()));
+    });
     page.on('response', (res) => {
       const req = res.request();
+      // A response from a host outside the allowlist is the 403 of the guard proxy, not a site failure.
+      if (!isUrlAllowed(res.url(), target, input.config)) return;
       const rec: RecordedResponse = { method: req.method(), url: res.url(), status: res.status(), stepIndex };
       const specs = input.steps[stepIndex]?.capture ?? [];
       if (specs.some((c) => responseMatches(rec, c.from_response))) rec.body = res.text().catch(() => null);
@@ -564,9 +591,10 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       }
     });
     page.on('requestfailed', (req) => {
-      // Only the guard aborts with this error. For a blocked redirect, req.url() is the allowed first URL.
-      // Chromium can add a suffix, such as ".Inspector" for a fetch.
+      // Only the route guard aborts with this error. Chromium can add a suffix, such as ".Inspector" for a fetch.
       if (req.failure()?.errorText.startsWith(BLOCKED_BY_GUARD) || networkIgnored(req.url())) return;
+      // A request to a host outside the allowlist failed at the guard proxy.
+      if (!isUrlAllowed(req.url(), target, input.config)) return;
       networkFailures.push({
         method: req.method(),
         url: redactQuery(req.url()),
@@ -689,7 +717,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
         tracePath = null;
       });
     }
-    await browser?.close().catch(() => {});
+    await closeGuarded?.();
   }
 
   if (fatal && !failure) {

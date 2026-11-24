@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import type { BrowserContext, Frame, Locator, Page } from 'playwright';
-import { addBlockedListener } from '../runner/browser.js';
+import { stripUserInfo } from '../runner/browser.js';
 import { cardInputs } from '../safety/card-inputs.js';
-import { hostOf } from '../safety/hosts.js';
+import { hostOf, isUrlAllowed } from '../safety/hosts.js';
 import { redactPath, redactText } from '../safety/redact-text.js';
 import type { InspectConfig, TargetConfig } from '../schemas/config.js';
 import {
@@ -1135,11 +1135,18 @@ export async function probeCheckout(ctx: ProbeContext): Promise<ProbeResult> {
     probe.noteNativeDialog(d.type(), d.message());
     d.dismiss().catch(() => {});
   });
-  // The guard reports each blocked load, also a redirect target that it blocked before the browser saw it.
-  const stopBlocked = addBlockedListener(ctx.context, (url, frame, isNavigation) => {
-    if (isNavigation && frame && frame !== page.mainFrame() && frame.page() === page) {
-      probe.noteBlockedFrame(url, frame);
+  // Every child-frame navigation to a host outside the target. The route handler blocks a first URL, and
+  // the guard proxy blocks a redirect hop. The proxy has no frame, so the probe marks the frame here.
+  page.on('request', (req) => {
+    if (!req.isNavigationRequest() || !/^https?:/.test(req.url())) return;
+    if (isUrlAllowed(req.url(), ctx.target, { production_hosts: [] })) return;
+    let frame: ReturnType<typeof req.frame> | null = null;
+    try {
+      frame = req.frame();
+    } catch {
+      frame = null;
     }
+    if (frame && frame !== page.mainFrame()) probe.noteBlockedFrame(stripUserInfo(req.url()), frame);
   });
   const work = probe.run().then(
     () => 'form_not_understood' as StopReason,
@@ -1155,7 +1162,6 @@ export async function probeCheckout(ctx: ProbeContext): Promise<ProbeResult> {
   } finally {
     // Closing the page ends any Playwright call that is still running after a timeout.
     work.catch(() => {});
-    stopBlocked();
     await page.close().catch(() => {});
   }
   // A copy: after a timeout, the work promise can still add a step before it ends.

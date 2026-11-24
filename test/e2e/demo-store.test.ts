@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer as createNetServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
@@ -29,6 +30,7 @@ let store: {
   stats: { orders: number };
   issuedOtps: string[];
   authRequests: { host: string; path: string; authorization: boolean }[];
+  outsideHits: string[];
 };
 let client: Client;
 
@@ -97,6 +99,38 @@ steps:
     goto: /go/out
 `;
 
+const CHAIN_GET_SCENARIO = `
+schema_version: 1
+id: redirect-chain-get-check
+title: Opens a redirect chain that ends on a host outside the allowlist
+summary: Safety test. Must end with verdict blocked.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open_chain
+    title: Open the chain
+    goto: /chain/a
+`;
+
+const CHAIN_POST_SCENARIO = `
+schema_version: 1
+id: redirect-chain-post-check
+title: Sends a form that 307 redirects to a host outside the allowlist
+summary: Safety test. Must end with verdict blocked.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open
+    title: Open the form
+    goto: /chain/form
+  - id: send
+    title: Send the form
+    click: { role: button, name: Send }
+    timeout_ms: 3000
+    expect:
+      - visible: { role: heading, name: Never shown }
+`;
+
 const REDIRECT_IN_SCENARIO = `
 schema_version: 1
 id: redirect-in-check
@@ -154,8 +188,8 @@ compatible_profiles: [demo-store]
 expected_outcome: custom
 steps:
   - id: open
-    title: Open the staging page
-    goto: /staging-only
+    title: Open the staging page through a same-host redirect
+    goto: /staging-only/go
     expect:
       - text: { test_id: auth-state, equals: Authorized }
   - id: load
@@ -192,6 +226,12 @@ steps:
 
 beforeAll(async () => {
   dir = await mkdtemp(path.join(os.tmpdir(), 'ctm-e2e-'));
+  // A port that nothing listens on. Chromium refuses some low ports, such as 1, as unsafe.
+  const probe = createNetServer();
+  await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()));
+  const addr = probe.address();
+  const closedPort = typeof addr === 'object' && addr ? addr.port : 0;
+  await new Promise<void>((r) => probe.close(() => r()));
   store = await startDemoStore({ port: 0, basicAuth: { username: BASIC_USER, password: BASIC_PASS } });
   const config = parseConfig(
     {
@@ -200,6 +240,11 @@ beforeAll(async () => {
       test_data_dir: path.join(ROOT, 'test-data'),
       targets: {
         'demo-local': { profile: 'demo-store', base_url: store.url, allowed_hosts: ['localhost'] },
+        'demo-down': {
+          profile: 'demo-store',
+          base_url: `http://localhost:${closedPort}`,
+          allowed_hosts: ['localhost'],
+        },
         'demo-auth': {
           profile: 'demo-store',
           base_url: store.url,
@@ -222,6 +267,8 @@ beforeAll(async () => {
     parseScenario(REDIRECT_SUB_SCENARIO, 'inline-redirect-sub.yaml'),
     parseScenario(COOKIE_SCENARIO, 'inline-redirect-cookie.yaml'),
     parseScenario(BASIC_AUTH_SCENARIO, 'inline-basic-auth.yaml'),
+    parseScenario(CHAIN_GET_SCENARIO, 'inline-chain-get.yaml'),
+    parseScenario(CHAIN_POST_SCENARIO, 'inline-chain-post.yaml'),
   ]);
   const runStore = new RunStore(config.runs_dir);
   await runStore.init();
@@ -390,7 +437,10 @@ describe('demo store', () => {
 });
 
 describe('redirects through the host guard', () => {
+  const outside = () => store.url.replace('localhost', '127.0.0.1');
+
   it('blocks a redirect to a host outside the allowlist with verdict blocked', async () => {
+    const hits = store.outsideHits.length;
     const res = await runToEnd({
       target: 'demo-local',
       scenario_id: 'redirect-out-check',
@@ -399,8 +449,36 @@ describe('redirects through the host guard', () => {
     const out = res.structuredContent;
     expect(out.verdict, JSON.stringify(out.failure)).toBe('blocked');
     expect(out.failure.category).toBe('blocked_by_safety');
-    expect(out.failure.message).toContain('example.com');
-    expect(out.blocked_requests).toEqual([{ url: 'https://example.com/landing', step_id: 'open_redirect' }]);
+    expect(out.failure.message).toContain('127.0.0.1');
+    expect(out.blocked_requests).toEqual([{ url: `${outside()}/outside/landing`, step_id: 'open_redirect' }]);
+    expect(store.outsideHits.length).toBe(hits);
+  });
+
+  it('blocks a GET redirect chain at its third hop', async () => {
+    const hits = store.outsideHits.length;
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'redirect-chain-get-check',
+      idempotency_key: 'e2e-redirect-chain-get-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict, JSON.stringify(out.failure)).toBe('blocked');
+    expect(out.blocked_requests).toEqual([{ url: `${outside()}/outside/chain`, step_id: 'open_chain' }]);
+    expect(store.outsideHits.length).toBe(hits);
+  });
+
+  it('blocks a 307 POST redirect chain, and the outside host never gets the body', async () => {
+    const hits = store.outsideHits.length;
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'redirect-chain-post-check',
+      idempotency_key: 'e2e-redirect-chain-post-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict, JSON.stringify(out.failure)).toBe('blocked');
+    expect(out.failure.step_id).toBe('send');
+    expect(out.blocked_requests).toEqual([{ url: `${outside()}/outside/post`, step_id: 'send' }]);
+    expect(store.outsideHits.length).toBe(hits);
   });
 
   it('follows a redirect to an allowed page', async () => {
@@ -414,7 +492,8 @@ describe('redirects through the host guard', () => {
     expect(out.blocked_requests).toEqual([]);
   });
 
-  it('blocks a frame redirect and a fetch redirect, lists both, and goes on', async () => {
+  it('blocks frame, fetch, image, and event source redirects, lists them, and goes on', async () => {
+    const hits = store.outsideHits.length;
     const res = await runToEnd({
       target: 'demo-local',
       scenario_id: 'redirect-sub-check',
@@ -422,12 +501,21 @@ describe('redirects through the host guard', () => {
     });
     const out = res.structuredContent;
     expect(out.verdict, JSON.stringify(out.failure)).toBe('passed');
-    expect(out.blocked_requests).toContainEqual({ url: 'https://pay.example.net/card', step_id: 'open' });
-    expect(out.blocked_requests).toContainEqual({ url: 'https://example.com/api', step_id: 'load' });
-    // A blocked redirect is a guard action, not a network failure of the site.
-    expect(JSON.stringify(out.network_failures ?? []), JSON.stringify(out.network_failures)).not.toMatch(
-      /frame\/out|redirect-out/,
+    const urls = out.blocked_requests.map((b: { url: string }) => b.url);
+    expect(urls).toEqual(
+      expect.arrayContaining([
+        'http://pay.example.invalid/card',
+        `${outside()}/outside/api`,
+        `${outside()}/outside/img`,
+        `${outside()}/outside/events`,
+      ]),
     );
+    expect(out.blocked_requests).toContainEqual({ url: `${outside()}/outside/api`, step_id: 'load' });
+    // A blocked redirect is a guard action, not a network failure of the site.
+    expect(JSON.stringify(out.network_failures), JSON.stringify(out.network_failures)).not.toMatch(
+      /outside|invalid/,
+    );
+    expect(store.outsideHits.length).toBe(hits);
   });
 
   it('keeps a cookie that a redirect response sets', async () => {
@@ -440,52 +528,100 @@ describe('redirects through the host guard', () => {
     expect(out.verdict, JSON.stringify(out.failure)).toBe('passed');
   });
 
-  it('never lets the browser send a request to a redirect target outside the allowlist', async () => {
+  it('classifies an unreachable target as target_unreachable, not as blocked', async () => {
+    const res = await runToEnd({
+      target: 'demo-down',
+      scenario_id: 'redirect-in-check',
+      idempotency_key: 'e2e-target-down-01',
+    });
+    const out = res.structuredContent;
+    expect(out.failure.category, JSON.stringify(out.failure)).toBe('target_unreachable');
+    expect(out.blocked_requests).toEqual([]);
+  });
+
+  it('never lets a redirect hop reach a host outside the allowlist, also after a third-party host', async () => {
     const config = parseConfig(
-      { targets: { t: { profile: 'demo-store', base_url: store.url, allowed_hosts: ['localhost'] } } },
+      {
+        targets: {
+          t: { profile: 'demo-store', base_url: store.url, allowed_hosts: ['localhost'] },
+          tp: {
+            profile: 'demo-store',
+            base_url: store.url,
+            allowed_hosts: ['localhost'],
+            third_party_hosts: ['127.0.0.1'],
+          },
+        },
+      },
       dir,
     );
-    const target = config.targets.t;
-    if (!target) throw new Error('test config has no target');
-    const blocked: { url: string; frame: boolean; navigation: boolean }[] = [];
-    const guarded = await openGuardedContext({
-      config,
-      target,
-      onBlocked: (url, frame, isNavigation) => {
-        blocked.push({ url, frame: frame !== null, navigation: isNavigation });
-      },
-    });
-    try {
-      const sent: string[] = [];
-      guarded.context.on('request', (r) => sent.push(r.url()));
-      let page = await guarded.context.newPage();
-      await expect(page.goto('/go/out')).rejects.toThrow(/ERR_BLOCKED_BY_CLIENT/);
-      // The blocked page shows a browser error page. A new page avoids a race with that load.
-      await page.close();
-      page = await guarded.context.newPage();
-      await page.goto('/redirects');
-      await page.getByRole('button', { name: 'Load data' }).click();
-      await expect.poll(() => page.getByTestId('load-state').textContent()).toBe('Request failed');
-      await page.goto('/login-cookie');
-      expect(await page.getByTestId('login-state').textContent()).toBe('Signed in');
-      const cookies = await guarded.context.cookies();
-      expect(cookies.map((c) => c.name)).toContain('demo_login');
-      // Fail closed: a guard fetch that fails aborts the request with the matching net error.
-      await expect(page.goto('http://localhost:1/')).rejects.toThrow(/ERR_CONNECTION_REFUSED/);
-      expect(sent.filter((u) => !u.startsWith(store.url) && u !== 'http://localhost:1/')).toEqual([]);
-      expect(blocked).toEqual([
-        { url: 'https://example.com/landing', frame: true, navigation: true },
-        { url: 'https://pay.example.net/card', frame: true, navigation: true },
-        { url: 'https://example.com/api', frame: true, navigation: false },
-      ]);
-    } finally {
-      await guarded.close();
+    const hits = store.outsideHits.length;
+    for (const name of ['t', 'tp'] as const) {
+      const target = config.targets[name];
+      if (!target) throw new Error('test config has no target');
+      const blocked: { url: string; frame: boolean; navigation: boolean }[] = [];
+      const guarded = await openGuardedContext({
+        config,
+        target,
+        onBlocked: (url, frame, isNavigation) => {
+          blocked.push({ url, frame: frame !== null, navigation: isNavigation });
+        },
+      });
+      try {
+        const page = await guarded.context.newPage();
+        if (name === 't') {
+          // The proxy answers 403 for a refused http host. Chromium shows that page.
+          const chain = await page.goto('/chain/a');
+          expect(chain?.status()).toBe(403);
+          await page.goto('/chain/form');
+          await Promise.all([
+            page.waitForURL('**/outside/post'),
+            page.getByRole('button', { name: 'Send' }).click(),
+          ]);
+          await page.goto('/redirects');
+          await page.getByRole('button', { name: 'Load data' }).click();
+          await expect.poll(() => page.getByTestId('load-state').textContent()).toBe('Request failed');
+          // An https hop goes through a CONNECT tunnel. The proxy refuses it and knows the host only.
+          await expect(page.goto('/go/out-tls')).rejects.toThrow(/ERR_TUNNEL_CONNECTION_FAILED/);
+          // A user name and password in a blocked URL never reach onBlocked.
+          await expect(page.goto('http://user:pw@127.0.0.1:1/x')).rejects.toThrow(/ERR_BLOCKED_BY_CLIENT/);
+          await expect
+            .poll(() => blocked.map((b) => b.url))
+            .toEqual(
+              expect.arrayContaining([
+                `${outside()}/outside/chain`,
+                `${outside()}/outside/post`,
+                'http://pay.example.invalid/card',
+                `${outside()}/outside/api`,
+                `${outside()}/outside/img`,
+                `${outside()}/outside/events`,
+                'http://127.0.0.1:1/x',
+                `${outside().replace('http:', 'https:')}/`,
+              ]),
+            );
+          expect(JSON.stringify(blocked)).not.toContain('pw@');
+          // Proxy blocks have no frame. The route block of a first URL has one.
+          expect(blocked).toContainEqual({
+            url: `${outside()}/outside/chain`,
+            frame: false,
+            navigation: false,
+          });
+          expect(blocked).toContainEqual({ url: 'http://127.0.0.1:1/x', frame: true, navigation: true });
+        } else {
+          // 127.0.0.1 is a third-party host here. Its redirect to a host outside the allowlist is blocked.
+          const res = await page.goto(`${outside()}/tp/redirect`);
+          expect(res?.status()).toBe(403);
+          expect(blocked).toEqual([{ url: 'http://blocked.invalid/tp', frame: false, navigation: false }]);
+        }
+      } finally {
+        await guarded.close();
+      }
     }
+    expect(store.outsideHits.length).toBe(hits);
   });
 });
 
 describe('basic auth through the host guard', () => {
-  it('runs a scenario on a page behind basic auth with the target http_credentials', async () => {
+  it('runs a scenario on a page behind basic auth, also after a same-host redirect', async () => {
     const res = await runToEnd({
       target: 'demo-auth',
       scenario_id: 'basic-auth-check',
@@ -496,7 +632,7 @@ describe('basic auth through the host guard', () => {
     expect(JSON.stringify(out)).not.toContain(BASIC_PASS);
   });
 
-  it('sends the credentials to the target host and never to a third-party host', async () => {
+  it('sends the credentials to the target origin and never to a third-party host', async () => {
     const config = parseConfig(
       {
         targets: {
@@ -521,7 +657,7 @@ describe('basic auth through the host guard', () => {
     const first = store.authRequests.length;
     try {
       const page = await guarded.context.newPage();
-      const res = await page.goto('/staging-only');
+      const res = await page.goto('/staging-only/go');
       expect(res?.status()).toBe(200);
       await page.getByRole('button', { name: 'Load data' }).click();
       await expect.poll(() => page.getByTestId('data-state').textContent()).toBe('Data loaded');
@@ -529,11 +665,13 @@ describe('basic auth through the host guard', () => {
       await expect
         .poll(() => seen().some((r) => r.host.startsWith('127.0.0.1') && r.path === '/third-party/api'))
         .toBe(true);
-      const own = seen().filter((r) => r.host.startsWith('localhost'));
-      expect(own.map((r) => r.path)).toEqual(expect.arrayContaining(['/staging-only', '/staging-only/api']));
+      const authorized = seen()
+        .filter((r) => r.host.startsWith('localhost') && r.authorization)
+        .map((r) => r.path);
+      expect(authorized).toEqual(
+        expect.arrayContaining(['/staging-only/go', '/staging-only', '/staging-only/api']),
+      );
       expect(seen().filter((r) => r.host.startsWith('127.0.0.1') && r.authorization)).toEqual([]);
-      expect(own.every((r) => r.authorization)).toBe(true);
-      // The guard sets the request headers for the auth header. Cookies must still go with the request.
       await page.goto('/login-cookie');
       expect(await page.getByTestId('login-state').textContent()).toBe('Signed in');
     } finally {

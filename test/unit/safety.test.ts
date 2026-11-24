@@ -13,6 +13,7 @@ import {
   checkTargetHost,
   hasTestLabel,
   hostMatches,
+  isHostAllowed,
   isLocalHost,
   isUrlAllowed,
 } from '../../src/safety/hosts.js';
@@ -142,6 +143,16 @@ describe('host checks', () => {
       false,
     );
   });
+
+  it('applies the same host rule to a bare host for the guard proxy', () => {
+    const cfg = { production_hosts: ['www.shop.com'] };
+    expect(isHostAllowed('staging.shop.test', target(), cfg)).toBe(true);
+    expect(isHostAllowed('STAGING.shop.test.', target(), cfg)).toBe(true);
+    expect(isHostAllowed('sandbox-api.iyzipay.com', target(), cfg)).toBe(true);
+    expect(isHostAllowed('www.google-analytics.com', target(), cfg)).toBe(false);
+    expect(isHostAllowed('', target(), cfg)).toBe(false);
+    expect(isHostAllowed('www.shop.com', target({ allowed_hosts: ['www.shop.com'] }), cfg)).toBe(false);
+  });
 });
 
 describe('secrets', () => {
@@ -181,6 +192,12 @@ describe('secrets', () => {
   it('redacts query string values', () => {
     expect(redactQuery('https://a.test/p?token=abc&x=1')).toBe('https://a.test/p?token=REDACTED&x=REDACTED');
     expect(redactQuery('https://a.test/p')).toBe('https://a.test/p');
+  });
+
+  it('removes a user name and password from a URL', () => {
+    expect(redactQuery('https://user:pw@a.test/p?x=1')).toBe('https://a.test/p?x=REDACTED');
+    expect(redactQuery('https://user@a.test/p')).toBe('https://a.test/p');
+    expect(redactQuery('not a url //user:pw@a.test/p?x=1')).toBe('not a url //a.test/p?REDACTED');
   });
 });
 

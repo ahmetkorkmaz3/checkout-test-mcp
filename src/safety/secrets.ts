@@ -63,10 +63,13 @@ export class Redactor {
 export function redactQuery(url: string): string {
   try {
     const u = new URL(url);
-    if (!u.search) return url;
+    if (!u.search && !u.username && !u.password) return url;
+    // A user name and password in the URL are credentials.
+    u.username = '';
+    u.password = '';
     for (const key of [...u.searchParams.keys()]) u.searchParams.set(key, 'REDACTED');
     return u.toString();
   } catch {
-    return url.replace(/\?.*$/, '?REDACTED');
+    return url.replace(/\/\/[^/?#]*@/, '//').replace(/\?.*$/, '?REDACTED');
   }
 }
