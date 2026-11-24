@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { redactText } from '../safety/redact-text.js';
-import { looksLikeSecret } from '../safety/secrets.js';
+import { looksLikeSecret, SECRET_KEYWORDS, STRONG_SECRET_WORDS } from '../safety/secrets.js';
 import { providerForPackage } from '../safety/test-cards.js';
 import { matchesKind, type WordKind } from './words.js';
 
@@ -229,7 +229,10 @@ export async function scanSource(dirs: string[], opts: ScanOptions): Promise<Cod
 
   function considerString(key: string, text: string, file: string, line: number): void {
     // Fail closed: a key and text pair that looks like a secret assignment is not reported.
-    if (looksLikeSecret(text) || looksLikeSecret(`${key}: ${text}`)) return;
+    // A label such as "Password" stays. A single-token value under a secret key does not.
+    if (looksLikeSecret(text)) return;
+    if (SECRET_KEYWORDS.test(key) && !STRONG_SECRET_WORDS.test(text) && looksLikeSecret(`${key}: ${text}`))
+      return;
     if (!relevantString(key, text)) return;
     add('ui_strings', { key, text: clean(text), file, line });
   }
@@ -239,7 +242,6 @@ export async function scanSource(dirs: string[], opts: ScanOptions): Promise<Cod
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i] as string;
       if (line.length > MAX_LINE_CHARS || line.length === 0) continue;
-      if (looksLikeSecret(line)) continue;
       testIdRe.lastIndex = 0;
       for (let m = testIdRe.exec(line); m; m = testIdRe.exec(line)) {
         const value = m[2] as string;
@@ -248,7 +250,8 @@ export async function scanSource(dirs: string[], opts: ScanOptions): Promise<Cod
         seenTestIds.add(id);
         add('test_ids', { value: redactText(value), file, line: i + 1 });
       }
-      if (OTP_WORDS.test(words(line))) add('otp_hints', { text: clean(line), file, line: i + 1 });
+      if (OTP_WORDS.test(words(line)) && !looksLikeSecret(line))
+        add('otp_hints', { text: clean(line), file, line: i + 1 });
       if (isCatalog) {
         KV_LINE.lastIndex = 0;
         for (let m = KV_LINE.exec(line); m; m = KV_LINE.exec(line)) {

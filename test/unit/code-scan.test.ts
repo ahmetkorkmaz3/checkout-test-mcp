@@ -32,7 +32,7 @@ describe('scanSource', () => {
     const keys = r.ui_strings.map((s) => s.key);
     expect(keys).toEqual(expect.arrayContaining(['cart.title', 'checkout.pay', 'checkout.guest']));
     expect(keys).not.toContain('footer.about');
-    expect(keys).not.toContain('login.password');
+    expect(keys).toContain('login.password');
     expect(r.ui_strings.find((s) => s.key === 'cart.title')).toMatchObject({
       text: 'Sepetim',
       file: 'locales/tr.json',
@@ -43,6 +43,7 @@ describe('scanSource', () => {
     const r = await scanSource([FIXTURE], { testIdAttribute: 'data-testid' });
     expect(JSON.stringify(r)).not.toContain('FAKE_SECRET_VALUE');
     expect(r.routes.every((x) => !x.file.includes('node_modules'))).toBe(true);
+    expect(r.otp_hints.every((h) => !h.file.includes('node_modules'))).toBe(true);
     expect(JSON.stringify(r)).not.toContain('tmp-link');
     expect(r.stats.skipped).toBeGreaterThan(0);
   });
@@ -82,6 +83,9 @@ describe('scanSource', () => {
         'i18n/en.ts',
         'export default {\n  checkout: "Proceed to checkout",\n  footer: "Contact",\n  password: "Password: abc",\n};\n',
       );
+      w('locales/de.json', '{ "checkout": { "password": "hunter22" } }');
+      w('locales/fr.ts', 'export default {\n  loginPassword: "Şifre",\n};\n');
+      w('src/b.tsx', '<i data-qa="kept-id" token="y" />\n');
       fs.writeFileSync(path.join(dir, 'bin.tsx'), Buffer.from([65, 0, 66]));
       fs.writeFileSync(path.join(dir, 'big.tsx'), 'x'.repeat(600 * 1024));
       fs.symlinkSync(path.join(dir, 'src/a.tsx'), path.join(dir, 'src/link.tsx'));
@@ -106,6 +110,8 @@ describe('scanSource', () => {
       expect(JSON.stringify(r)).not.toMatch(/hunter22|abcdefghijklmnop12|Password: abc/);
       expect(r.ui_strings.map((s) => s.key)).toContain('checkout');
       expect(r.ui_strings.map((s) => s.key)).not.toContain('footer');
+      expect(r.test_ids.map((t) => t.value)).toContain('kept-id');
+      expect(r.ui_strings).toContainEqual(expect.objectContaining({ key: 'loginPassword', text: 'Şifre' }));
     });
   });
 });

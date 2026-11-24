@@ -15,5 +15,5 @@
     "outDir": "dist"
   },
   "include": ["src", "test", "scripts", "vitest.config.ts", "vitest.e2e.config.ts"],
-  "exclude": ["test/fixtures"]
+  "exclude": ["test/fixtures/shop-src"]
 }
