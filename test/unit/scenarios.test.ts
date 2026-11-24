@@ -1,3 +1,5 @@
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ToolError } from '../../src/errors/tool-error.js';
@@ -108,5 +110,47 @@ describe('match helpers', () => {
     expect(statusMatches(201, '2xx')).toBe(true);
     expect(statusMatches(402, '2xx')).toBe(false);
     expect(statusMatches(201, 201)).toBe(true);
+  });
+});
+
+describe('registry trial load and swap', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'reg-'));
+  const fragFile = path.join(tmp, 'frag', 'f.yaml');
+  mkdirSync(path.dirname(fragFile));
+  writeFileSync(
+    fragFile,
+    'schema_version: 1\nkind: fragment\nid: f\ndescription: d\nsteps:\n  - id: g\n    title: G\n    goto: /\n',
+  );
+  writeFileSync(
+    path.join(tmp, 'inc.yaml'),
+    MINIMAL.replace('id: s', 'id: inc').replace('goto: /', 'include: frag/f.yaml'),
+  );
+
+  it('trial load uses override text and a new file', async () => {
+    const file = path.join(tmp, 'new.yaml');
+    const reg = await ScenarioRegistry.load([tmp], {
+      overrides: new Map([[file, MINIMAL.replace('id: s', 'id: added')]]),
+    });
+    expect(reg.ids()).toContain('added');
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it('trial load sees a broken fragment override in an including scenario', async () => {
+    await expect(
+      ScenarioRegistry.load([tmp], { overrides: new Map([[fragFile, 'kind: fragment\nsteps: 7']]) }),
+    ).rejects.toThrow(/invalid fragment/);
+  });
+
+  it('trial load drops a file with a null override', async () => {
+    const reg = await ScenarioRegistry.load([tmp], {
+      overrides: new Map([[path.join(tmp, 'inc.yaml'), null]]),
+    });
+    expect(reg.ids()).not.toContain('inc');
+  });
+
+  it('swap changes what an existing holder sees', async () => {
+    const reg = await ScenarioRegistry.load([tmp]);
+    reg.swap(ScenarioRegistry.fromLoaded([]));
+    expect(reg.ids()).toEqual([]);
   });
 });
