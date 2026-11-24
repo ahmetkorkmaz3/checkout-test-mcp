@@ -5,6 +5,7 @@ import {
   clickRefusal,
   fieldRefusal,
   isPaymentFrame,
+  matchesClickKind,
 } from '../../src/inspect/actions.js';
 import { fieldKind, guestEmail, phoneValue, postcodeValue } from '../../src/inspect/probe.js';
 
@@ -32,6 +33,39 @@ describe('clickRefusal', () => {
     for (const [t, kind] of cases) expect(clickRefusal(click([t]), kind, {}), t).toBeNull();
     expect(clickRefusal(click(['İl'], { role: 'combobox' }), 'list', {})).toBeNull();
     expect(clickRefusal(click(['İstanbul'], { role: 'option' }), 'list_option', {})).toBeNull();
+  });
+
+  it('accepts only continue words and go-to-payment phrases for the continue step', () => {
+    const cont = (name: string) => matchesClickKind('continue', { name, role: 'button' }, {});
+    for (const t of [
+      'Continue',
+      'Continue to payment',
+      'Ödemeye geç',
+      'Ödeme adımına geç',
+      'Weiter zur Zahlung',
+      'Continuer vers le paiement',
+      'Continuar al pago',
+      'Prosegui al pagamento',
+    ]) {
+      expect(cont(t), t).toBe(true);
+    }
+    // Checkout list words start the checkout only. They never save a form step.
+    for (const t of ['Proceed to checkout', 'Zur Kasse', 'Sepeti Onayla', 'Checkout', 'Passer la commande']) {
+      expect(cont(t), t).toBe(false);
+    }
+    expect(matchesClickKind('checkout', { name: 'Proceed to checkout', role: 'button' }, {})).toBe(true);
+  });
+
+  it('refuses an order button in French, Spanish, and Italian for the continue step', () => {
+    for (const t of ['Passer la commande', 'Passer commande', 'Tramitar pedido', "Procedi all'ordine"]) {
+      expect(clickRefusal(click([t]), 'continue', {}), t).toMatch(/pay/);
+    }
+  });
+
+  it('refuses a wallet button', () => {
+    for (const t of ['Continue with PayPal', 'Apple Pay', 'G Pay', 'Klarna', 'Shop Pay', 'Amazon Pay']) {
+      expect(clickRefusal(click([t]), 'continue', {}), t).toMatch(/pay/);
+    }
   });
 
   it('refuses an element without a name', () => {
@@ -103,6 +137,21 @@ describe('fieldRefusal', () => {
   it('refuses card fields by autocomplete', () => {
     for (const ac of ['cc-number', 'cc-exp', 'cc-csc', 'billing cc-name']) {
       expect(fieldRefusal(field('text', ac)), ac).toMatch(/card/);
+    }
+  });
+
+  it('refuses card fields without autocomplete by name, id, placeholder, or label', () => {
+    for (const texts of [
+      ['cardNumber'],
+      ['card_number'],
+      ['Kart numarası'],
+      ['cvv'],
+      ['CVC'],
+      ['Son kullanma tarihi'],
+      ['Card number'],
+      ['expiry'],
+    ]) {
+      expect(fieldRefusal(field('text', '', texts)), texts[0]).toMatch(/card/);
     }
   });
 

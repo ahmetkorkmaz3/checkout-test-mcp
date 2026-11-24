@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { type InspectionReport, RESULT_CHAR_LIMIT, trimForResult } from '../../src/inspect/report.js';
+import {
+  type InspectionReport,
+  REPORT_SECTIONS,
+  RESULT_CHAR_LIMIT,
+  sliceForResult,
+  trimForResult,
+} from '../../src/inspect/report.js';
 
 function report(extra: Partial<InspectionReport> = {}): InspectionReport {
   return {
@@ -73,5 +79,85 @@ describe('trimForResult', () => {
     expect(w).toMatch(/with offset 0, then next_offset/);
     expect(w).not.toContain('/tmp/runs');
     expect(w).toContain(`site.pages after the first ${out.site?.pages.length} of 400`);
+  });
+});
+
+describe('trimForResult without site', () => {
+  it('trims a report with site null that is still over the cap', () => {
+    const steps = Array.from({ length: 400 }, (_, i) => ({
+      action: `fill field ${i} ${'x'.repeat(150)}`,
+      page_kind: 'checkout' as const,
+      url_path: '/checkout',
+      result: 'done' as const,
+    }));
+    const r = report({
+      checkout_probe: {
+        reached: 'checkout',
+        stopped_reason: 'form_not_understood',
+        steps,
+        dialogs: [],
+        guest_option: false,
+        payment: null,
+        side_effects: [],
+      },
+    });
+    expect(JSON.stringify(r).length).toBeGreaterThan(RESULT_CHAR_LIMIT);
+    const out = trimForResult(r);
+    expect(JSON.stringify(out).length).toBeLessThanOrEqual(RESULT_CHAR_LIMIT);
+    expect(out.warnings.at(-1)).toContain('checkout_probe.steps');
+  });
+});
+
+describe('sliceForResult', () => {
+  const wrap = (r: InspectionReport, slice: unknown) => ({ ...r, slice });
+
+  it('has an otp_hints section', () => {
+    expect(REPORT_SECTIONS).toContain('otp_hints');
+    const r = report({
+      code: {
+        frameworks: [],
+        routes: [],
+        ui_strings: [],
+        test_ids: [],
+        payment_hints: [],
+        otp_hints: [{ text: 'sendOtp', file: 'a.ts', line: 1 }],
+        stats: { files: 1, skipped: 0, truncated: false },
+        warnings: [],
+      },
+    });
+    expect(sliceForResult(r, 'otp_hints', 0, wrap).slice.items).toEqual([
+      { text: 'sendOtp', file: 'a.ts', line: 1 },
+    ]);
+  });
+
+  it('cuts the lists of one item that alone is larger than the cap and says so', () => {
+    const big = {
+      path_pattern: '/big',
+      url_path: '/big',
+      kind: 'other' as const,
+      kind_reasons: [],
+      title: 'Big',
+      headings: [],
+      landmarks: [],
+      elements: Array.from({ length: 400 }, (_, i) => ({
+        role: 'button',
+        name: `${i} ${'n'.repeat(190)}`,
+        visible: true,
+      })),
+      forms: [],
+      selects: [],
+      iframes: [],
+      dialogs: [],
+    };
+    const r = report({ site: { pages: [big], api_calls: [], blocked_hosts: [] } });
+    const out = sliceForResult(r, 'pages', 0, wrap);
+    expect(JSON.stringify(wrap(out.report, out.slice)).length).toBeLessThanOrEqual(RESULT_CHAR_LIMIT);
+    const item = out.slice.items[0] as typeof big;
+    expect(item.path_pattern).toBe('/big');
+    expect(item.elements.length).toBeGreaterThan(0);
+    expect(item.elements.length).toBeLessThan(400);
+    expect(out.report.warnings.join(' ')).toMatch(/item 0 of "pages" is larger than the cap/);
+    // The stored report keeps the full item.
+    expect(r.site?.pages[0]?.elements).toHaveLength(400);
   });
 });

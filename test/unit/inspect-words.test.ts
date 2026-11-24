@@ -153,6 +153,18 @@ describe('pay wins', () => {
     ['checkout', 'Finalizar compra'],
     ['checkout', 'Afrekenen'],
     ['checkout', 'Ir a pagar'],
+    ['checkout', 'Passer la commande'],
+    ['checkout', 'Passer commande'],
+    ['checkout', 'Tramitar pedido'],
+    ['checkout', "Procedi all'ordine"],
+    ['checkout', 'Continue with PayPal'],
+    ['checkout', 'PayPal'],
+    ['checkout', 'Apple Pay'],
+    ['checkout', 'Google Pay'],
+    ['checkout', 'G Pay'],
+    ['checkout', 'Klarna'],
+    ['checkout', 'Shop Pay'],
+    ['checkout', 'Amazon Pay'],
   ] as [WordKind, string][])('%s is false and pay is true for %s', (kind, text) => {
     expect(matchesKind(kind, text)).toBe(false);
     expect(matchesKind('pay', text)).toBe(true);
@@ -164,9 +176,6 @@ describe('pay wins', () => {
       'Naar de kassa',
       'Passer à la caisse',
       'Ödeme Adımına Geç',
-      'Tramitar pedido',
-      "Procedi all'ordine",
-      'Passer commande',
       'Continue to payment',
       'Weiter zur Zahlung',
     ]) {

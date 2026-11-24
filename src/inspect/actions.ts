@@ -1,4 +1,5 @@
-import type { Locator, Page } from 'playwright';
+import type { Frame, Locator, Page } from 'playwright';
+import { CARD_INPUT_HINT_RE, cardInputs } from '../safety/card-inputs.js';
 import { redactText } from '../safety/redact-text.js';
 import { STRONG_SECRET_WORDS } from '../safety/secrets.js';
 import { matchesKind, type WordKind } from './words.js';
@@ -23,11 +24,10 @@ export const SEND_CODE =
 const clean = (s: string | null | undefined): string =>
   redactText((s ?? '').replace(/\s+/g, ' ').trim()).slice(0, 120);
 
-/** True when any frame of the page has a card number or CVC field. */
+/** True when any frame of the page has a card input. The rule is isCardInput in src/safety/card-inputs.ts. */
 export async function hasCardFields(page: Page): Promise<boolean> {
   for (const frame of page.frames()) {
-    const n = await frame
-      .locator('[autocomplete*="cc-number" i], [autocomplete*="cc-csc" i]')
+    const n = await cardInputs(frame)
       .count()
       .catch(() => 0);
     if (n > 0) return true;
@@ -37,10 +37,23 @@ export async function hasCardFields(page: Page): Promise<boolean> {
 
 /**
  * Labels of a button that saves a step and goes on. A form submit button is clicked only when its
- * name matches this list or the checkout words.
+ * name matches this list or GO_TO_PAYMENT.
  */
 export const CONTINUE =
   /(?<![\p{L}\p{N}])(continue|save and continue|next|use this address|devam|devam et|kaydet ve devam et|bu adresi kullan|weiter|suivant|continuar|avanti|volgende)(?![\p{L}\p{N}])/iu;
+
+/**
+ * Explicit phrases that open the payment step. The checkout word list is not allowed here: on some
+ * shops a checkout phrase such as "Passer la commande" places the order.
+ */
+export const GO_TO_PAYMENT =
+  /(?<![\p{L}\p{N}])(continue to payment|ödemeye geç|ödeme adımına geç|weiter zur zahlung|continuer vers le paiement|continuar al pago|prosegui al pagamento|doorgaan naar betalen)(?![\p{L}\p{N}])/iu;
+
+/** True when a name can save a form step and go on. The guard still refuses a pay name. */
+export function isContinueName(name: string): boolean {
+  const n = name.normalize('NFC');
+  return CONTINUE.test(n) || GO_TO_PAYMENT.test(n);
+}
 
 /**
  * What the probe expects to click in the current step. The element name must match it.
@@ -97,16 +110,37 @@ export function isPaymentFrame(frame: { src: string; title: string; context: str
   return PAYMENT_TEXT.test(frame.title.normalize('NFC')) || PAYMENT_TEXT.test(frame.context.normalize('NFC'));
 }
 
+/** Frame loads that the host guard blocked: by URL, and by the Playwright frame with its blocked URL. */
+export interface BlockedFrames {
+  urls: ReadonlySet<string>;
+  /** A same-host frame that redirects to a blocked host has a src that is not the blocked URL. */
+  frames?: ReadonlyMap<Frame, string>;
+}
+
+/** The blocked URL of an iframe, by its src or by its frame, or null when the guard did not block it. */
+export function blockedUrlOf(blocked: BlockedFrames, src: string, frame: Frame | null): string | null {
+  if (blocked.urls.has(src)) return src;
+  return (frame && blocked.frames?.get(frame)) ?? null;
+}
+
 /**
- * True when an iframe on the page has a URL whose load the host guard blocked, and the frame looks
+ * True when an iframe on the page has a load that the host guard blocked, and the frame looks
  * like a payment frame. Such a frame can be a card form on a provider host that the target does not list.
+ * It fails closed: when the page cannot be read and a frame was blocked, it returns true.
  */
-export async function hasBlockedFrame(page: Page, blockedFrames: ReadonlySet<string>): Promise<boolean> {
-  if (blockedFrames.size === 0) return false;
-  const frames = await page
-    .locator('iframe[src]')
-    .evaluateAll((els) =>
-      els.map((e) => {
+export async function hasBlockedFrame(page: Page, blocked: BlockedFrames): Promise<boolean> {
+  if (blocked.urls.size === 0 && (blocked.frames?.size ?? 0) === 0) return false;
+  let handles: Awaited<ReturnType<Locator['elementHandles']>>;
+  try {
+    handles = await page.locator('iframe').elementHandles();
+  } catch {
+    return true;
+  }
+  for (const handle of handles) {
+    let facts: { src: string; title: string; context: string };
+    let frame: Frame | null;
+    try {
+      facts = await handle.evaluate((e) => {
         const frame = e as HTMLIFrameElement;
         // The text of the nearest container, up to 5 levels. A form or landmark ends the walk.
         let context = '';
@@ -127,10 +161,15 @@ export async function hasBlockedFrame(page: Page, blockedFrames: ReadonlySet<str
           }
         }
         return { src: frame.src, title: frame.getAttribute('title') ?? '', context };
-      }),
-    )
-    .catch(() => [] as { src: string; title: string; context: string }[]);
-  return frames.some((f) => blockedFrames.has(f.src) && isPaymentFrame(f));
+      });
+      frame = await handle.contentFrame();
+    } catch {
+      return true;
+    }
+    const url = blockedUrlOf(blocked, facts.src, frame);
+    if (url !== null && isPaymentFrame({ ...facts, src: url })) return true;
+  }
+  return false;
 }
 
 export interface ClickFacts {
@@ -209,7 +248,7 @@ export function matchesClickKind(
   const name = facts.name.normalize('NFC');
   switch (kind) {
     case 'continue':
-      return CONTINUE.test(name) || matchesKind('checkout', name, words);
+      return isContinueName(name);
     case 'list':
       return facts.role === 'combobox';
     case 'list_option':
@@ -249,8 +288,8 @@ export async function guardedClick(
     allow: ClickKind;
     words: Words;
     log: ActionLog;
-    /** URLs of frame loads that the host guard blocked on this page. */
-    blockedFrames?: ReadonlySet<string>;
+    /** Frame loads that the host guard blocked on this page. */
+    blockedFrames?: BlockedFrames;
   },
 ): Promise<ActionResult> {
   const facts = await clickFacts(loc);
@@ -263,7 +302,7 @@ export async function guardedClick(
   const refusal =
     clickRefusal(facts, opts.allow, opts.words) ??
     ((await hasCardFields(page)) ? 'the page has card fields' : null) ??
-    ((await hasBlockedFrame(page, opts.blockedFrames ?? new Set()))
+    ((await hasBlockedFrame(page, opts.blockedFrames ?? { urls: new Set() }))
       ? 'the page has a frame that the guard blocked'
       : null);
   if (refusal) {
@@ -338,6 +377,7 @@ export function fieldRefusal(facts: FieldFacts): string | null {
   if (/^(hidden|file)$/.test(facts.type)) return 'it is not a text field';
   const ac = facts.autocomplete.split(/\s+/);
   if (ac.some((t) => t.startsWith('cc-'))) return 'it is a card field';
+  if (facts.texts.some((t) => CARD_INPUT_HINT_RE.test(t.normalize('NFC')))) return 'it is a card field';
   if (ac.includes('one-time-code')) return 'it is a one-time code field';
   if (ac.some((t) => t.endsWith('-password'))) return 'it is a password field';
   // Names such as "user_password" join words with "_" or "-", which the word boundaries do not split.

@@ -78,7 +78,7 @@ const PROBE: ProbeResult = {
     card_iframe_hosts: [],
     card_frames: [],
     card_fields: [],
-    test_card_select: { label: 'Test card', options: ['Visa success', 'Card declined'] },
+    test_card_select: { label: 'Test card', options: [{ text: 'Visa success' }, { text: 'Card declined' }] },
     agreement_checkbox: 'I accept the terms',
     pay_button: 'Pay now',
   },

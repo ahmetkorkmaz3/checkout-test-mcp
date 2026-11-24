@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { type Browser, type BrowserContext, errors, type Locator, type Page } from 'playwright';
+import { cardInputs } from '../safety/card-inputs.js';
 import { containsUnregisteredCardNumber } from '../safety/cards.js';
 import { hostOf } from '../safety/hosts.js';
 import { type Redactor, redactQuery } from '../safety/secrets.js';
@@ -72,15 +73,15 @@ const UNREACHABLE =
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const SENSITIVE_INPUTS =
-  'input[type=password i], input[autocomplete^="cc-" i], input[autocomplete="one-time-code" i]';
+const SECRET_INPUTS = 'input[type=password i], input[autocomplete="one-time-code" i]';
 
 /**
  * Screenshot masks for password, card, and one-time code inputs in every frame of the page.
- * A card iframe that no step addresses, or a nested frame, is masked too.
+ * A card iframe that no step addresses, or a nested frame, is masked too. Card inputs use the shared
+ * rule in src/safety/card-inputs.ts, so a card input without autocomplete is masked too.
  */
 export function sensitiveMask(page: Page): Locator[] {
-  return page.frames().map((f) => f.locator(SENSITIVE_INPUTS));
+  return page.frames().flatMap((f) => [f.locator(SECRET_INPUTS), cardInputs(f)]);
 }
 
 export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {

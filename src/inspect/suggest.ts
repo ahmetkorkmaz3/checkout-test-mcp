@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import { isRedacted } from '../safety/redact-text.js';
 import { TEST_CARDS } from '../safety/test-cards.js';
 import type { ExpectedOutcome } from '../schemas/common.js';
 import type { CodeReport } from './code-scan.js';
@@ -7,7 +8,7 @@ import type { ProbeResult } from './probe.js';
 import { matchesKind } from './words.js';
 
 export type CardSource =
-  | { kind: 'site_select'; option: string }
+  | { kind: 'site_select'; option: string; value?: string }
   | { kind: 'registry'; card_id: string }
   | null;
 
@@ -70,14 +71,27 @@ function displayName(provider: string): string {
 function findCardSources(probe: ProbeResult | null, code: CodeReport | null): CardSources {
   const select = probe?.payment?.test_card_select;
   if (select && select.options.length > 0) {
-    const decline = select.options.find((o) => matchesKind('decline', o));
-    const success = select.options.find((o) => !matchesKind('decline', o));
+    // A redacted text is not the text on the page, so only the value can select that option.
+    const usable = (o: { text: string; value?: string }) => !isRedacted(o.text) || o.value !== undefined;
+    const declines = select.options.filter((o) => matchesKind('decline', o.text));
+    const successes = select.options.filter((o) => !matchesKind('decline', o.text));
+    const decline = declines.find(usable);
+    const success = successes.find(usable);
+    const source = (o: { text: string; value?: string }): CardSource => ({
+      kind: 'site_select',
+      option: o.text,
+      ...(o.value !== undefined ? { value: o.value } : {}),
+    });
+    const why = (role: string, found: unknown[]) =>
+      found.length > 0
+        ? `a usable ${role} option in the site test card select: the option has a card number in its text and no usable value. Ask the user which option to select`
+        : `a ${role} option in the site test card select`;
     const missing: string[] = [];
-    if (!success) missing.push('a success option in the site test card select');
-    if (!decline) missing.push('a decline option in the site test card select');
+    if (!success) missing.push(why('success', successes));
+    if (!decline) missing.push(why('decline', declines));
     return {
-      success: success ? { kind: 'site_select', option: success } : null,
-      decline: decline ? { kind: 'site_select', option: decline } : null,
+      success: success ? source(success) : null,
+      decline: decline ? source(decline) : null,
       evidence: ['checkout_probe.payment.test_card_select'],
       missing,
     };

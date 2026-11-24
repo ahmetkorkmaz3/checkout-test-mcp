@@ -1420,7 +1420,7 @@
           "maximum": 20
         },
         "section": {
-          "description": "Only to read a list that the result cut: \"pages\", \"api_calls\", \"ui_strings\", \"test_ids\", \"routes\", or \"probe_steps\". Needs a key that already has an inspection. The result then holds only that list.",
+          "description": "Only to read a list that the result cut: \"pages\", \"api_calls\", \"ui_strings\", \"test_ids\", \"routes\", \"otp_hints\", or \"probe_steps\". Needs a key that already has an inspection. The result then holds only that list.",
           "type": "string",
           "enum": [
             "pages",
@@ -1428,6 +1428,7 @@
             "ui_strings",
             "test_ids",
             "routes",
+            "otp_hints",
             "probe_steps"
           ]
         },
@@ -1889,7 +1890,20 @@
                                 "options": {
                                   "type": "array",
                                   "items": {
-                                    "type": "string"
+                                    "type": "object",
+                                    "properties": {
+                                      "text": {
+                                        "type": "string"
+                                      },
+                                      "value": {
+                                        "description": "The option value. Missing when it is empty or looks like personal data.",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "text"
+                                    ],
+                                    "additionalProperties": false
                                   }
                                 }
                               },
@@ -2204,6 +2218,9 @@
                           },
                           "option": {
                             "type": "string"
+                          },
+                          "value": {
+                            "type": "string"
                           }
                         },
                         "required": [
@@ -2235,7 +2252,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "site_select: select this option text in the site test card select. registry: use this test card id in a test_card param."
+                "description": "site_select: select this option in the site test card select. Use `value` as the select option when it is set, else the `option` text. registry: use this test card id in a test_card param."
               }
             },
             "required": [
@@ -2285,6 +2302,7 @@
                     "ui_strings",
                     "test_ids",
                     "routes",
+                    "otp_hints",
                     "probe_steps"
                   ]
                 },

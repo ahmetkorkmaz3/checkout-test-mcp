@@ -58,10 +58,23 @@ function redactPhones(text: string): string {
  * Order matters: card numbers go before phone numbers, so a card is never reported as a phone.
  */
 export function redactText(s: string): string {
-  let out = s.replace(EMAIL, '<email>');
+  return redactPhones(redactPath(s));
+}
+
+/**
+ * Redacts a URL path for a report. It replaces emails, tokens, and card numbers. It keeps other
+ * digit runs, because product ids and barcodes in a path are not personal data.
+ * Never navigate to the result: keep the raw path for navigation.
+ */
+export function redactPath(p: string): string {
+  let out = p.replace(EMAIL, '<email>');
   out = out.replace(JWT, '<token>');
   out = out.replace(HEX_TOKEN, '<token>');
   out = out.replace(BASE64_TOKEN, (m) => (looksLikeBase64Secret(m) ? '<token>' : m));
-  out = redactCards(out);
-  return redactPhones(out);
+  return redactCards(out);
+}
+
+/** True when redaction replaced a part of the text, so the text is not the text on the page. */
+export function isRedacted(s: string): boolean {
+  return /<(?:email|token|card|phone)>/.test(s);
 }

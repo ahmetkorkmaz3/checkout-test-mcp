@@ -34,7 +34,7 @@ export const InspectTargetInput = z.object({
     .default(20)
     .describe('Seconds to wait for the inspection to finish before the call returns. 0 to 20.'),
   section: ReportSection.optional().describe(
-    'Only to read a list that the result cut: "pages", "api_calls", "ui_strings", "test_ids", "routes", or "probe_steps". Needs a key that already has an inspection. The result then holds only that list.',
+    'Only to read a list that the result cut: "pages", "api_calls", "ui_strings", "test_ids", "routes", "otp_hints", or "probe_steps". Needs a key that already has an inspection. The result then holds only that list.',
   ),
   offset: z
     .number()

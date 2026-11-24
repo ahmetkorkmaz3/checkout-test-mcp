@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BlockedHostCounter, pathPattern } from '../../src/inspect/crawl.js';
+import { BlockedHostCounter, pathPattern, shouldSkipLink } from '../../src/inspect/crawl.js';
 
 describe('pathPattern', () => {
   it.each([
@@ -33,5 +33,25 @@ describe('BlockedHostCounter', () => {
       { host: '(invalid url)', count: 1 },
       { host: 'cdn.example.com', count: 1 },
     ]);
+  });
+});
+
+describe('shouldSkipLink', () => {
+  it.each([
+    '/logout',
+    '/cart/remove/12',
+    '/cart/delete',
+    '/cart/clear',
+    '/cart/add/12',
+    '/add-to-cart/12',
+    '/sepet/sil/3',
+    '/sepet/temizle',
+    `/sepet/${encodeURIComponent('kaldır')}/3`,
+    '/sepet/ekle/3',
+  ])('skips %s, because it can change data', (p) => {
+    expect(shouldSkipLink(p)).toBe(true);
+  });
+  it.each(['/products', '/address', '/silver-ring', '/urun/ekler', '/cart'])('reads %s', (p) => {
+    expect(shouldSkipLink(p)).toBe(false);
   });
 });

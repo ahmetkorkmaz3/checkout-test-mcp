@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { isCardInput } from '../../src/safety/card-inputs.js';
 import {
   containsCardNumber,
   containsUnregisteredCardNumber,
@@ -15,7 +16,7 @@ import {
   isLocalHost,
   isUrlAllowed,
 } from '../../src/safety/hosts.js';
-import { redactText } from '../../src/safety/redact-text.js';
+import { redactPath, redactText } from '../../src/safety/redact-text.js';
 import { looksLikeSecret, Redactor, redactQuery } from '../../src/safety/secrets.js';
 import { providerForPackage, TEST_CARDS } from '../../src/safety/test-cards.js';
 import type { TargetConfig } from '../../src/schemas/config.js';
@@ -359,5 +360,42 @@ describe('redactText', () => {
     const out = redactText('1234 5678 9012 3456');
     expect(out).not.toContain('<card>');
     expect(out).not.toContain('1234 5678');
+  });
+});
+
+describe('redactPath', () => {
+  it('keeps ids and barcodes in a path', () => {
+    expect(redactPath('/urun/tabak-p-8690000000001')).toBe('/urun/tabak-p-8690000000001');
+    expect(redactPath('/orders/5550000000/items')).toBe('/orders/5550000000/items');
+  });
+  it('redacts emails, tokens, and card numbers in a path', () => {
+    expect(redactPath('/account/ayse@shop.example/orders')).toBe('/account/<email>/orders');
+    expect(redactPath('/reset/0123456789abcdef0123456789abcdef')).toBe('/reset/<token>');
+    expect(redactPath('/pay/4242424242424242')).toBe('/pay/<card>');
+  });
+});
+
+describe('isCardInput', () => {
+  const input = (over: Partial<Parameters<typeof isCardInput>[0]>) => ({
+    autocomplete: '',
+    name: '',
+    id: '',
+    placeholder: '',
+    label: '',
+    ...over,
+  });
+  it('finds card inputs by autocomplete, name, id, placeholder, and label', () => {
+    expect(isCardInput(input({ autocomplete: 'cc-number' }))).toBe(true);
+    expect(isCardInput(input({ autocomplete: 'billing cc-exp' }))).toBe(true);
+    expect(isCardInput(input({ name: 'cardNumber' }))).toBe(true);
+    expect(isCardInput(input({ id: 'card-cvv' }))).toBe(true);
+    expect(isCardInput(input({ placeholder: 'Kart numarası' }))).toBe(true);
+    expect(isCardInput(input({ label: 'Son kullanma tarihi' }))).toBe(true);
+    expect(isCardInput(input({ label: 'CVC' }))).toBe(true);
+  });
+  it('does not take address and contact inputs as card inputs', () => {
+    for (const label of ['Email', 'Ad Soyad', 'Cep Telefonu', 'Adres', 'Postcode', 'Gift message']) {
+      expect(isCardInput(input({ label, name: label.toLowerCase() })), label).toBe(false);
+    }
   });
 });

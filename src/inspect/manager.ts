@@ -11,7 +11,7 @@ import { redactText } from '../safety/redact-text.js';
 import { InspectConfig, type ResolvedConfig, type TargetConfig } from '../schemas/config.js';
 import { closest } from '../util/closest.js';
 import { type CodeReport, type ScanOptions, scanSource } from './code-scan.js';
-import { BlockedHostCounter, type CrawlContext, crawlSite, type SiteReport } from './crawl.js';
+import { BlockedHostCounter, type CrawlContext, crawlSite, type SiteReport, siteForReport } from './crawl.js';
 import { type ProbeContext, type ProbeResult, probeCheckout } from './probe.js';
 import { INSPECTION_ID_PATTERN, InspectionRecord, InspectionReport, type InspectionScope } from './report.js';
 import { suggestScenarios } from './suggest.js';
@@ -544,7 +544,7 @@ export class InspectionManager {
                 signal,
                 onProgress: progress,
               });
-              this.update(id, { site });
+              this.update(id, { site: siteForReport(site) });
             } catch (err) {
               fail('site crawl', err);
             }
@@ -587,7 +587,7 @@ export class InspectionManager {
       warnings.push(...this.contextWarnings(name, scope, inspect, site, probe));
       const suggested = suggestScenarios({
         target: name,
-        site,
+        site: site ? siteForReport(site) : null,
         probe,
         code,
         hasMemberSecrets: 'member_email' in target.secrets && 'member_password' in target.secrets,
@@ -601,7 +601,7 @@ export class InspectionManager {
       await this.finish(id, {
         status: 'finished',
         progress: 'Finished.',
-        site,
+        site: site ? siteForReport(site) : null,
         checkout_probe: probe,
         code,
         suggested_scenarios: suggested,
@@ -617,7 +617,7 @@ export class InspectionManager {
       await this.finish(id, {
         status: 'finished',
         progress: 'Finished with an error.',
-        site,
+        site: site ? siteForReport(site) : null,
         checkout_probe: probe,
         code,
         warnings: [...(current?.warnings ?? []), ...warnings],

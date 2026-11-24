@@ -111,7 +111,20 @@ export const ProbeResultSchema = z.object({
         .describe(
           'Card inputs by label, placeholder, and autocomplete. Never values. Fields in a frame on a blocked host are unknown.',
         ),
-      test_card_select: z.object({ label: z.string(), options: z.array(z.string()) }).nullable(),
+      test_card_select: z
+        .object({
+          label: z.string(),
+          options: z.array(
+            z.object({
+              text: z.string(),
+              value: z
+                .string()
+                .optional()
+                .describe('The option value. Missing when it is empty or looks like personal data.'),
+            }),
+          ),
+        })
+        .nullable(),
       agreement_checkbox: z.string().nullable(),
       pay_button: z.string().nullable(),
     })
@@ -146,12 +159,16 @@ export const SuggestionSchema = z.object({
   missing: z.array(z.string()).describe('Inputs that are missing. Ask the user for them.'),
   card_source: z
     .discriminatedUnion('kind', [
-      z.object({ kind: z.literal('site_select'), option: z.string() }),
+      z.object({
+        kind: z.literal('site_select'),
+        option: z.string(),
+        value: z.string().optional(),
+      }),
       z.object({ kind: z.literal('registry'), card_id: z.string() }),
     ])
     .nullable()
     .describe(
-      'site_select: select this option text in the site test card select. registry: use this test card id in a test_card param.',
+      'site_select: select this option in the site test card select. Use `value` as the select option when it is set, else the `option` text. registry: use this test card id in a test_card param.',
     ),
 });
 
@@ -278,13 +295,23 @@ export function trimForResult(
     setWarning();
     if (size(r) <= RESULT_CHAR_LIMIT) return r;
   }
-  if (r.site) {
+  let pagesCut: string | undefined;
+  if (r.site && r.site.pages.length > 0) {
     const total = r.site.pages.length;
     // The page count is in the warning, so set the warning before each size check.
     do {
       r.site.pages.pop();
-      setWarning(`site.pages after the first ${r.site.pages.length} of ${total}`);
+      pagesCut = `site.pages after the first ${r.site.pages.length} of ${total}`;
+      setWarning(pagesCut);
     } while (r.site.pages.length > 0 && size(r) > RESULT_CHAR_LIMIT);
+    if (size(r) <= RESULT_CHAR_LIMIT) return r;
+  }
+  // A report without site pages can still be too large, for example with many probe steps.
+  if (pagesCut) cut.push(pagesCut);
+  if (r.checkout_probe && r.checkout_probe.steps.length > 0) {
+    r.checkout_probe.steps = [];
+    cut.push('checkout_probe.steps');
+    setWarning();
   }
   return r;
 }
@@ -295,6 +322,7 @@ export const REPORT_SECTIONS = [
   'ui_strings',
   'test_ids',
   'routes',
+  'otp_hints',
   'probe_steps',
 ] as const;
 export const ReportSection = z.enum(REPORT_SECTIONS);
@@ -327,6 +355,8 @@ function sectionItems(report: InspectionReport, section: ReportSection): Record<
       return report.code?.test_ids ?? [];
     case 'routes':
       return report.code?.routes ?? [];
+    case 'otp_hints':
+      return report.code?.otp_hints ?? [];
     case 'probe_steps':
       return report.checkout_probe?.steps ?? [];
   }
@@ -355,19 +385,70 @@ export function sliceForResult(
     ],
   };
   const slice: ReportSlice = { section, offset, total: all.length, items: [], next_offset: null };
+  const fits = () => JSON.stringify(wrap(head, slice)).length <= RESULT_CHAR_LIMIT;
   for (let i = offset; i < all.length; i++) {
     const item = all[i];
     if (item === undefined) break;
     slice.items.push(item);
     // The next action holds next_offset, so set it before each size check.
     slice.next_offset = i + 1 < all.length ? i + 1 : null;
-    if (slice.items.length > 1 && JSON.stringify(wrap(head, slice)).length > RESULT_CHAR_LIMIT) {
+    if (slice.items.length === 1) {
+      if (!fits()) cutFirstItem(head, slice, section, i, fits);
+      continue;
+    }
+    if (!fits()) {
       slice.items.pop();
       slice.next_offset = i;
       break;
     }
   }
   return { report: head, slice };
+}
+
+/** Every list inside a value, with a path for the warning, for example "elements" or "forms[0].fields". */
+function listsOf(value: unknown, at = ''): { path: string; list: unknown[] }[] {
+  if (Array.isArray(value)) {
+    return [{ path: at, list: value }, ...value.flatMap((v, i) => listsOf(v, `${at}[${i}]`))];
+  }
+  if (value && typeof value === 'object') {
+    return Object.entries(value).flatMap(([k, v]) => listsOf(v, at ? `${at}.${k}` : k));
+  }
+  return [];
+}
+
+/**
+ * Cuts the lists of the only item in a slice until the result fits. The longest list loses half
+ * of its entries each time. The warning names each cut list with the count that is left.
+ * The stored report keeps the full item.
+ */
+function cutFirstItem(
+  head: InspectionReport,
+  slice: ReportSlice,
+  section: ReportSection,
+  index: number,
+  fits: () => boolean,
+): void {
+  const copy = structuredClone(slice.items[0]) as Record<string, unknown>;
+  slice.items[0] = copy;
+  const totals = new Map<string, number>();
+  const note = `The item ${index} of "${section}" is larger than the cap, so its lists are cut in this result. The full item is in the file at report_path.`;
+  head.warnings.push(note);
+  const setNote = () => {
+    const cuts = [...totals].map(([p, total]) => {
+      const left = listsOf(copy).find((l) => l.path === p)?.list.length ?? 0;
+      return `${p} to ${left} of ${total}`;
+    });
+    head.warnings[head.warnings.length - 1] = `${note} Cut: ${cuts.join(', ')}.`;
+  };
+  while (!fits()) {
+    const longest = listsOf(copy)
+      .filter((l) => l.path !== '' && l.list.length > 0)
+      .sort((a, b) => JSON.stringify(b.list).length - JSON.stringify(a.list).length)[0];
+    if (!longest) break;
+    if (!totals.has(longest.path)) totals.set(longest.path, longest.list.length);
+    longest.list.length = Math.floor(longest.list.length / 2);
+    setNote();
+  }
 }
 
 /** True only when A and B are the same type. */

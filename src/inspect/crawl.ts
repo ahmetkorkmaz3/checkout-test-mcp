@@ -1,7 +1,7 @@
 import type { BrowserContext, Locator, Page } from 'playwright';
 import { parse as parseYaml } from 'yaml';
 import { hostOf, isUrlAllowed, matchesAny } from '../safety/hosts.js';
-import { redactText } from '../safety/redact-text.js';
+import { redactPath, redactText } from '../safety/redact-text.js';
 import type { InspectConfig, ResolvedConfig, TargetConfig } from '../schemas/config.js';
 import { type ActionLog, guardedClick, hasCardFields } from './actions.js';
 import { guessPageKind, type PageKind } from './page-kind.js';
@@ -9,6 +9,7 @@ import { matchesKind } from './words.js';
 
 export interface PageSnapshot {
   path_pattern: string;
+  /** The raw path inside the crawl and the probe, for navigation. siteForReport redacts it. */
   url_path: string;
   kind: PageKind;
   kind_reasons: string[];
@@ -142,7 +143,23 @@ export function pathPattern(pathname: string): string {
 }
 
 const SKIP_LINK =
-  /(^|\/)(logout|log-out|signout|sign-out|sign_out|cikis|cikis-yap|abmelden|deconnexion|uitloggen)(\/|$)/i;
+  /(^|\/)(logout|log-out|signout|sign-out|sign_out|cikis|cikis-yap|abmelden|deconnexion|uitloggen)(\/|$)/iu;
+/**
+ * Path segments that change data, such as "/cart/remove/12" or "/add-to-cart/5". A segment counts
+ * when it is the word, or the word and "-" or "_" and more. Reading the site must change no data.
+ */
+const DATA_CHANGE_LINK = /(^|\/)(remove|delete|clear|add|sil|temizle|kaldır|ekle)([-_][^/]*)?(\/|$)/iu;
+
+/** True when the crawl must not open a link with this path: it logs out or changes data. */
+export function shouldSkipLink(pathname: string): boolean {
+  let p = pathname;
+  try {
+    p = decodeURIComponent(pathname);
+  } catch {
+    // A bad escape stays as it is. The raw path is still checked.
+  }
+  return [pathname, p].some((x) => SKIP_LINK.test(x) || DATA_CHANGE_LINK.test(x.normalize('NFC')));
+}
 
 const ELEMENT_ROLES = [
   'button',
@@ -170,7 +187,11 @@ const LANDMARK_ROLES = [
   'region',
 ] as const;
 
-const clean = (s: string | null | undefined): string => redactText((s ?? '').replace(/\s+/g, ' ').trim());
+/** Names and labels are capped, so one element cannot make a page larger than the tool result cap. */
+const TEXT_CAP = 200;
+const clean = (s: string | null | undefined): string =>
+  redactText((s ?? '').replace(/\s+/g, ' ').trim()).slice(0, TEXT_CAP);
+const cleanPath = (p: string): string => redactPath(p).slice(0, 300);
 
 /** First line of an error message, with the query and fragment cut from every URL in it. */
 function firstLine(msg: string): string {
@@ -463,8 +484,8 @@ async function snapshotPage(
   });
 
   return {
-    path_pattern: clean(pathPattern(urlPath)),
-    url_path: clean(urlPath),
+    path_pattern: cleanPath(pathPattern(urlPath)),
+    url_path: urlPath,
     kind: guess.kind,
     kind_reasons: guess.reasons,
     title,
@@ -536,7 +557,7 @@ export async function crawlSite(ctx: CrawlContext): Promise<SiteReport> {
     if (!matchesAny(url.hostname, target.allowed_hosts)) return;
     rawCalls.push({
       method: req.method(),
-      path_pattern: clean(pathPattern(url.pathname)),
+      path_pattern: cleanPath(pathPattern(url.pathname)),
       status: res.status(),
       content_type: clean((res.headers()['content-type'] ?? '').split(';')[0]),
       visit,
@@ -613,7 +634,7 @@ export async function crawlSite(ctx: CrawlContext): Promise<SiteReport> {
         } catch {
           continue;
         }
-        if (link.host !== base.host || SKIP_LINK.test(link.pathname)) continue;
+        if (link.host !== base.host || shouldSkipLink(link.pathname)) continue;
         enqueue(link.pathname);
       }
     }
@@ -632,4 +653,12 @@ export async function crawlSite(ctx: CrawlContext): Promise<SiteReport> {
   }
 
   return { pages, api_calls, blocked_hosts: ctx.blocked.list() };
+}
+
+/**
+ * The site report for the stored report and the tool result. The crawl keeps raw paths, because the
+ * probe navigates with them. Paths keep ids, but lose emails, tokens, and card numbers.
+ */
+export function siteForReport(site: SiteReport): SiteReport {
+  return { ...site, pages: site.pages.map((p) => ({ ...p, url_path: cleanPath(p.url_path) })) };
 }

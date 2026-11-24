@@ -10,12 +10,14 @@ import { startDemoStore } from '../../examples/demo-store/server.mjs';
 import { bootstrap } from '../../src/app.js';
 import { parseConfig } from '../../src/config/load-config.js';
 import { guardedClick, guardedFill, guardedKey } from '../../src/inspect/actions.js';
-import { BlockedHostCounter, crawlSite, type SiteReport } from '../../src/inspect/crawl.js';
+import { BlockedHostCounter, crawlSite, type SiteReport, siteForReport } from '../../src/inspect/crawl.js';
 import { InspectionManager } from '../../src/inspect/manager.js';
-import { type ProbeResult, probeCheckout } from '../../src/inspect/probe.js';
+import { type ProbePayment, type ProbeResult, probeCheckout } from '../../src/inspect/probe.js';
 import type { InspectionReport } from '../../src/inspect/report.js';
+import { type CardSource, suggestScenarios } from '../../src/inspect/suggest.js';
 import { silentLogger } from '../../src/logger.js';
 import { openGuardedContext } from '../../src/runner/browser.js';
+import { sensitiveMask } from '../../src/runner/executor.js';
 import type { InspectConfig } from '../../src/schemas/config.js';
 import { createServer as createMcpServer, type ServerDeps } from '../../src/server.js';
 
@@ -91,6 +93,7 @@ async function crawl(
 async function probe(
   t: ReturnType<typeof demoTarget>,
   signal = new AbortController().signal,
+  pages?: SiteReport['pages'],
 ): Promise<ProbeResult> {
   const guarded = await openGuardedContext({ config: t.config, target: t.target, onBlocked: () => {} });
   try {
@@ -100,6 +103,7 @@ async function probe(
       inspect: t.inspect,
       signal,
       onProgress: () => {},
+      ...(pages ? { pages } : {}),
     });
   } finally {
     await guarded.close();
@@ -434,7 +438,10 @@ describe('checkout probe on a shop with custom lists', () => {
       card_form: false,
       test_card_select: {
         label: 'Test Kartı',
-        options: ['Akbank - Master Card (Credit)', '3DS Tamamlama - İşlem onaylanmadı'],
+        options: [
+          { text: 'Akbank - Master Card (Credit)', value: '1' },
+          { text: '3DS Tamamlama - İşlem onaylanmadı', value: '2' },
+        ],
       },
       agreement_checkbox: expect.stringMatching(/^Ön Bilgilendirme Formu/),
       pay_button: 'Siparişi Tamamla',
@@ -456,6 +463,35 @@ describe('checkout probe on a shop with custom lists', () => {
     expect(r.side_effects).toEqual(['cart item', 'address', expect.stringMatching(/^order draft/)]);
     expect(r.dialogs).toContain('alert: Ürün sepete eklendi');
     expect(r.steps.map((s) => s.action)).toContain('dialog opened: alert: Ürün sepete eklendi');
+  });
+});
+
+describe('screenshot mask', () => {
+  it('masks card inputs without autocomplete in every frame', async () => {
+    const t = demoTarget();
+    const guarded = await openGuardedContext({ config: t.config, target: t.target, onBlocked: () => {} });
+    try {
+      const page = await guarded.context.newPage();
+      await page.setContent(`<main><label for="kn">Kart numarası</label><input id="kn" data-card>
+<input name="cardNumber" data-card><input placeholder="CVC" data-card><input name="email">
+<iframe srcdoc="<input name='cvv' data-card><input placeholder='MM / YY' name='expiry' data-card><input name='city'>"></iframe></main>`);
+      await page.waitForTimeout(200);
+      const masked = new Set<string>();
+      for (const loc of sensitiveMask(page)) {
+        for (const el of await loc.all()) {
+          masked.add(
+            await el.evaluate(
+              (e) => `${e.getAttribute('name') ?? ''}|${e.id}|${e.getAttribute('placeholder') ?? ''}`,
+            ),
+          );
+        }
+      }
+      expect([...masked].sort()).toEqual(
+        ['|kn|', '||CVC', 'cardNumber||', 'cvv||', 'expiry||MM / YY'].sort(),
+      );
+    } finally {
+      await guarded.close();
+    }
   });
 });
 
@@ -547,7 +583,7 @@ describe('guarded actions', () => {
       await page.setContent(`<button onclick="window.hit.push('next')">Continue</button>
 <iframe src="https://pay.example.com/card"></iframe><script>window.hit = []</script>`);
       await page.waitForTimeout(300);
-      const blockedFrames = new Set(['https://pay.example.com/card']);
+      const blockedFrames = { urls: new Set(['https://pay.example.com/card']) };
       expect(
         await guardedClick(page, page.getByRole('button', { name: 'Continue' }), {
           ...base,
@@ -611,12 +647,37 @@ const SAFETY_CASES: Record<string, string> = {
 });</script>`,
   'express-pay': `<main><h1>Payment</h1><input autocomplete="cc-number" placeholder="Card number">
 <button onclick="fetch('/clicked/pay',{method:'POST'})">Pay now</button></main>`,
+  // A default cash on delivery method, no card field, no terms checkbox, an optional note, and an
+  // order button whose text was once in the checkout list. The probe must stop and click nothing.
+  cod: `<main><h1>Paiement</h1><form onsubmit="event.preventDefault()">
+<fieldset><legend>Mode de paiement</legend>
+<label><input type="radio" name="m" checked> Contre-remboursement</label>
+<label><input type="radio" name="m"> Virement bancaire</label></fieldset>
+<label for="note">Commentaire</label><textarea id="note"></textarea>
+<button type="submit" onclick="fetch('/clicked/order',{method:'POST'})">Passer la commande</button></form></main>`,
+  // An inline card form without autocomplete. The labels, names, and placeholders show the card fields.
+  inlinecard: `<main><h1>Ödeme</h1><form onsubmit="event.preventDefault()">
+<label for="kn">Kart numarası</label><input id="kn" name="kn">
+<label for="sk">Son kullanma</label><input id="sk" name="sk" placeholder="AA/YY">
+<input name="cvv" placeholder="CVV" aria-label="Güvenlik">
+<button type="submit" onclick="fetch('/clicked/pay',{method:'POST'})">Güvenli Öde</button></form></main>`,
+  // A same-host iframe that redirects to a payment host that the guard blocks. No title, no text.
+  redirframe: `<main><h1>Checkout</h1><iframe src="/frame-redirect"></iframe>
+<button onclick="fetch('/clicked/continue',{method:'POST'})">Continue</button></main>`,
+  // A site test card select whose option texts show card numbers. The values are safe to use.
+  cardselect: `<main><h1>Payment</h1>
+<label for="tk">Test card</label><select id="tk"><option value="">Select</option>
+<option value="0">4111 1111 1111 1111 - Success</option><option value="1">4000 0000 0000 0002 - Declined</option></select>
+<label><input type="checkbox"> I accept the terms and conditions</label>
+<button onclick="fetch('/clicked/pay',{method:'POST'})">Pay now</button></main>`,
   // A phone field and an SMS verification text: the probe stops before any continue click.
   sms: `<main><h1>İletişim</h1><form onsubmit="event.preventDefault()">
 <label for="tel">Cep Telefonu</label><input id="tel" type="tel">
 <p>Telefonunuza SMS ile doğrulama kodu gönderilecek.</p>
 <button type="submit" onclick="fetch('/clicked/continue',{method:'POST'})">Devam Et</button></form></main>`,
 };
+
+const NUMBERED_PRODUCT = '/urun/tabak-p-8690000000001';
 
 describe('checkout probe safety rules', () => {
   let server: Server;
@@ -631,10 +692,20 @@ describe('checkout probe safety rules', () => {
         res.end('{}');
         return;
       }
-      const product = /^\/urun\/([a-z-]+)-123456$/.exec(req.url ?? '');
+      if (req.url === '/frame-redirect') {
+        res.writeHead(302, { location: 'https://pay.example.com/card' });
+        res.end();
+        return;
+      }
+      // A product id with 13 digits, like a barcode. It must survive into navigation.
+      const product =
+        req.url === NUMBERED_PRODUCT
+          ? [req.url, 'express']
+          : /^\/urun\/([a-z-]+)-123456$/.exec(req.url ?? '');
       const step = /^\/odeme\/([a-z-]+)$/.exec(req.url ?? '');
       let body: string | undefined;
-      if (product?.[1]) {
+      if (req.url === '/') body = `<main><h1>Shop</h1><a href="${NUMBERED_PRODUCT}">Tabak</a></main>`;
+      else if (product?.[1]) {
         body = `<header><a href="/odeme/${product[1]}">Checkout</a></header><main><h1>Kalem</h1>
 <button onclick="fetch('/api/sepet',{method:'POST'})">Sepete Ekle</button></main>`;
       } else if (step?.[1]) body = SAFETY_CASES[step[1]];
@@ -704,6 +775,83 @@ describe('checkout probe safety rules', () => {
     const r = await probe(caseTarget('consent'));
     expect(r.stopped_reason).toBe('payment_step_reached');
     expect(hits).toContain('POST /api/consent-contact');
+  });
+
+  it('reaches a cash on delivery payment step and never clicks "Passer la commande"', async () => {
+    const r = await probe(caseTarget('cod'));
+    expect(r.reached).toBe('payment');
+    expect(r.stopped_reason).toBe('payment_step_reached');
+    expect(r.payment?.pay_button).toBe('Passer la commande');
+    expect(r.payment?.methods).toEqual(['Contre-remboursement', 'Virement bancaire']);
+    expect(hits.filter((h) => h.startsWith('POST /clicked/'))).toEqual([]);
+  });
+
+  it('reaches an inline card form without autocomplete and fills no card field', async () => {
+    const r = await probe(caseTarget('inlinecard'));
+    expect(r.reached).toBe('payment');
+    expect(r.payment?.card_form).toBe(true);
+    expect(r.payment?.card_fields).toEqual([
+      { label: 'Kart numarası', in_frame: false },
+      { label: 'Son kullanma', placeholder: 'AA/YY', in_frame: false },
+      { label: 'Güvenlik', placeholder: 'CVV', in_frame: false },
+    ]);
+    expect(r.steps.some((s) => /^fill /.test(s.action))).toBe(false);
+    expect(hits.filter((h) => h.startsWith('POST /clicked/'))).toEqual([]);
+  });
+
+  it('takes a same-host frame that redirects to a blocked payment host as a payment frame', async () => {
+    const r = await probe(caseTarget('redirframe'));
+    expect(r.reached).toBe('payment');
+    expect(r.payment?.card_frames).toEqual([{ host: 'pay.example.com', title: '' }]);
+    expect(hits.filter((h) => h.startsWith('POST /clicked/'))).toEqual([]);
+  });
+
+  it('records safe option values of a test card select and suggests a value, never a card number', async () => {
+    const r = await probe(caseTarget('cardselect'));
+    expect(r.reached).toBe('payment');
+    expect(r.payment?.test_card_select).toEqual({
+      label: 'Test card',
+      options: [
+        { text: '<card> - Success', value: '0' },
+        { text: '<card> - Declined', value: '1' },
+      ],
+    });
+    const s = suggestScenarios({ target: 's', site: null, probe: r, code: null, hasMemberSecrets: false });
+    const guest = s.find((x) => x.id === 's-guest-card');
+    expect(guest?.card_source).toEqual({ kind: 'site_select', option: '<card> - Success', value: '0' });
+    expect(guest?.baseline).toBe(true);
+    const step = cardSelectStep(r.payment as ProbePayment, guest?.card_source ?? null);
+    expect(step).toContain('select: { label: Test card }');
+    expect(step).toContain('option: "0"');
+    expect(JSON.stringify(r)).not.toMatch(/4111|0002/);
+    expect(hits.filter((h) => h.startsWith('POST /clicked/'))).toEqual([]);
+  });
+
+  it('keeps a 13-digit product id in the path for navigation and in the report', async () => {
+    const config = parseConfig(
+      {
+        targets: {
+          s: {
+            profile: 'p',
+            base_url: base,
+            allowed_hosts: ['localhost'],
+            inspect: { start_paths: ['/'], max_pages: 3, probe_checkout: true },
+          },
+        },
+      },
+      '/tmp',
+    );
+    const target = config.targets.s;
+    if (!target?.inspect) throw new Error('test config has no inspect block');
+    const t = { config, target, inspect: target.inspect };
+    const site = await crawl(t);
+    const product = siteForReport(site).pages.find((p) => p.kind === 'product');
+    expect(product?.url_path).toBe(NUMBERED_PRODUCT);
+    const before = hits.filter((h) => h === `GET ${NUMBERED_PRODUCT}`).length;
+    const r = await probe(t, undefined, site.pages);
+    expect(hits.filter((h) => h === `GET ${NUMBERED_PRODUCT}`).length).toBe(before + 1);
+    expect(r.steps[0]).toMatchObject({ action: 'open product page', url_path: NUMBERED_PRODUCT });
+    expect(r.reached).toBe('payment');
   });
 
   it('stops before a continue click when the page with a phone field talks about an SMS code', async () => {
@@ -784,6 +932,14 @@ describe('inspection job on the demo store', () => {
     expect(onDisk.status).toBe('finished');
   });
 });
+
+/** The template step for a site test card select. It selects by value when the report has one. */
+function cardSelectStep(payment: ProbePayment, source: CardSource): string {
+  if (source?.kind !== 'site_select' || !payment.test_card_select)
+    throw new Error('no site test card select');
+  const option = source.value ?? source.option;
+  return `    select: { label: ${payment.test_card_select.label} }\n    option: ${JSON.stringify(option)}`;
+}
 
 /**
  * The setup loop without a model: a small template fills a scenario from the report only.

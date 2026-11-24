@@ -1,19 +1,22 @@
 import { randomBytes } from 'node:crypto';
 import type { BrowserContext, Frame, Locator, Page } from 'playwright';
-import { hostOf } from '../safety/hosts.js';
-import { redactText } from '../safety/redact-text.js';
+import { cardInputs } from '../safety/card-inputs.js';
+import { hostOf, isUrlAllowed } from '../safety/hosts.js';
+import { redactPath, redactText } from '../safety/redact-text.js';
 import type { InspectConfig, TargetConfig } from '../schemas/config.js';
 import {
   type ActionLog,
   type ActionResult,
+  type BlockedFrames,
+  blockedUrlOf,
   type ClickKind,
-  CONTINUE,
   guardedClick,
   guardedFill,
   guardedKey,
   guardedSelect,
   hasBlockedFrame,
   hasCardFields,
+  isContinueName,
   isPaymentFrame,
 } from './actions.js';
 import { accessibleName, type PageSnapshot, rejectCookieBanner } from './crawl.js';
@@ -50,7 +53,11 @@ export interface ProbePayment {
   card_frames: CardFrame[];
   /** Inline card fields, and fields in card frames on allowed hosts. */
   card_fields: CardField[];
-  test_card_select: { label: string; options: string[] } | null;
+  /**
+   * Option texts are redacted. `value` is there when it holds no card-like number, so a scenario can
+   * select an option whose text shows a card number.
+   */
+  test_card_select: { label: string; options: { text: string; value?: string }[] } | null;
   agreement_checkbox: string | null;
   pay_button: string | null;
 }
@@ -115,6 +122,9 @@ class ProbeStop extends Error {
 const clean = (s: string | null | undefined): string =>
   redactText((s ?? '').replace(/\s+/g, ' ').trim()).slice(0, 120);
 
+/** A URL path for the report. Ids stay, so the path still names the page. Navigation uses the raw path. */
+const reportPath = (p: string): string => redactPath(p).slice(0, 300);
+
 /**
  * Page text that says the step sends a code to the phone. With a phone field on the page,
  * the probe stops before it clicks to go on.
@@ -126,6 +136,12 @@ const PLACEHOLDER =
   /^\s*$|^[-–—\s]+$|(select|choose|please|seçiniz|seçin|bitte wählen|auswählen|choisir|sélectionner|selecciona|elegir|seleziona|scegli|kies|selecteer)/iu;
 const TEST_CARD =
   /(test\s*-?\s*(kart|card|karte|carte|tarjeta|carta|kaart)|carte de test|tarjeta de prueba|carta di test)/iu;
+/**
+ * Labels of a payment method radio or tab. A non-card default method, such as cash on delivery or
+ * a bank transfer, shows the payment step without a card field or a terms checkbox.
+ */
+const PAYMENT_METHOD =
+  /(?<![\p{L}\p{N}])(kapıda ödeme|havale|eft|nachnahme|überweisung|contre-remboursement|virement|contrareembolso|transferencia|contrassegno|bonifico|rembours|overboeking|cash on delivery|bank transfer|credit card|debit card|kredi kartı|banka kartı|kreditkarte|carte bancaire|carte de crédit|tarjeta de crédito|carta di credito|creditcard|paypal|klarna)/iu;
 
 type FieldKind =
   | 'email'
@@ -496,8 +512,11 @@ class Probe {
   private filledAddress = false;
   /** Dialogs that opened after a probe action. The next step entry writes them first. */
   private readonly pendingDialogs: string[] = [];
-  /** URLs of frame loads that the host guard blocked, such as a card iframe on a provider host. */
-  private readonly blockedFrames = new Set<string>();
+  /** Frame loads that the host guard blocked, such as a card iframe on a provider host. */
+  private readonly blockedFrames: { urls: Set<string>; frames: Map<Frame, string> } & BlockedFrames = {
+    urls: new Set(),
+    frames: new Map(),
+  };
 
   constructor(
     private readonly ctx: ProbeContext,
@@ -522,7 +541,7 @@ class Probe {
   }
 
   private async record(action: string, result: ProbeStep['result']): Promise<void> {
-    this.pushStep(action, result, await kindOf(this.page), clean(urlPath(this.page)));
+    this.pushStep(action, result, await kindOf(this.page), reportPath(urlPath(this.page)));
   }
 
   /**
@@ -531,7 +550,7 @@ class Probe {
    */
   private async act<T>(fn: (log: ActionLog) => Promise<T>): Promise<T> {
     const pageKind = await kindOf(this.page);
-    const path = clean(urlPath(this.page));
+    const path = reportPath(urlPath(this.page));
     const entries: [string, ActionResult][] = [];
     const out = await fn((action, result) => {
       entries.push([action, result]);
@@ -549,9 +568,13 @@ class Probe {
     this.addDialog(text, true);
   }
 
-  /** Called for each blocked request. A blocked frame load can be a card iframe. */
-  noteBlockedFrame(url: string): void {
-    this.blockedFrames.add(url);
+  /**
+   * Called for each blocked frame load. A blocked frame load can be a card iframe. The frame counts
+   * too, because a same-host frame can redirect to the blocked host.
+   */
+  noteBlockedFrame(url: string, frame: Frame | null): void {
+    this.blockedFrames.urls.add(url);
+    if (frame) this.blockedFrames.frames.set(frame, url);
   }
 
   private addDialog(text: string, asStep: boolean): void {
@@ -800,9 +823,40 @@ class Probe {
       )
       .catch(() => [] as string[]);
     if (checkboxes.some((t) => matchesKind('terms', t, this.words))) return true;
+    if (await this.hasPaymentMethods()) return true;
     if (!hasPayButton) return false;
     const fields = await readFields(this.page);
     return !fields.some((f) => f.visible && !f.disabled && isFillable(f) && needsValue(f));
+  }
+
+  /** True when a visible radio or tab names a payment method, for example cash on delivery. */
+  private async hasPaymentMethods(): Promise<boolean> {
+    const labels = await this.page
+      .locator('input[type="radio" i], [role="radio"], [role="tab"]')
+      .evaluateAll(
+        (els, max) =>
+          els
+            .slice(0, max)
+            .filter((el) => {
+              // A hidden radio inside a visible label is common, so the label counts as visible too.
+              const box = (el as HTMLInputElement).labels?.[0] ?? el;
+              const r = box.getBoundingClientRect();
+              return r.width > 0 && r.height > 0;
+            })
+            .map((el) => {
+              const ids = (el.getAttribute('aria-labelledby') ?? '').split(/\s+/).filter(Boolean);
+              return (
+                (el as HTMLInputElement).labels?.[0]?.textContent ||
+                el.getAttribute('aria-label') ||
+                ids.map((id) => document.getElementById(id)?.textContent ?? '').join(' ') ||
+                el.textContent ||
+                ''
+              );
+            }),
+        PROBE_LIMITS.candidates,
+      )
+      .catch(() => [] as string[]);
+    return labels.some((t) => PAYMENT_METHOD.test(t.normalize('NFC')));
   }
 
   /** Stops before a continue click when a page with a phone field says that it sends a code. */
@@ -934,15 +988,10 @@ class Probe {
         if (!(await loc.isVisible().catch(() => false))) continue;
         const name = await accessibleName(loc);
         // A nameless or unmatched submit button can place an order. The guard checks the name again.
-        if (CONTINUE.test(name.normalize('NFC')) || matchesKind('checkout', name, this.words))
-          return { loc, name };
+        if (isContinueName(name)) return { loc, name };
       }
     }
-    const buttons = await findByKind(
-      this.page,
-      ['button'],
-      (n) => CONTINUE.test(n.normalize('NFC')) || matchesKind('checkout', n, this.words),
-    );
+    const buttons = await findByKind(this.page, ['button'], isContinueName);
     return buttons[0] ?? null;
   }
 
@@ -965,17 +1014,18 @@ class Probe {
         })
         .catch(() => null);
       if (!attrs) continue;
+      const frame = await handle.contentFrame().catch(() => null);
+      const blockedUrl = blockedUrlOf(this.blockedFrames, attrs.src, frame);
+      // A frame that redirected to a blocked host is listed with the blocked host.
       let host = '';
       try {
-        host = hostOf(attrs.src);
+        host = hostOf(blockedUrl ?? attrs.src);
       } catch {
         continue;
       }
-      const frame = await handle.contentFrame().catch(() => null);
       const inFrame = frame ? await readCardFields(frame, true) : [];
       const blockedPayment =
-        this.blockedFrames.has(attrs.src) &&
-        isPaymentFrame({ src: attrs.src, title: attrs.title, context: '' });
+        blockedUrl !== null && isPaymentFrame({ src: blockedUrl, title: attrs.title, context: '' });
       if (inFrame.length === 0 && !blockedPayment) continue;
       const title = clean(attrs.title);
       const name = clean(attrs.name);
@@ -1031,8 +1081,7 @@ class Probe {
 
     const hosts = new Set<string>();
     for (const frame of page.frames().slice(1)) {
-      const n = await frame
-        .locator('[autocomplete*="cc-" i]')
+      const n = await cardInputs(frame)
         .count()
         .catch(() => 0);
       if (n === 0) continue;
@@ -1057,7 +1106,12 @@ class Probe {
             label: clean(testSelect.label),
             options: testSelect.options
               .filter((o) => o.value !== '' && !PLACEHOLDER.test(o.text))
-              .map((o) => clean(o.text)),
+              .map((o) => {
+                const value = o.value.trim();
+                // A value that redaction would change can hold a card number or personal data.
+                const usable = value !== '' && value.length <= 120 && redactText(value) === value;
+                return { text: clean(o.text), ...(usable ? { value } : {}) };
+              }),
           }
         : null,
       agreement_checkbox: agreement ? clean(agreement) : null,
@@ -1088,7 +1142,20 @@ export async function probeCheckout(ctx: ProbeContext): Promise<ProbeResult> {
     } catch {
       frame = null;
     }
-    if (frame && frame !== page.mainFrame()) probe.noteBlockedFrame(req.url());
+    if (frame && frame !== page.mainFrame()) probe.noteBlockedFrame(req.url(), frame);
+  });
+  // Playwright routes only the first URL of a redirect chain, so the host guard never sees a
+  // redirect target. A frame that a same-host URL redirects to another host counts as blocked here.
+  page.on('request', (req) => {
+    if (!req.isNavigationRequest() || req.redirectedFrom() === null) return;
+    if (isUrlAllowed(req.url(), ctx.target, { production_hosts: [] })) return;
+    let frame: ReturnType<typeof req.frame> | null = null;
+    try {
+      frame = req.frame();
+    } catch {
+      frame = null;
+    }
+    if (frame && frame !== page.mainFrame()) probe.noteBlockedFrame(req.url(), frame);
   });
   const work = probe.run().then(
     () => 'form_not_understood' as StopReason,
@@ -1114,27 +1181,17 @@ export async function probeCheckout(ctx: ProbeContext): Promise<ProbeResult> {
 
 /** Card input labels in one frame. Values are never read. */
 async function readCardFields(frame: Frame, inFrame: boolean): Promise<CardField[]> {
-  const raw = await frame
-    .locator('input')
+  const raw = await cardInputs(frame)
     .evaluateAll(
       (els, max) =>
-        els
-          .filter((el) => {
-            const i = el as HTMLInputElement;
-            const ac = (i.getAttribute('autocomplete') ?? '').toLowerCase();
-            if (ac.startsWith('cc-')) return true;
-            const hint = `${i.name} ${i.id} ${i.placeholder}`.toLowerCase();
-            return /card.?number|cardnumber|\bcvc\b|\bcvv\b|expir|kart numaras|son kullanma/.test(hint);
-          })
-          .slice(0, max)
-          .map((el) => {
-            const i = el as HTMLInputElement;
-            return {
-              label: i.labels?.[0]?.textContent ?? i.getAttribute('aria-label') ?? '',
-              placeholder: i.getAttribute('placeholder') ?? '',
-              autocomplete: i.getAttribute('autocomplete') ?? '',
-            };
-          }),
+        els.slice(0, max).map((el) => {
+          const i = el as HTMLInputElement;
+          return {
+            label: i.labels?.[0]?.textContent ?? i.getAttribute('aria-label') ?? '',
+            placeholder: i.getAttribute('placeholder') ?? '',
+            autocomplete: i.getAttribute('autocomplete') ?? '',
+          };
+        }),
       PROBE_LIMITS.cardFields,
     )
     .catch(() => [] as { label: string; placeholder: string; autocomplete: string }[]);

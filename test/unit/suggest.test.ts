@@ -70,7 +70,7 @@ function code(hints: CodeReport['payment_hints'], extra: Partial<CodeReport> = {
 const TR_SELECT = {
   test_card_select: {
     label: 'Test kartı',
-    options: ['Akbank - Master Card (Credit)', '3DS Tamamlama - İşlem onaylanmadı'],
+    options: [{ text: 'Akbank - Master Card (Credit)' }, { text: '3DS Tamamlama - İşlem onaylanmadı' }],
   },
   agreement_checkbox: 'Ön Bilgilendirme Formu…',
 };
@@ -214,12 +214,59 @@ describe('suggestScenarios', () => {
     const s = suggestScenarios({
       target: 'k',
       site,
-      probe: probeWith({ test_card_select: { label: 'Test card', options: ['Visa success'] } }),
+      probe: probeWith({ test_card_select: { label: 'Test card', options: [{ text: 'Visa success' }] } }),
       code: null,
       hasMemberSecrets: false,
     });
     expect(s.filter((x) => x.baseline).map((x) => x.id)).toEqual(['k-guest-card']);
     expect(s.find((x) => x.id === 'k-card-declined')?.missing.length).toBeGreaterThan(0);
+  });
+
+  it('uses the option value when the option text hides a card number', () => {
+    const s = suggestScenarios({
+      target: 'k',
+      site,
+      probe: probeWith({
+        test_card_select: {
+          label: 'Test card',
+          options: [
+            { text: '<card> - Success', value: '0' },
+            { text: '<card> - Declined', value: '1' },
+          ],
+        },
+      }),
+      code: null,
+      hasMemberSecrets: false,
+    });
+    expect(s.find((x) => x.id === 'k-guest-card')?.card_source).toEqual({
+      kind: 'site_select',
+      option: '<card> - Success',
+      value: '0',
+    });
+    expect(s.find((x) => x.id === 'k-card-declined')?.card_source).toEqual({
+      kind: 'site_select',
+      option: '<card> - Declined',
+      value: '1',
+    });
+  });
+
+  it('says what is missing when neither the option text nor the value is usable', () => {
+    const s = suggestScenarios({
+      target: 'k',
+      site,
+      probe: probeWith({
+        test_card_select: {
+          label: 'Test card',
+          options: [{ text: '<card> - Success' }, { text: '<card> - Declined' }],
+        },
+      }),
+      code: null,
+      hasMemberSecrets: false,
+    });
+    const guest = s.find((x) => x.id === 'k-guest-card');
+    expect(guest?.card_source).toBeNull();
+    expect(guest?.baseline).toBe(false);
+    expect(guest?.missing.join(' ')).toMatch(/card number in its text and no usable value/);
   });
 
   it('makes no baseline without a probe and says why', () => {

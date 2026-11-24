@@ -20,7 +20,9 @@ export type WordKind = z.infer<typeof WordKind>;
  * The `pay` list decides what the probe must never click. It lists full phrases, so a
  * checkout step button such as "Ödeme Adımına Geç" does not match. Any phrase that can be
  * a pay button on some shop (for example "Commander" or "Complete checkout") stays in `pay`.
+ * Wallet names are in `pay` too, so the probe never clicks "Continue with PayPal".
  * `checkout` keeps only explicit step phrases. Use matchesKind: pay wins on every overlap.
+ * The probe clicks `checkout` phrases only to start the checkout, never to save a form step.
  * `cookie_accept` exists only so the probe can avoid it.
  */
 export const WORD_LISTS: Record<WordKind, readonly string[]> = {
@@ -77,14 +79,10 @@ export const WORD_LISTS: Record<WordKind, readonly string[]> = {
     'zum checkout',
     'weiter zur zahlung',
     'passer à la caisse',
-    'passer la commande',
-    'passer commande',
     'ir a la caja',
-    'tramitar pedido',
     'proceder al pago',
     'vai alla cassa',
     'procedi al checkout',
-    "procedi all'ordine",
     'naar de kassa',
   ],
   guest: [
@@ -201,6 +199,17 @@ export const WORD_LISTS: Record<WordKind, readonly string[]> = {
     'bestelling plaatsen',
     'bestelling afronden',
     'bestellen en betalen',
+    'passer la commande',
+    'passer commande',
+    'tramitar pedido',
+    "procedi all'ordine",
+    'paypal',
+    'apple pay',
+    'google pay',
+    'g pay',
+    'klarna',
+    'shop pay',
+    'amazon pay',
   ],
   terms: [
     'terms and conditions',
