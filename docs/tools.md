@@ -699,7 +699,7 @@ server.registerTool(
       scope: z.enum(['site', 'code', 'both']).default('both'),
       wait_s: z.number().int().min(0).max(20).default(20),
       // Read arguments: one page of a list from the full stored report. Not part of the request hash.
-      section: z.enum(['pages', 'api_calls', 'ui_strings', 'test_ids', 'routes', 'probe_steps']).optional(),
+      section: z.enum(['pages', 'api_calls', 'ui_strings', 'test_ids', 'routes', 'otp_hints', 'probe_steps']).optional(),
       offset: z.number().int().min(0).default(0),
     }),
     outputSchema: InspectionReport.extend({
@@ -745,12 +745,16 @@ const Suggestion = z.object({
   missing: z.array(z.string()), // inputs to ask the user for
   card_source: z
     .discriminatedUnion('kind', [
-      z.object({ kind: z.literal('site_select'), option: z.string() }),
+      z.object({ kind: z.literal('site_select'), option: z.string(), value: z.string().optional() }),
       z.object({ kind: z.literal('registry'), card_id: z.string() }),
     ])
-    .nullable(),
+    .nullable(), // site_select: select by value when it is set, else by the option text
 });
 ```
+
+`ProbeResult.payment.test_card_select` is `{ label, options: { text, value? }[] } | null`. The option text is redacted, so a text with a card number shows `<card>`. `value` is the option value when it is not empty and holds no card-like number or other personal data. A `site_select` card source has `value` when the option has one. The scenario then selects with `option: <value>`. When an option text hides a card number and the option has no usable value, the suggestion has no card source, and `missing` says so.
+
+URL paths in the report (`site.pages[].url_path`, `checkout_probe.steps[].url_path`) keep ids and barcodes. They lose emails, tokens, and card numbers.
 
 `ProbeResult.payment` also has `card_frames` (`{ host, title, name? }[]`) and `card_fields` (`{ label?, placeholder?, autocomplete?, in_frame }[]`). The probe reads a card frame from the iframe element on the parent page, so a frame on a blocked host is listed too. A frame counts when it has card fields, or when the guard blocked it and it looks like a payment frame. `card_fields` has the inline card inputs and the inputs of card frames on allowed hosts: labels, placeholders, and autocomplete values, never values. When a card frame host is blocked, a warning says that the card fields are unknown and names the host to add to `third_party_hosts`.
 
@@ -770,9 +774,9 @@ A phase that crashes does not give a tool error. The job keeps the parts that ar
 
 After a restart, an inspection that was `queued` or `running` becomes `finished` with `interrupted: true` and a warning. The server does not repeat it. Each record on disk has its idempotency key, so the server rebuilds a key that the index file does not have. A failed job never stops the jobs after it.
 
-The compact JSON of the whole output object (the report, `reused_existing_inspection`, and `next`) stays under 40 000 characters. The text block is that compact JSON, not a pretty-printed copy. To fit, the server cuts page `elements` first, then `code.ui_strings`, then `site.api_calls`. If that is not enough, it cuts `code.test_ids`, `code.routes`, `code.otp_hints`, and then pages from the end. It adds one warning that lists the cut parts and tells the agent to read them with `section` and `offset`. The file at `report_path` also has the full report, but an agent with only the MCP tools cannot read it.
+The compact JSON of the whole output object (the report, `reused_existing_inspection`, and `next`) stays under 40 000 characters. The text block is that compact JSON, not a pretty-printed copy. To fit, the server cuts page `elements` first, then `code.ui_strings`, then `site.api_calls`. If that is not enough, it cuts `code.test_ids`, `code.routes`, `code.otp_hints`, then pages from the end, and then `checkout_probe.steps`. It adds one warning that lists the cut parts and tells the agent to read them with `section` and `offset`. The file at `report_path` also has the full report, but an agent with only the MCP tools cannot read it.
 
-To read a cut list, call `inspect_target` with the same target, key, and scope, plus `section` and `offset` (start with 0). The key must already have an inspection. Otherwise the tool refuses with `INVALID_PARAMS` and starts nothing. `section` and `offset` are read arguments: they are not part of the request hash, so they never give `IDEMPOTENCY_CONFLICT`. When the inspection is finished, the result has `slice` with as many items from `offset` as fit under the same 40 000 character limit (at least one), `total`, and `next_offset` (null at the end). In this result `site`, `checkout_probe`, and `code` are null, `suggested_scenarios` and `side_effects` are empty, and one warning says so. `next` holds the call for the next page. When the inspection is not finished, `slice` is null and the result is the usual progress.
+To read a cut list, call `inspect_target` with the same target, key, and scope, plus `section` and `offset` (start with 0). The key must already have an inspection. Otherwise the tool refuses with `INVALID_PARAMS` and starts nothing. `section` and `offset` are read arguments: they are not part of the request hash, so they never give `IDEMPOTENCY_CONFLICT`. When the inspection is finished, the result has `slice` with as many items from `offset` as fit under the same 40 000 character limit (at least one). When one item alone is larger than the limit, the server cuts the longest lists of that item in the result and adds a warning that names each cut list. The result also has `total` and `next_offset` (null at the end). In this result `site`, `checkout_probe`, and `code` are null, `suggested_scenarios` and `side_effects` are empty, and one warning says so. `next` holds the call for the next page. When the inspection is not finished, `slice` is null and the result is the usual progress.
 
 `next`: while the status is not `finished`, a `call_tool` of `inspect_target` with the same arguments. When it is finished, a `call_tool` of `save_scenario` if a baseline suggestion exists, else `ask_human` for the missing inputs.
 
@@ -936,5 +940,5 @@ The prompt names the key of the latest finished inspection of the target that re
 4. **Types in the schema, business rules in the server.** The SDK rejects a wrong type before the handler runs. Rules that need config (target exists, card behaviour fits) give a `ToolError` with a fix.
 5. **Verdict and category are enums.** The agent can branch on them without text parsing. `summary` is for the human reading the agent transcript.
 6. **`relevant` flags and caps in summary mode.** A checkout page can log hundreds of console lines. The model gets at most ten items of each kind, ordered by relevance.
-7. **Annotations are honest.** `run_scenario` is not read-only and is open-world. Clients that ask the user before side effects ask for this tool only.
+7. **Annotations are honest.** `run_scenario`, `inspect_target`, and `save_scenario` are not read-only. All three are open-world: they open a test site in a browser, and `save_scenario` can start a validation run. `save_scenario` also writes files, so it is marked destructive. Clients that ask the user before side effects ask for these tools only.
 8. **`tools/list` snapshot test.** A test stores the generated JSON of all tools. Any change to a description or schema shows in review as a diff.

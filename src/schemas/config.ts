@@ -34,7 +34,7 @@ export const AuthoringConfig = z
   .object({
     /** Where save_scenario writes. Must be inside one of scenario_dirs. */
     dir: z.string().min(1),
-    /** save_scenario never writes test data in v1. */
+    /** save_scenario writes test data files only when this is true. A human sets it. */
     test_data_dir_writable: z.boolean().default(false),
   })
   .strict();

@@ -83,7 +83,7 @@ the scenario rules, saves the files, and proves each scenario with a run.
 ```yaml
 authoring:
   dir: ./scenarios/local          # must be inside one of scenario_dirs
-  test_data_dir_writable: false   # save_scenario never writes test data in v1
+  test_data_dir_writable: false   # true lets save_scenario write test data files
 
 targets:
   acme-test:
@@ -320,6 +320,10 @@ missing inputs (for example "member secrets", "gift card test number").
 `AUTHORING_DISABLED`, `SCENARIO_INVALID`, `PATH_REFUSED`,
 `SCENARIO_EXISTS`, `INSPECTION_FAILED`. Each goes in the catalogue, in
 `docs/tools.md`, and gets a refuse-path test.
+
+`INSPECTION_FAILED` is not a tool error. It is the prefix of a report
+warning when a phase of an inspection job stops. The job keeps the parts
+that are done and finishes. Its test checks the warning, not a tool error.
 
 ## 8. Testing
 

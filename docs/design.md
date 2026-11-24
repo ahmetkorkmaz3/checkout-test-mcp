@@ -141,7 +141,7 @@ targets:
 
 authoring: # optional. Without it, save_scenario refuses with AUTHORING_DISABLED.
   dir: ./scenarios/local # must be inside one of scenario_dirs
-  test_data_dir_writable: false # save_scenario never writes test data in v1
+  test_data_dir_writable: false # true lets save_scenario write test data files
 
 production_hosts: # always refused, even if listed above
   - example-shop.com
@@ -359,13 +359,19 @@ A phase that crashes (browser start, crawl, probe, code scan) adds a warning tha
 The probe (`src/inspect/probe.ts`) goes through the checkout of a test target up to the payment step with fictional data. Every click, fill, select, and key press goes through `src/inspect/actions.ts`:
 
 - A click needs a name that matches the step: add to cart, cart, checkout, guest, cookie reject, or continue. A list click needs the combobox or option role.
+- Checkout words start the checkout only. A form step is saved only with a continue word or an explicit go-to-payment phrase, such as "Continue to payment" or "Ödemeye geç". On some shops a checkout phrase, such as "Passer la commande", places the order. Such phrases and wallet names (PayPal, Apple Pay, Klarna) are in the `pay` list.
 - A click is refused when the element has no name, or when any of its texts names a pay, cookie accept, or send-code action. A click is also refused on a page with card fields or a one-time code field, and in a form with a password field.
 - A fill is refused for password, card, and one-time code fields, and for a field whose label names a secret.
+- One rule finds card inputs: `isCardInput` and `cardInputs()` in `src/safety/card-inputs.ts`. It reads the `cc-*` autocomplete and card hints in the name, id, placeholder, and label. The probe, the guarded actions, and the run screenshot mask all use it.
 - The only key press is Escape.
 
-The payment step has card fields in any frame, a frame that the host guard blocked, or a visible terms checkbox. A pay button alone counts only when no empty field is left, because express wallet buttons also show on the contact step.
+The payment step has card fields in any frame, a frame that the host guard blocked, a visible terms checkbox, or a visible payment method radio or tab. A payment method is a card, wallet, cash on delivery, or bank transfer label, for example "Kapıda ödeme" or "Virement". A pay button alone counts only when no empty field is left, because express wallet buttons also show on the contact step.
+
+The crawl and the probe keep the raw URL path, because they navigate with it. The report gets the path through `redactPath`: it removes emails, tokens, and card numbers, and keeps ids and barcodes. The crawl does not open links whose path has a data change segment, such as `remove`, `delete`, `clear`, `add`, `sil`, `temizle`, `kaldır`, or `ekle`.
 
 `ProbeResult.dialogs` lists every native dialog and dialog element that the probe saw. `ProbeResult.steps` holds only the dialogs that a probe action opened. A dialog that is already open when a page loads, such as a cookie banner, is in `ProbeResult.dialogs` only.
+
+The probe records a blocked frame by its URL and by its Playwright frame. Playwright routes only the first URL of a redirect chain, so the probe also records a frame that a same-host URL redirects to a host outside the target. If the probe cannot read the iframes after a blocked load, it acts as if a blocked payment frame is on the page.
 
 The probe also refuses every click on a page with a payment-like iframe whose load the host guard blocked. That frame can be a card form on a provider host that the target does not list. A blocked frame counts only when its host or title has a payment word (for example pay, card, checkout, 3ds, or a provider name), or when the text of its nearest container names a card or payment. Blocked ad, tag manager, and chat frames do not count.
 
@@ -375,3 +381,9 @@ Probe risks:
 
 - The fictional phone number (`555` and zeros) can belong to a real subscriber. The probe never clicks a send-code button, and it stops before it continues on a page that says it sends a code to the phone.
 - The probe makes a cart item, a guest checkout with an `example.test` email, an address, and possibly an unpaid order draft. `side_effects` lists them.
+
+Known limits:
+
+- The test id attribute is global in Playwright (`selectors.setTestIdAttribute`). Two targets with different `test_id_attribute` values that run at the same time can use the wrong attribute. With the default `max_parallel_runs: 1`, this does not occur.
+- The server does not reload a symlinked subfolder of `authoring.dir` at startup. Save scenarios into real folders.
+- The host guard does not see redirect targets, because Playwright routes only the first URL of a redirect chain. A page or frame on an allowed host that redirects to another host loads that host. The probe detects such a frame, but runs do not.
