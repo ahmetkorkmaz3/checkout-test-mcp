@@ -13,7 +13,8 @@ Contents:
 6. `compare_runs`
 7. `save_scenario`
 8. `inspect_target`
-9. Reasons behind the choices
+9. Prompts
+10. Reasons behind the choices
 
 ## 1. Shared schemas
 
@@ -863,7 +864,46 @@ Errors:
 | `MISSING_ENV_SECRET` | An `http_credentials` secret is not set. |
 | `INSPECTION_FAILED` | Not a tool error. A warning in the report when a phase stopped. |
 
-## 9. Reasons behind the choices
+## 9. Prompts
+
+The server has two MCP prompts. A client shows them as commands, for example `/setup_checkout_tests` in Claude Code. A prompt returns one user message with the procedure. The texts are product text, like the tool descriptions. The source is `src/prompts/`.
+
+Both prompts start with config facts that no tool shows: whether the checkout probe is on, the source folders, the authoring folder, test data writes, the secret names with their env var names (never the values), and the third-party hosts. So the agent asks the user only for what the config and the report cannot answer.
+
+### 9.1 `setup_checkout_tests`
+
+Arguments: `target` (target name, never a URL).
+
+The first setup of a target. The agent does these steps in order:
+
+1. Calls `list_scenarios` and checks that the target exists.
+2. Asks the user once, in one message, for the config changes that the setup needs. When `inspect.probe_checkout` is not `true`, it asks to allow the probe and lists the side effects: a guest account with an `example.test` email, an address, an unpaid order draft, and a cart item. The user edits the config.
+3. Calls `inspect_target` with a new key (for example `setup-<target>-<YYYYMMDD>`) and polls with the same key until `finished`.
+4. Shows `blocked_hosts`. A payment or 3D Secure host must go into `third_party_hosts`. Analytics and ad hosts stay blocked.
+5. Writes and saves the fragments first: add to cart, guest start, address, pay.
+6. Writes a customer test data file when `test_data_dir_writable` is on, with a reserved email domain and the site's own city and district options.
+7. Writes each suggestion with `baseline: true`, saves it with `validate_on`, polls `get_run_result`, reads the failure, fixes, and saves again. Maximum 3 tries for each scenario. After that, the scenario is "needs a human" with the last failure.
+8. Ends with a table (scenario, what it proves, verdict, run id), then lists: needs a human, offers (`baseline: false`), missing inputs, side effects, and the saved files.
+
+The text also has the secret rules (the agent never asks for a password in the chat), a short scenario format, the house rules by id, and writing rules from earlier setups:
+
+- After a step opens a page, an expect `response` check before the first click, because a click before hydration does nothing.
+- `exact: true` role names for duplicated buttons.
+- `url: { regex: "^https?://[^/]+/path/?(\\?.*)?$" }` for paths, not a `**` glob.
+- `capture.body_regex` for a Next.js server action body, `json_path` for JSON.
+- A boolean `three_ds` param with a `when` on the 3D Secure fragment when the provider decides.
+- Custom comboboxes: click the combobox, then the option by exact name.
+- A site test card select: select the option by its text. Never a card number.
+
+### 9.2 `create_scenario`
+
+Arguments: `target`, `request` (what the scenario must prove, in plain words, max 2000 characters).
+
+The same loop for one scenario. The agent checks that no scenario already does the request, reads the latest finished inspection of the target, asks the user once for what is missing, reuses the fragments in the authoring folder, saves the scenario with `validate_on`, and fixes it in at most 3 tries.
+
+The prompt names the key of the latest finished inspection of the target that read the site and that the server did not interrupt. A call with that key returns the stored report and starts no probe. When the target has no such inspection, the prompt tells the agent to use a new key.
+
+## 10. Reasons behind the choices
 
 1. **The description tells the model the order of calls.** Each description says which tool comes before it, which comes after it, and what not to do ("Do not call run_scenario again to check progress"). Models follow sequence text in descriptions well.
 2. **Examples inside `.describe()`.** A concrete example value ("pr-4812-3ds-fail-after-deploy") gives the model the format at once. This lowers first-call errors more than a long rule.

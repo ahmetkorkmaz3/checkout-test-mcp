@@ -83,6 +83,38 @@ targets:
 - `probe_checkout: true` lets the probe go to the payment step with fictional data. It never pays. On the test site it makes a cart item, a guest account with an `example.test` email, an address, and possibly an unpaid order draft. Turn it on only when this is acceptable.
 - Reports go to `runs_dir/inspections/<id>.json`.
 
+## Set up a new shop
+
+The server has an MCP prompt that sets up the checkout tests of a new shop with no human help. The agent asks you only for what the tools cannot find.
+
+1. Add a target and the `authoring` and `inspect` blocks to the config:
+
+   ```yaml
+   authoring:
+     dir: ./scenarios/local # inside one of scenario_dirs
+     test_data_dir_writable: true # lets the agent write a fictional customer file
+
+   targets:
+     my-staging:
+       profile: my-store
+       base_url: https://staging.example-shop.test
+       allowed_hosts: [staging.example-shop.test]
+       third_party_hosts: [] # the agent asks you to add the payment and 3D Secure hosts
+       secrets:
+         member_email: SHOP_MEMBER_EMAIL # for the member scenario
+         member_password: SHOP_MEMBER_PASSWORD
+       inspect:
+         source_dirs: [../my-storefront] # optional
+         probe_checkout: true
+   ```
+
+2. Set the secrets as environment variables before you start the server. Never paste a password into the chat. The agent tells you the names when one is missing.
+3. Run the prompt `setup_checkout_tests` with the target name. In Claude Code: `/setup_checkout_tests my-staging` (the client can show it with a server prefix).
+
+The first setup inspects the target, writes the fragments, and writes and runs the baseline scenarios: guest card, declined card, terms required, and member card, when the report has the evidence. It tries each scenario at most 3 times. It ends with a table of each scenario, what it proves, its verdict, and its run id. Then it lists the offers (for example OTP login, gift card), the missing inputs, and the files. Commit the files yourself.
+
+For one more scenario later, run the prompt `create_scenario` with the target and a request, for example "a declined card shows an error". See [docs/tools.md](docs/tools.md#9-prompts).
+
 ## Scenarios
 
 Scenarios are YAML files with steps, Playwright-style locators, expectations, and final outcome checks. See [card-3ds-challenge-fail.yaml](scenarios/demo-store/card-3ds-challenge-fail.yaml) and the format in [docs/scenario-format.md](docs/scenario-format.md). Fragments (`include`) and conditions (`when`) let one scenario cover guest and member checkouts. Editors can use [schemas/scenario.schema.json](schemas/scenario.schema.json) for autocomplete.

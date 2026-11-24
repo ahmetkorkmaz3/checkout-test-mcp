@@ -1,10 +1,13 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 // @ts-expect-error plain JS example without types
 import { startDemoStore } from '../../examples/demo-store/server.mjs';
+import { bootstrap } from '../../src/app.js';
 import { parseConfig } from '../../src/config/load-config.js';
 import { guardedClick, guardedFill, guardedKey } from '../../src/inspect/actions.js';
 import { BlockedHostCounter, crawlSite, type SiteReport } from '../../src/inspect/crawl.js';
@@ -14,6 +17,9 @@ import type { InspectionReport } from '../../src/inspect/report.js';
 import { silentLogger } from '../../src/logger.js';
 import { openGuardedContext } from '../../src/runner/browser.js';
 import type { InspectConfig } from '../../src/schemas/config.js';
+import { createServer as createMcpServer, type ServerDeps } from '../../src/server.js';
+
+const ROOT = path.resolve(import.meta.dirname, '../..');
 
 let demo: {
   url: string;
@@ -767,5 +773,194 @@ describe('inspection job on the demo store', () => {
     expect(demo.stats.payments).toBe(payments);
     const onDisk = JSON.parse(await readFile(r.report_path, 'utf8'));
     expect(onDisk.status).toBe('finished');
+  });
+});
+
+/**
+ * The setup loop without a model: a small template fills a scenario from the report only,
+ * so the report must carry enough facts for a guest card scenario that passes.
+ * The card form fields come from the fragment that the authoring folder already has.
+ */
+function guestCardScenario(
+  report: InspectionReport,
+  suggestion: InspectionReport['suggested_scenarios'][number],
+) {
+  const probe = report.checkout_probe;
+  const payment = probe?.payment;
+  if (!probe || !payment?.agreement_checkbox || !payment.pay_button) throw new Error('no payment step');
+  if (suggestion.card_source?.kind !== 'registry') throw new Error('expected a registry card');
+  const quoted = (prefix: string) => {
+    const action = probe.steps.find((s) => s.result === 'done' && s.action.startsWith(prefix))?.action;
+    const name = action?.match(/"([^"]+)"/)?.[1];
+    if (!name) throw new Error(`no probe step "${prefix}"`);
+    return name;
+  };
+  const elements = report.site?.pages.flatMap((p) => p.elements) ?? [];
+  const roleOf = (name: string) => elements.find((e) => e.name === name)?.role ?? 'button';
+  const products = report.site?.pages.filter((p) => p.kind === 'product') ?? [];
+  const product = products.find((p) => p.url_path !== '/') ?? products[0];
+  const productApi = report.site?.api_calls.find((a) => a.page_kind === 'product');
+  if (!product || !productApi) throw new Error('no product page or product API call');
+  const dataField: Record<string, string> = {
+    email: 'email',
+    'full name': 'full_name',
+    phone: 'phone',
+    address: 'address_line',
+  };
+  const fields = probe.steps.flatMap((s) => {
+    const fill = s.action.match(/^fill (.+) field "([^"]+)"$/);
+    if (fill?.[1] && fill[2] && dataField[fill[1]]) {
+      return [
+        `      - field: { label: ${fill[2]} }\n        value: "{{data.customer.${dataField[fill[1]]}}}"`,
+      ];
+    }
+    const choose = s.action.match(/^choose the first option in "([^"]+)"$/);
+    if (choose?.[1]) {
+      return [
+        `      - field: { label: ${choose[1]} }\n        select: "{{data.customer.${choose[1].toLowerCase()}}}"`,
+      ];
+    }
+    return [];
+  });
+  const checkout = quoted('go to checkout: ');
+  const guest = quoted('continue as guest: ');
+  const payWord = payment.pay_button.split(/\s+/)[0] ?? 'Pay';
+  return `id: ${suggestion.id}
+title: ${suggestion.title}
+summary: ${suggestion.why}
+compatible_profiles: [demo-store]
+expected_outcome: ${suggestion.expected_outcome}
+params:
+  card:
+    type: test_card
+    default: ${suggestion.card_source.card_id}
+    description: Test card that succeeds.
+data:
+  customer: customers/tr-guest.yaml
+steps:
+  - id: open_product
+    title: Open the product page
+    goto: ${product.url_path}
+    expect:
+      - response: { method: ${productApi.method}, url: "**${productApi.path_pattern}", status: ${productApi.status} }
+  - id: add_to_cart
+    title: Add the product to the cart
+    click: { role: ${roleOf(quoted('add to cart: '))}, name: ${quoted('add to cart: ')}, exact: true }
+  - id: start_checkout
+    title: Start a guest checkout
+    click: { role: ${roleOf(checkout)}, name: ${checkout}, exact: true }
+    then:
+      - click: { role: ${roleOf(guest)}, name: ${guest}, exact: true }
+  - id: fill_address
+    title: Fill the contact and address form
+    fill_form:
+${fields.join('\n')}
+    then:
+      - click: { role: button, name: ${quoted('save and continue: ')}, exact: true }
+  - id: card
+    title: Fill the card form
+    include: ../fragments/fill-card.yaml
+  - id: accept_terms
+    title: Accept the terms
+    check: { label: ${payment.agreement_checkbox} }
+  - id: pay
+    title: Pay
+    click: { role: button, name: { matches: "^${payWord}\\\\b" } }
+    on_failure:
+      hint: The payment did not go through. Check the card form and the payment hosts.
+outcome:
+  - id: confirmation_shown
+    visible: { role: heading, name: { matches: "thank you|order received|order confirmed" } }
+    timeout_ms: 20000
+  - id: on_success_url
+    url: { regex: "^https?://[^/]+/[^?]*(success|confirm)" }
+`;
+}
+
+describe('setup loop without a model', () => {
+  let dir = '';
+  let deps: ServerDeps | undefined;
+  let mcp: Client | undefined;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'ctm-e2e-setup-'));
+    await cp(path.join(ROOT, 'scenarios'), path.join(dir, 'scenarios'), { recursive: true });
+    const config = parseConfig(
+      {
+        runs_dir: path.join(dir, 'runs'),
+        scenario_dirs: [path.join(dir, 'scenarios')],
+        test_data_dir: path.join(ROOT, 'test-data'),
+        authoring: { dir: path.join(dir, 'scenarios/demo-store') },
+        targets: {
+          'demo-local': {
+            profile: 'demo-store',
+            base_url: demo.url,
+            allowed_hosts: ['localhost'],
+            inspect: {
+              max_pages: 10,
+              probe_checkout: true,
+              source_dirs: [path.join(ROOT, 'examples/demo-store/src')],
+            },
+          },
+        },
+      },
+      dir,
+    );
+    deps = await bootstrap({ config, logger: silentLogger });
+    const server = createMcpServer(deps);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    mcp = new Client({ name: 'e2e', version: '0.0.0' });
+    await mcp.connect(clientTransport);
+  });
+
+  afterAll(async () => {
+    await deps?.inspections.idle();
+    await deps?.manager.idle();
+    await mcp?.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // biome-ignore lint/suspicious/noExplicitAny: test helper over SDK result union
+  async function call(name: string, args: Record<string, unknown>): Promise<any> {
+    if (!mcp) throw new Error('no client');
+    const res = await mcp.callTool({ name, arguments: args });
+    expect(res.isError, JSON.stringify(res.structuredContent)).toBeFalsy();
+    return res.structuredContent;
+  }
+
+  it('builds the guest card scenario from the report, saves it with validate_on, and it passes', async () => {
+    const orders = demo.stats.orders;
+    const args = { target: 'demo-local', idempotency_key: 'e2e-setup-loop-01', scope: 'both', wait_s: 20 };
+    let report = (await call('inspect_target', args)) as InspectionReport;
+    for (let i = 0; i < 20 && report.status !== 'finished'; i++) {
+      report = (await call('inspect_target', args)) as InspectionReport;
+    }
+    expect(report.status).toBe('finished');
+    const suggestion = report.suggested_scenarios.find((s) => s.id === 'demo-local-guest-card');
+    expect(suggestion?.baseline).toBe(true);
+    if (!suggestion) throw new Error('no guest card suggestion');
+
+    const saved = await call('save_scenario', {
+      kind: 'scenario',
+      path: 'local/demo-local-guest-card.yaml',
+      yaml: guestCardScenario(report, suggestion),
+      validate_on: { target: 'demo-local' },
+    });
+    expect(saved.scenario_id).toBe('demo-local-guest-card');
+    // Only the reused card fragment has a warning: its iframe has a css locator.
+    expect(saved.warnings.map((w: { path: string; rule: string }) => `${w.path} ${w.rule}`)).toEqual([
+      'steps.4.include prefer-semantic-locator',
+    ]);
+    const runId = saved.validation?.run_id as string;
+    expect(runId).toMatch(/^run_/);
+
+    let result = await call('get_run_result', { run_id: runId, wait_s: 20 });
+    for (let i = 0; i < 12 && result.status !== 'finished'; i++) {
+      result = await call('get_run_result', { run_id: runId, wait_s: 20 });
+    }
+    expect(result.status).toBe('finished');
+    expect(result.verdict, JSON.stringify(result.failure)).toBe('passed');
+    expect(demo.stats.orders).toBe(orders + 1);
   });
 });

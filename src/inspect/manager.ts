@@ -235,6 +235,23 @@ export class InspectionManager {
     return this.toReport(r);
   }
 
+  /**
+   * The newest finished inspection of a target that read the site and that the server did not interrupt.
+   * The create_scenario prompt gives its key to the agent, so a second call reads it again and starts no probe.
+   */
+  async latestFinished(
+    target: string,
+  ): Promise<{ idempotency_key: string; scope: InspectionScope } | undefined> {
+    await this.init();
+    let best: InspectionRecord | undefined;
+    for (const r of this.records.values()) {
+      if (r.target !== target || r.scope === 'code' || r.status !== 'finished' || r.interrupted) continue;
+      if (!r.finished_at) continue;
+      if (!best || (best.finished_at ?? '') < r.finished_at) best = r;
+    }
+    return best ? { idempotency_key: best.idempotency_key, scope: best.scope } : undefined;
+  }
+
   /** Resolves when the inspection is finished, or after wait_s seconds. Progress changes do not end the wait. */
   async wait(id: string, waitS: number): Promise<InspectionReport> {
     const deadline = Date.now() + waitS * 1000;

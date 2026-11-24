@@ -1,6 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import type { InspectionManager } from './inspect/manager.js';
 import type { Logger } from './logger.js';
+import { registerCreateScenario } from './prompts/create-scenario.js';
+import { registerSetupCheckoutTests } from './prompts/setup-checkout-tests.js';
 import type { RunManager } from './runs/manager.js';
 import type { ScenarioRegistry } from './scenarios/registry.js';
 import type { ResolvedConfig } from './schemas/config.js';
@@ -30,7 +32,7 @@ export function createServer(deps: ServerDeps): McpServer {
         'Order of calls: list_scenarios, then run_scenario (with an idempotency_key), then get_run_result with wait_s 20 until status is "finished". Use compare_runs for before/after checks.',
         'A failed checkout is a normal result with verdict "failed", not a tool error.',
         'To add a scenario, write the YAML and call save_scenario with validate_on, then get_run_result.',
-        'To set up tests for a new target, call inspect_target first and read its suggested_scenarios.',
+        'To set up tests for a new target, use the setup_checkout_tests prompt, or call inspect_target first and read its suggested_scenarios.',
       ].join(' '),
     },
   );
@@ -40,5 +42,7 @@ export function createServer(deps: ServerDeps): McpServer {
   registerCompareRuns(server, deps);
   registerSaveScenario(server, deps);
   registerInspectTarget(server, deps);
+  registerSetupCheckoutTests(server, deps);
+  registerCreateScenario(server, deps);
   return server;
 }

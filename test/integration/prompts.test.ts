@@ -1,0 +1,295 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { afterEach, describe, expect, it } from 'vitest';
+import { parseConfig } from '../../src/config/load-config.js';
+import { InspectionManager } from '../../src/inspect/manager.js';
+import type { InspectionRecord } from '../../src/inspect/report.js';
+import { silentLogger } from '../../src/logger.js';
+import { CREATE_SCENARIO_STEPS } from '../../src/prompts/create-scenario.js';
+import {
+  FORMAT_TEXT,
+  HOUSE_RULES_TEXT,
+  SETUP_CHECKOUT_TESTS_STEPS,
+  SUMMARY_TEXT,
+  WRITING_RULES_TEXT,
+} from '../../src/prompts/setup-checkout-tests.js';
+import { RunManager } from '../../src/runs/manager.js';
+import { RunStore } from '../../src/runs/store.js';
+import { ScenarioRegistry } from '../../src/scenarios/registry.js';
+import { createServer } from '../../src/server.js';
+
+const ROOT = path.resolve(import.meta.dirname, '../..');
+
+let dir = '';
+let client: Client | undefined;
+let inspections: InspectionManager | undefined;
+
+interface SetupOptions {
+  probe?: boolean;
+  authoring?: boolean;
+  testData?: boolean;
+  records?: InspectionRecord[];
+}
+
+async function setup(opts: SetupOptions = {}) {
+  dir = await mkdtemp(path.join(os.tmpdir(), 'ctm-prompts-'));
+  const config = parseConfig(
+    {
+      runs_dir: path.join(dir, 'runs'),
+      scenario_dirs: [path.join(ROOT, 'scenarios')],
+      targets: {
+        'demo-local': {
+          profile: 'demo-store',
+          base_url: 'http://localhost:4173',
+          allowed_hosts: ['localhost'],
+          third_party_hosts: ['sandbox-pay.example.test'],
+          secrets: { member_email: 'DEMO_MEMBER_EMAIL', member_password: 'DEMO_MEMBER_PASSWORD' },
+          ...(opts.probe === undefined ? {} : { inspect: { probe_checkout: opts.probe } }),
+        },
+      },
+      ...(opts.authoring === false
+        ? {}
+        : {
+            authoring: {
+              dir: path.join(ROOT, 'scenarios/demo-store'),
+              test_data_dir_writable: opts.testData === true,
+            },
+          }),
+    },
+    dir,
+  );
+  const inspectionsDir = path.join(config.runs_dir, 'inspections');
+  await mkdir(inspectionsDir, { recursive: true });
+  for (const r of opts.records ?? []) {
+    await writeFile(path.join(inspectionsDir, `${r.inspection_id}.json`), JSON.stringify(r), 'utf8');
+  }
+  const registry = await ScenarioRegistry.load(config.scenario_dirs);
+  const store = new RunStore(config.runs_dir);
+  await store.init();
+  const manager = new RunManager({ config, registry, store, logger: silentLogger, env: {} });
+  inspections = new InspectionManager({ config, logger: silentLogger });
+  await inspections.init();
+  const server = createServer({ config, registry, manager, inspections, logger: silentLogger });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  client = new Client({ name: 'test', version: '0.0.0' });
+  await client.connect(clientTransport);
+  return client;
+}
+
+afterEach(async () => {
+  await inspections?.idle();
+  await client?.close();
+  client = undefined;
+  inspections = undefined;
+  if (dir) await rm(dir, { recursive: true, force: true });
+});
+
+async function promptText(c: Client, name: string, args: Record<string, string>): Promise<string> {
+  const res = await c.getPrompt({ name, arguments: args });
+  expect(res.messages).toHaveLength(1);
+  const content = res.messages[0]?.content;
+  if (content?.type !== 'text') throw new Error('expected a text message');
+  return content.text;
+}
+
+function record(over: Partial<InspectionRecord>): InspectionRecord {
+  return {
+    inspection_id: 'insp_AAAAAAAAAAAAAAAA',
+    target: 'demo-local',
+    status: 'finished',
+    interrupted: false,
+    progress: 'Finished.',
+    site: null,
+    checkout_probe: null,
+    code: null,
+    suggested_scenarios: [],
+    warnings: [],
+    side_effects: [],
+    report_path: path.join(dir, 'runs/inspections/insp_AAAAAAAAAAAAAAAA.json'),
+    idempotency_key: 'setup-demo-local-20261120',
+    request_hash: 'x'.repeat(32),
+    scope: 'both',
+    created_at: '2026-11-20T10:00:00.000Z',
+    finished_at: '2026-11-20T10:05:00.000Z',
+    ...over,
+  };
+}
+
+describe('prompts', () => {
+  it('lists both prompts with their arguments', async () => {
+    const c = await setup();
+    const { prompts } = await c.listPrompts();
+    expect(prompts.map((p) => p.name).sort()).toEqual(['create_scenario', 'setup_checkout_tests']);
+    const args = Object.fromEntries(prompts.map((p) => [p.name, p.arguments?.map((a) => a.name).sort()]));
+    expect(args).toEqual({ setup_checkout_tests: ['target'], create_scenario: ['request', 'target'] });
+    for (const p of prompts) expect(p.description?.length).toBeGreaterThan(40);
+  });
+
+  it('setup prompt names the tools in order and the 3-try limit', async () => {
+    const c = await setup({ probe: true });
+    const text = await promptText(c, 'setup_checkout_tests', { target: 'demo-local' });
+    const order = ['list_scenarios', 'inspect_target', 'save_scenario', 'get_run_result'].map((t) =>
+      text.indexOf(t),
+    );
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(text).toMatch(/3 tries/);
+    expect(text).toContain('demo-local');
+    expect(text).toContain('needs a human');
+    expect(text).toContain('validate_on');
+  });
+
+  it('setup prompt has every step in order and the summary table', async () => {
+    const c = await setup({ probe: true });
+    const text = await promptText(c, 'setup_checkout_tests', { target: 'demo-local' });
+    let last = -1;
+    for (const step of SETUP_CHECKOUT_TESTS_STEPS) {
+      const at = text.indexOf(step.replaceAll('{target}', 'demo-local'));
+      expect(at, step.slice(0, 60)).toBeGreaterThan(last);
+      last = at;
+    }
+    expect(text).toContain('| Scenario | What it proves | Verdict | Run id |');
+    expect(text).toContain(SUMMARY_TEXT);
+  });
+
+  it('asks once for the probe and lists its side effects only when the probe is off', async () => {
+    const off = await promptText(await setup({ probe: false }), 'setup_checkout_tests', {
+      target: 'demo-local',
+    });
+    expect(off).toContain('Checkout probe: off');
+    for (const effect of ['guest account', 'example.test', 'address', 'unpaid order draft', 'cart item']) {
+      expect(off).toContain(effect);
+    }
+    expect(off).toContain('inspect.probe_checkout: true');
+    expect(off).toMatch(/The user edits the config/);
+    await client?.close();
+    await rm(dir, { recursive: true, force: true });
+
+    const on = await promptText(await setup({ probe: true }), 'setup_checkout_tests', {
+      target: 'demo-local',
+    });
+    expect(on).toContain('Checkout probe: on');
+  });
+
+  it('carries the house rules and the writing rules', async () => {
+    const text = await promptText(await setup({ probe: true }), 'setup_checkout_tests', {
+      target: 'demo-local',
+    });
+    for (const id of [
+      'param-described',
+      'outcome-proves-order',
+      'outcome-proves-no-success',
+      'no-literal-personal-data',
+      'id-format',
+      'prefer-semantic-locator',
+      'payment-step-hint',
+      'url-glob-query',
+      'test-data-email-domain',
+      'test-data-card',
+    ]) {
+      expect(HOUSE_RULES_TEXT).toContain(`\`${id}\``);
+    }
+    expect(text).toContain(HOUSE_RULES_TEXT);
+    expect(text).toContain(WRITING_RULES_TEXT);
+    expect(text).toContain(FORMAT_TEXT);
+    // The lessons from the first hand-made setup.
+    expect(WRITING_RULES_TEXT).toMatch(/`response` check/);
+    expect(WRITING_RULES_TEXT).toContain('exact: true');
+    expect(WRITING_RULES_TEXT).toContain('url: { regex: "^https?://[^/]+/path/?(\\\\?.*)?$" }');
+    expect(WRITING_RULES_TEXT).toContain('body_regex');
+    expect(WRITING_RULES_TEXT).toContain('json_path');
+    expect(WRITING_RULES_TEXT).toContain('three_ds');
+    expect(WRITING_RULES_TEXT).toContain('combobox');
+    expect(WRITING_RULES_TEXT).toMatch(/test card select/);
+    expect(WRITING_RULES_TEXT).toContain('third_party_hosts');
+  });
+
+  it('names secret names and env vars, and never asks for a password in the chat', async () => {
+    const text = await promptText(await setup({ probe: true }), 'setup_checkout_tests', {
+      target: 'demo-local',
+    });
+    expect(text).toContain('member_email (env DEMO_MEMBER_EMAIL)');
+    expect(text).toContain('member_password (env DEMO_MEMBER_PASSWORD)');
+    expect(text).toMatch(/Never ask the user to paste a password/);
+    expect(text).toContain('sandbox-pay.example.test');
+  });
+
+  it('tells the agent when the authoring folder or test data writes are off', async () => {
+    const off = await promptText(await setup({ probe: true, authoring: false }), 'setup_checkout_tests', {
+      target: 'demo-local',
+    });
+    expect(off).toContain('Authoring folder: not set');
+    expect(off).toContain('AUTHORING_DISABLED');
+    expect(off).toContain('Test data writes: off');
+    await client?.close();
+    await rm(dir, { recursive: true, force: true });
+
+    const on = await promptText(await setup({ probe: true, testData: true }), 'setup_checkout_tests', {
+      target: 'demo-local',
+    });
+    expect(on).toMatch(/Authoring folder: \S*scenarios\/demo-store\. /);
+    expect(on).toContain('Test data writes: on');
+  });
+
+  it('says so when the target is not in the config', async () => {
+    const text = await promptText(await setup(), 'setup_checkout_tests', { target: 'no-such-shop' });
+    expect(text).toContain('The config has no target "no-such-shop"');
+    expect(text).toContain('demo-local');
+  });
+
+  it('create_scenario reuses the latest finished inspection of the target', async () => {
+    const c = await setup({
+      probe: true,
+      records: [
+        record({}),
+        record({
+          inspection_id: 'insp_BBBBBBBBBBBBBBBB',
+          idempotency_key: 'setup-demo-local-20261123',
+          finished_at: '2026-11-23T10:05:00.000Z',
+        }),
+        // Newer, but interrupted: it has only part of the facts.
+        record({
+          inspection_id: 'insp_CCCCCCCCCCCCCCCC',
+          idempotency_key: 'setup-demo-local-20261124',
+          interrupted: true,
+          finished_at: '2026-11-24T10:05:00.000Z',
+        }),
+        record({
+          inspection_id: 'insp_DDDDDDDDDDDDDDDD',
+          target: 'other-shop',
+          idempotency_key: 'setup-other-shop-20261124',
+          finished_at: '2026-11-24T11:05:00.000Z',
+        }),
+      ],
+    });
+    const text = await promptText(c, 'create_scenario', {
+      target: 'demo-local',
+      request: 'Pay with a gift card and check the remaining balance.',
+    });
+    expect(text).toContain('Pay with a gift card and check the remaining balance.');
+    expect(text).toContain('idempotency_key "setup-demo-local-20261123"');
+    expect(text).toMatch(/3 tries/);
+    expect(text).toContain('fragment');
+    expect(text).toContain(WRITING_RULES_TEXT);
+    expect(text).toContain(HOUSE_RULES_TEXT);
+    let last = -1;
+    for (const step of CREATE_SCENARIO_STEPS) {
+      const at = text.indexOf(step.replaceAll('{target}', 'demo-local'));
+      expect(at, step.slice(0, 60)).toBeGreaterThan(last);
+      last = at;
+    }
+  });
+
+  it('create_scenario asks for a new inspection key when the target has none', async () => {
+    const text = await promptText(await setup({ probe: true }), 'create_scenario', {
+      target: 'demo-local',
+      request: 'Check that a declined card shows an error.',
+    });
+    expect(text).toContain('No finished inspection exists for "demo-local"');
+    expect(text).toContain('scenario-demo-local-');
+  });
+});
