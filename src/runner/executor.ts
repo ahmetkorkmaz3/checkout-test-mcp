@@ -68,6 +68,7 @@ class StepFailure extends Error {
   }
 }
 
+const BLOCKED_BY_GUARD = 'net::ERR_BLOCKED_BY_CLIENT';
 const UNREACHABLE =
   /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_CONNECTION_TIMED_OUT|ERR_INTERNET_DISCONNECTED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_|ERR_SSL_/;
 
@@ -96,7 +97,6 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   const consoleMap = new Map<string, ConsoleError>();
   const networkFailures: NetworkFailure[] = [];
   const blocked: BlockedRequest[] = [];
-  const blockedUrls = new Set<string>();
   const screenshots: ExecuteOutput['screenshots'] = [];
   let stepIndex = 0;
   let currentStepId = 'setup';
@@ -520,7 +520,6 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       target,
       ...(input.httpCredentials ? { httpCredentials: input.httpCredentials } : {}),
       onBlocked: (url, frame, isNavigation) => {
-        blockedUrls.add(url);
         blocked.push({ url: redactQuery(url), step_id: currentStepId });
         // Only a navigation of the run's own page stops the run. A popup has no frame yet, so it is only listed.
         if (isNavigation && page && frame === page.mainFrame()) blockedNavigation = redactQuery(url);
@@ -565,7 +564,9 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       }
     });
     page.on('requestfailed', (req) => {
-      if (blockedUrls.has(req.url()) || networkIgnored(req.url())) return;
+      // Only the guard aborts with this error. For a blocked redirect, req.url() is the allowed first URL.
+      // Chromium can add a suffix, such as ".Inspector" for a fetch.
+      if (req.failure()?.errorText.startsWith(BLOCKED_BY_GUARD) || networkIgnored(req.url())) return;
       networkFailures.push({
         method: req.method(),
         url: redactQuery(req.url()),

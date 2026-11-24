@@ -270,7 +270,11 @@ get_run_result ◄── reads run record from disk (optional long poll, max 20 
 
 The server refuses before it starts a browser. The browser layer enforces the same rules again during the run.
 
-1. **Host allowlist.** Every request from the page goes through `context.route('**/*')`. A request to a host outside `allowed_hosts` and `third_party_hosts` is aborted. A top-level navigation to such a host stops the run with verdict `blocked`.
+1. **Host allowlist.** Every request from the page goes through `context.route('**/*')`. The guard aborts a request to a host outside `allowed_hosts` and `third_party_hosts`. A top-level navigation to such a host stops the run with verdict `blocked`.
+   - **Redirects.** Playwright routes only the first URL of a redirect chain. So for a document, xhr, fetch, script, or other request, the guard sends the request itself with `route.fetch({ maxRedirects: 0 })`. If the response is a 3xx with a `Location` header, the guard resolves the `Location` against the request URL and checks it. A target outside the allowlist goes to `onBlocked`, and the guard aborts the request. The browser never sends a request to that host. An allowed redirect goes back to the browser, which sends the next request through the guard again. A blocked redirect of a top-level navigation stops the run with verdict `blocked`, and `blocked_requests` shows the redirect target.
+   - **Fail closed.** If the guard fetch fails, for example with a network error or a timeout, the guard aborts the request with the matching net error. It never lets the browser send the request on its own.
+   - **Cookies.** The guard fetch uses the cookie jar of the context. A `Set-Cookie` header on a redirect response reaches the browser.
+   - **Passive content.** An image, media, font, or stylesheet request goes on without the guard fetch. Such an asset can still follow a redirect to another host. No document or executable content can.
 2. **Production check.** A target host must satisfy one of these:
    - It is `localhost`, `127.0.0.1`, `[::1]`, `*.localhost`, or `*.test`.
    - One host label starts with `staging`, `stage`, `stg`, `test`, `qa`, `dev`, `sandbox`, `preview`, or `uat`.
@@ -371,7 +375,7 @@ The crawl and the probe keep the raw URL path, because they navigate with it. Th
 
 `ProbeResult.dialogs` lists every native dialog and dialog element that the probe saw. `ProbeResult.steps` holds only the dialogs that a probe action opened. A dialog that is already open when a page loads, such as a cookie banner, is in `ProbeResult.dialogs` only.
 
-The probe records a blocked frame by its URL and by its Playwright frame. Playwright routes only the first URL of a redirect chain, so the probe also records a frame that a same-host URL redirects to a host outside the target. If the probe cannot read the iframes after a blocked load, it acts as if a blocked payment frame is on the page.
+The probe records a blocked frame by its URL and by its Playwright frame. It gets both from the host guard (`addBlockedListener`). For a same-host frame that redirects to a host outside the target, the guard reports the redirect target, so the probe lists the frame with that host. If the probe cannot read the iframes after a blocked load, it acts as if a blocked payment frame is on the page.
 
 The probe also refuses every click on a page with a payment-like iframe whose load the host guard blocked. That frame can be a card form on a provider host that the target does not list. A blocked frame counts only when its host or title has a payment word (for example pay, card, checkout, 3ds, or a provider name), or when the text of its nearest container names a card or payment. Blocked ad, tag manager, and chat frames do not count.
 
@@ -386,4 +390,3 @@ Known limits:
 
 - The test id attribute is global in Playwright (`selectors.setTestIdAttribute`). Two targets with different `test_id_attribute` values that run at the same time can use the wrong attribute. With the default `max_parallel_runs: 1`, this does not occur.
 - The server does not reload a symlinked subfolder of `authoring.dir` at startup. Save scenarios into real folders.
-- The host guard does not see redirect targets, because Playwright routes only the first URL of a redirect chain. A page or frame on an allowed host that redirects to another host loads that host. The probe detects such a frame, but runs do not.

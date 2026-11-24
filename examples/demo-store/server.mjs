@@ -6,7 +6,10 @@
 // in its response, so a scenario can read it with "capture".
 // Fault injection for demos: start with DEMO_STORE_BUGS=skip-3ds (comma-separated) or call setBugs().
 // Bugs: skip-3ds (no 3DS challenge), cookie-banner (a consent dialog over every page until the user
-// chooses), login-wall (checkout needs a sign-in and has no guest option).
+// chooses), login-wall (checkout needs a sign-in and has no guest option), redirect-frame (the payment
+// page has an iframe that redirects to a payment host outside the allowlist).
+// Redirect routes for the host guard tests: /go/out, /go/in, /frame/out, /api/redirect-out, /login-cookie.
+// No test follows a redirect to an outside host. The guard must block it before the browser sends it.
 
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -189,6 +192,7 @@ const paymentPage = (s) =>
     s,
     `<h1>Payment</h1>
 <iframe title="Secure card payment input" src="/pay/card-frame" height="170"></iframe>
+${s.redirectFrame ? '<iframe src="/frame/out" height="60"></iframe>' : ''}
 <label class="terms"><input type="checkbox" id="terms" required> I accept the terms</label>
 <div><button id="pay">Pay ${tl(cartTotal(s))}</button></div>
 <div id="challenge"></div>
@@ -246,6 +250,33 @@ document.getElementById('ok').onclick=()=>send('complete');
 document.getElementById('fail').onclick=()=>send('fail');
 </script></body></html>`;
 
+// A same-host iframe and a same-host fetch. Both redirect to hosts outside the allowlist.
+const redirectsPage = (s) =>
+  layout(
+    'Partner content',
+    s,
+    `<h1>Partner content</h1>
+<iframe title="Partner frame" src="/frame/out" height="60"></iframe>
+<button id="load">Load data</button>
+<p id="state" data-testid="load-state">Not loaded</p>`,
+    `document.getElementById('load').addEventListener('click', async () => {
+  const state = document.getElementById('state');
+  try {
+    await fetch('/api/redirect-out');
+    state.textContent = 'Request done';
+  } catch {
+    state.textContent = 'Request failed';
+  }
+});`,
+  );
+
+const sessionPage = (s, signedIn) =>
+  layout(
+    'Session',
+    s,
+    `<h1>Session</h1><p data-testid="login-state">${signedIn ? 'Signed in' : 'Signed out'}</p>`,
+  );
+
 const successPage = (s, orderId) =>
   layout(
     'Order placed',
@@ -273,6 +304,7 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
       otp: null,
       cookieChoice: null,
       cookieBanner: false,
+      redirectFrame: false,
     };
     sessions.set(id, s);
     res.setHeader('set-cookie', `sid=${id}; Path=/; HttpOnly; SameSite=Lax`);
@@ -298,6 +330,10 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
     res.writeHead(status, { 'content-type': type });
     res.end(body);
   };
+  const redirect = (res, location) => {
+    res.writeHead(302, { location });
+    res.end();
+  };
   const html = (res, body, status = 200) => send(res, status, 'text/html; charset=utf-8', body);
   const json = (res, status, obj) => send(res, status, 'application/json', JSON.stringify(obj));
 
@@ -308,6 +344,24 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
     const m = req.method ?? 'GET';
     s.cookieBanner = activeBugs.has('cookie-banner') && !s.cookieChoice;
     const loginRequired = activeBugs.has('login-wall');
+    s.redirectFrame = activeBugs.has('redirect-frame');
+
+    if (m === 'GET' && p === '/go/out') return redirect(res, 'https://example.com/landing');
+    if (m === 'GET' && p === '/go/in') return redirect(res, `/products/${PRODUCT.slug}`);
+    if (m === 'GET' && p === '/frame/out') return redirect(res, 'https://pay.example.net/card');
+    if (m === 'GET' && p === '/api/redirect-out') return redirect(res, 'https://example.com/api');
+    if (m === 'GET' && p === '/redirects') return html(res, redirectsPage(s));
+    if (m === 'GET' && p === '/login-cookie') {
+      const prev = res.getHeader('set-cookie');
+      res.setHeader('set-cookie', [
+        ...(Array.isArray(prev) ? prev : prev ? [String(prev)] : []),
+        'demo_login=yes; Path=/; HttpOnly; SameSite=Lax',
+      ]);
+      return redirect(res, '/account/session');
+    }
+    if (m === 'GET' && p === '/account/session') {
+      return html(res, sessionPage(s, /(?:^|;\s*)demo_login=yes(?:;|$)/.test(req.headers.cookie ?? '')));
+    }
 
     if (m === 'GET' && p === '/') return html(res, productPage(s));
     if (m === 'GET' && p === '/products') return html(res, listingPage(s));

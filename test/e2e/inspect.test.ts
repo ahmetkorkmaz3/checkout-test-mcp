@@ -155,6 +155,16 @@ describe('checkout probe', () => {
     expect(r.dialogs).toContain('dialog: Cookie settings');
   });
 
+  it('lists a payment iframe that redirects to a host outside the allowlist, with the blocked host', async () => {
+    demo.setBugs(['redirect-frame']);
+    const r = await probe(demoTarget({ probe_checkout: true }));
+    expect(r.reached).toBe('payment');
+    expect(r.payment?.card_frames).toEqual([
+      { host: 'localhost', title: 'Secure card payment input' },
+      { host: 'pay.example.net', title: '' },
+    ]);
+  });
+
   it('stops at a login wall without a guest option', async () => {
     demo.setBugs(['login-wall']);
     const r = await probe(demoTarget({ probe_checkout: true }));

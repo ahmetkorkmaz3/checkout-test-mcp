@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import type { BrowserContext, Frame, Locator, Page } from 'playwright';
+import { addBlockedListener } from '../runner/browser.js';
 import { cardInputs } from '../safety/card-inputs.js';
-import { hostOf, isUrlAllowed } from '../safety/hosts.js';
+import { hostOf } from '../safety/hosts.js';
 import { redactPath, redactText } from '../safety/redact-text.js';
 import type { InspectConfig, TargetConfig } from '../schemas/config.js';
 import {
@@ -570,7 +571,7 @@ class Probe {
 
   /**
    * Called for each blocked frame load. A blocked frame load can be a card iframe. The frame counts
-   * too, because a same-host frame can redirect to the blocked host.
+   * too, because a same-host frame can redirect to the blocked host. The URL is then the redirect target.
    */
   noteBlockedFrame(url: string, frame: Frame | null): void {
     this.blockedFrames.urls.add(url);
@@ -1134,28 +1135,11 @@ export async function probeCheckout(ctx: ProbeContext): Promise<ProbeResult> {
     probe.noteNativeDialog(d.type(), d.message());
     d.dismiss().catch(() => {});
   });
-  page.on('requestfailed', (req) => {
-    if (!req.isNavigationRequest() || req.failure()?.errorText !== 'net::ERR_BLOCKED_BY_CLIENT') return;
-    let frame: ReturnType<typeof req.frame> | null = null;
-    try {
-      frame = req.frame();
-    } catch {
-      frame = null;
+  // The guard reports each blocked load, also a redirect target that it blocked before the browser saw it.
+  const stopBlocked = addBlockedListener(ctx.context, (url, frame, isNavigation) => {
+    if (isNavigation && frame && frame !== page.mainFrame() && frame.page() === page) {
+      probe.noteBlockedFrame(url, frame);
     }
-    if (frame && frame !== page.mainFrame()) probe.noteBlockedFrame(req.url(), frame);
-  });
-  // Playwright routes only the first URL of a redirect chain, so the host guard never sees a
-  // redirect target. A frame that a same-host URL redirects to another host counts as blocked here.
-  page.on('request', (req) => {
-    if (!req.isNavigationRequest() || req.redirectedFrom() === null) return;
-    if (isUrlAllowed(req.url(), ctx.target, { production_hosts: [] })) return;
-    let frame: ReturnType<typeof req.frame> | null = null;
-    try {
-      frame = req.frame();
-    } catch {
-      frame = null;
-    }
-    if (frame && frame !== page.mainFrame()) probe.noteBlockedFrame(req.url(), frame);
   });
   const work = probe.run().then(
     () => 'form_not_understood' as StopReason,
@@ -1171,6 +1155,7 @@ export async function probeCheckout(ctx: ProbeContext): Promise<ProbeResult> {
   } finally {
     // Closing the page ends any Playwright call that is still running after a timeout.
     work.catch(() => {});
+    stopBlocked();
     await page.close().catch(() => {});
   }
   // A copy: after a timeout, the work promise can still add a step before it ends.

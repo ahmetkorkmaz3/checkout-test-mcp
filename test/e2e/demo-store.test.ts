@@ -11,6 +11,7 @@ import { startDemoStore } from '../../examples/demo-store/server.mjs';
 import { parseConfig } from '../../src/config/load-config.js';
 import { InspectionManager } from '../../src/inspect/manager.js';
 import { silentLogger } from '../../src/logger.js';
+import { openGuardedContext } from '../../src/runner/browser.js';
 import { sensitiveMask } from '../../src/runner/executor.js';
 import { RunManager } from '../../src/runs/manager.js';
 import { RunStore } from '../../src/runs/store.js';
@@ -82,6 +83,67 @@ steps:
       - visible: { role: heading, name: Verify your phone }
 `;
 
+const REDIRECT_OUT_SCENARIO = `
+schema_version: 1
+id: redirect-out-check
+title: Opens an allowed URL that redirects to a host outside the allowlist
+summary: Safety test. Must end with verdict blocked.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open_redirect
+    title: Open the redirect
+    goto: /go/out
+`;
+
+const REDIRECT_IN_SCENARIO = `
+schema_version: 1
+id: redirect-in-check
+title: Opens an allowed URL that redirects to an allowed page
+summary: Runner test. The redirect loads the product page.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open_redirect
+    title: Open the redirect
+    goto: /go/in
+    expect:
+      - visible: { role: heading, name: Ceramic Mug }
+`;
+
+const REDIRECT_SUB_SCENARIO = `
+schema_version: 1
+id: redirect-sub-check
+title: A frame and a fetch on an allowed host redirect to blocked hosts
+summary: Safety test. The guard blocks both redirects, and the run goes on.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open
+    title: Open the partner page
+    goto: /redirects
+  - id: load
+    title: Load the data
+    click: { role: button, name: Load data }
+    expect:
+      - text: { test_id: load-state, equals: Request failed }
+`;
+
+const COOKIE_SCENARIO = `
+schema_version: 1
+id: redirect-cookie-check
+title: A redirect sets a cookie
+summary: Runner test. The cookie from the redirect reaches the next page.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: sign_in
+    title: Sign in with a redirect
+    goto: /login-cookie
+    expect:
+      - text: { test_id: login-state, equals: Signed in }
+`;
+
 const NO_MATCH_SCENARIO = `
 schema_version: 1
 id: capture-regex-no-match
@@ -121,6 +183,10 @@ beforeAll(async () => {
     parseScenario(BLOCKED_SCENARIO, 'inline.yaml'),
     parseScenario(NO_MATCH_SCENARIO, 'inline-no-match.yaml'),
     parseScenario(POPUP_SCENARIO, 'inline-popup.yaml'),
+    parseScenario(REDIRECT_OUT_SCENARIO, 'inline-redirect-out.yaml'),
+    parseScenario(REDIRECT_IN_SCENARIO, 'inline-redirect-in.yaml'),
+    parseScenario(REDIRECT_SUB_SCENARIO, 'inline-redirect-sub.yaml'),
+    parseScenario(COOKIE_SCENARIO, 'inline-redirect-cookie.yaml'),
   ]);
   const runStore = new RunStore(config.runs_dir);
   await runStore.init();
@@ -279,6 +345,101 @@ describe('demo store', () => {
     expect(out.blocked_requests).toContainEqual(
       expect.objectContaining({ url: expect.stringContaining('example.com/help'), step_id: 'open_help' }),
     );
+  });
+});
+
+describe('redirects through the host guard', () => {
+  it('blocks a redirect to a host outside the allowlist with verdict blocked', async () => {
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'redirect-out-check',
+      idempotency_key: 'e2e-redirect-out-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict, JSON.stringify(out.failure)).toBe('blocked');
+    expect(out.failure.category).toBe('blocked_by_safety');
+    expect(out.failure.message).toContain('example.com');
+    expect(out.blocked_requests).toEqual([{ url: 'https://example.com/landing', step_id: 'open_redirect' }]);
+  });
+
+  it('follows a redirect to an allowed page', async () => {
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'redirect-in-check',
+      idempotency_key: 'e2e-redirect-in-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict, JSON.stringify(out.failure)).toBe('passed');
+    expect(out.blocked_requests).toEqual([]);
+  });
+
+  it('blocks a frame redirect and a fetch redirect, lists both, and goes on', async () => {
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'redirect-sub-check',
+      idempotency_key: 'e2e-redirect-sub-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict, JSON.stringify(out.failure)).toBe('passed');
+    expect(out.blocked_requests).toContainEqual({ url: 'https://pay.example.net/card', step_id: 'open' });
+    expect(out.blocked_requests).toContainEqual({ url: 'https://example.com/api', step_id: 'load' });
+    // A blocked redirect is a guard action, not a network failure of the site.
+    expect(JSON.stringify(out.network_failures ?? []), JSON.stringify(out.network_failures)).not.toMatch(
+      /frame\/out|redirect-out/,
+    );
+  });
+
+  it('keeps a cookie that a redirect response sets', async () => {
+    const res = await runToEnd({
+      target: 'demo-local',
+      scenario_id: 'redirect-cookie-check',
+      idempotency_key: 'e2e-redirect-cookie-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict, JSON.stringify(out.failure)).toBe('passed');
+  });
+
+  it('never lets the browser send a request to a redirect target outside the allowlist', async () => {
+    const config = parseConfig(
+      { targets: { t: { profile: 'demo-store', base_url: store.url, allowed_hosts: ['localhost'] } } },
+      dir,
+    );
+    const target = config.targets.t;
+    if (!target) throw new Error('test config has no target');
+    const blocked: { url: string; frame: boolean; navigation: boolean }[] = [];
+    const guarded = await openGuardedContext({
+      config,
+      target,
+      onBlocked: (url, frame, isNavigation) => {
+        blocked.push({ url, frame: frame !== null, navigation: isNavigation });
+      },
+    });
+    try {
+      const sent: string[] = [];
+      guarded.context.on('request', (r) => sent.push(r.url()));
+      let page = await guarded.context.newPage();
+      await expect(page.goto('/go/out')).rejects.toThrow(/ERR_BLOCKED_BY_CLIENT/);
+      // The blocked page shows a browser error page. A new page avoids a race with that load.
+      await page.close();
+      page = await guarded.context.newPage();
+      await page.goto('/redirects');
+      await page.getByRole('button', { name: 'Load data' }).click();
+      await expect.poll(() => page.getByTestId('load-state').textContent()).toBe('Request failed');
+      await page.goto('/login-cookie');
+      expect(await page.getByTestId('login-state').textContent()).toBe('Signed in');
+      const cookies = await guarded.context.cookies();
+      expect(cookies.map((c) => c.name)).toContain('demo_login');
+      // Fail closed: a guard fetch that fails aborts the request with the matching net error.
+      await expect(page.goto('http://localhost:1/')).rejects.toThrow(/ERR_CONNECTION_REFUSED/);
+      expect(sent.filter((u) => !u.startsWith(store.url) && u !== 'http://localhost:1/')).toEqual([]);
+      expect(blocked).toEqual([
+        { url: 'https://example.com/landing', frame: true, navigation: true },
+        { url: 'https://pay.example.net/card', frame: true, navigation: true },
+        { url: 'https://example.com/api', frame: true, navigation: false },
+      ]);
+    } finally {
+      await guarded.close();
+    }
   });
 });
 
