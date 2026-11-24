@@ -1,5 +1,9 @@
 import { z } from 'zod';
 import { ExpectedOutcome } from '../schemas/common.js';
+import type { CodeReport } from './code-scan.js';
+import type { SiteReport } from './crawl.js';
+import type { ProbeResult } from './probe.js';
+import type { Suggestion } from './suggest.js';
 
 export const INSPECTION_ID_PATTERN = /^insp_[A-Za-z0-9_-]{16}$/;
 /** The tool result stays under this many characters of JSON. The file on disk has the rest. */
@@ -169,83 +173,113 @@ export const InspectionRecord = InspectionReport.extend({
 });
 export type InspectionRecord = z.infer<typeof InspectionRecord>;
 
-const size = (r: InspectionReport): number => JSON.stringify(r).length;
-
 /**
- * Keeps the report JSON under RESULT_CHAR_LIMIT characters for the tool result.
+ * Keeps the compact JSON of the tool output under RESULT_CHAR_LIMIT characters.
+ * `wrap` makes the output object from the report, so the fields that the tool adds count too.
  * It cuts the largest and least needed lists first: page elements, then UI strings,
  * then API calls. Only if that is not enough, it cuts test ids, routes, OTP hints, and pages.
+ * The warning does not hold report_path, because that is an absolute path that is already in the output.
  */
-export function trimForResult(report: InspectionReport): InspectionReport {
+export function trimForResult(
+  report: InspectionReport,
+  wrap: (r: InspectionReport) => object = (r) => r,
+): InspectionReport {
+  const size = (r: InspectionReport): number => JSON.stringify(wrap(r)).length;
   if (size(report) <= RESULT_CHAR_LIMIT) return report;
   const r = structuredClone(report);
   const cut: string[] = [];
+  const clear = (has: () => boolean, empty: () => void) => () => {
+    if (!has()) return false;
+    empty();
+    return true;
+  };
   const steps: [string, () => boolean][] = [
     [
       'site.pages[].elements',
-      () => {
-        if (!r.site?.pages.some((p) => p.elements.length > 0)) return false;
-        for (const p of r.site.pages) p.elements = [];
-        return true;
-      },
+      clear(
+        () => !!r.site?.pages.some((p) => p.elements.length > 0),
+        () => {
+          for (const p of r.site?.pages ?? []) p.elements = [];
+        },
+      ),
     ],
     [
       'code.ui_strings',
-      () => {
-        if (!r.code?.ui_strings.length) return false;
-        r.code.ui_strings = [];
-        return true;
-      },
+      clear(
+        () => !!r.code?.ui_strings.length,
+        () => {
+          if (r.code) r.code.ui_strings = [];
+        },
+      ),
     ],
     [
       'site.api_calls',
-      () => {
-        if (!r.site?.api_calls.length) return false;
-        r.site.api_calls = [];
-        return true;
-      },
+      clear(
+        () => !!r.site?.api_calls.length,
+        () => {
+          if (r.site) r.site.api_calls = [];
+        },
+      ),
     ],
     [
       'code.test_ids',
-      () => {
-        if (!r.code?.test_ids.length) return false;
-        r.code.test_ids = [];
-        return true;
-      },
+      clear(
+        () => !!r.code?.test_ids.length,
+        () => {
+          if (r.code) r.code.test_ids = [];
+        },
+      ),
     ],
     [
       'code.routes',
-      () => {
-        if (!r.code?.routes.length) return false;
-        r.code.routes = [];
-        return true;
-      },
+      clear(
+        () => !!r.code?.routes.length,
+        () => {
+          if (r.code) r.code.routes = [];
+        },
+      ),
     ],
     [
       'code.otp_hints',
-      () => {
-        if (!r.code?.otp_hints.length) return false;
-        r.code.otp_hints = [];
-        return true;
-      },
+      clear(
+        () => !!r.code?.otp_hints.length,
+        () => {
+          if (r.code) r.code.otp_hints = [];
+        },
+      ),
     ],
   ];
-  // The warning goes in first, so its length counts in each size check.
-  r.warnings.push('');
-  const warn = () => {
-    r.warnings[r.warnings.length - 1] =
-      `The tool result is shorter than the report. Cut: ${cut.join(', ')}. Read the full report in ${r.report_path}.`;
+  const warningAt = r.warnings.length;
+  // Each size check runs after the warning text changes, so the warning counts in the size.
+  const setWarning = (extra?: string): void => {
+    const parts = extra ? [...cut, extra] : cut;
+    r.warnings[warningAt] =
+      `The tool result is shorter than the report. Cut: ${parts.join(', ') || 'nothing'}. The full report is in the file at report_path (see report_path).`;
   };
   for (const [name, apply] of steps) {
-    if (size(r) <= RESULT_CHAR_LIMIT) break;
     if (apply()) cut.push(name);
-    warn();
+    setWarning();
+    if (size(r) <= RESULT_CHAR_LIMIT) return r;
   }
-  if (r.site && size(r) > RESULT_CHAR_LIMIT) {
+  if (r.site) {
     const total = r.site.pages.length;
-    while (r.site.pages.length > 0 && size(r) > RESULT_CHAR_LIMIT) r.site.pages.pop();
-    cut.push(`site.pages after the first ${r.site.pages.length} of ${total}`);
-    warn();
+    // The page count is in the warning, so set the warning before each size check.
+    do {
+      r.site.pages.pop();
+      setWarning(`site.pages after the first ${r.site.pages.length} of ${total}`);
+    } while (r.site.pages.length > 0 && size(r) > RESULT_CHAR_LIMIT);
   }
   return r;
 }
+
+/** True only when A and B are the same type. */
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+
+// Compile-time links between the report schemas and the types that the phases return.
+// A change to one side without the other fails `npm run typecheck`.
+export const SCHEMA_TYPES_MATCH: {
+  site: Equals<z.infer<typeof SiteReportSchema>, SiteReport>;
+  probe: Equals<z.infer<typeof ProbeResultSchema>, ProbeResult>;
+  code: Equals<z.infer<typeof CodeReportSchema>, CodeReport>;
+  suggestion: Equals<z.infer<typeof SuggestionSchema>, Suggestion>;
+} = { site: true, probe: true, code: true, suggestion: true };

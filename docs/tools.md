@@ -753,9 +753,9 @@ The server does these steps in this order:
 
 A phase that crashes does not give a tool error. The job keeps the parts that are done, finishes, and adds a warning that starts with `INSPECTION_FAILED`. The warning has the phase, the error class, and a short message without URLs or absolute paths.
 
-After a restart, an inspection that was `queued` or `running` becomes `finished` with `interrupted: true` and a warning. The server does not repeat it.
+After a restart, an inspection that was `queued` or `running` becomes `finished` with `interrupted: true` and a warning. The server does not repeat it. Each record on disk has its idempotency key, so the server rebuilds a key that the index file does not have. A failed job never stops the jobs after it.
 
-The tool result stays under 40 000 characters of report JSON. The server cuts page `elements` first, then `code.ui_strings`, then `site.api_calls`, and adds a warning that names `report_path`. The file has the full report.
+The compact JSON of the whole output object (the report, `reused_existing_inspection`, and `next`) stays under 40 000 characters. The text block is that compact JSON, not a pretty-printed copy. To fit, the server cuts page `elements` first, then `code.ui_strings`, then `site.api_calls`. If that is not enough, it cuts `code.test_ids`, `code.routes`, `code.otp_hints`, and then pages from the end. It adds one warning that lists the cut parts and says "see report_path". The file at `report_path` has the full report.
 
 `next`: while the status is not `finished`, a `call_tool` of `inspect_target` with the same arguments. When it is finished, a `call_tool` of `save_scenario` if a baseline suggestion exists, else `ask_human` for the missing inputs.
 

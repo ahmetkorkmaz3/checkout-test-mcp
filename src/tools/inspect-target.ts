@@ -4,7 +4,6 @@ import { toToolErrorResult } from '../errors/tool-error.js';
 import { InspectionReport, InspectionScope, trimForResult } from '../inspect/report.js';
 import { NextAction } from '../schemas/common.js';
 import type { ServerDeps } from '../server.js';
-import { jsonResult } from './result.js';
 
 export const InspectTargetInput = z.object({
   target: z
@@ -90,7 +89,13 @@ export function registerInspectTarget(server: McpServer, deps: ServerDeps): void
                   description:
                     'No baseline scenario has all its evidence. Ask the user for the inputs in warnings and suggested_scenarios[].missing.',
                 };
-        return jsonResult({ ...trimForResult(final), reused_existing_inspection: reused, next });
+        const wrap = (r: InspectionReport) => ({ ...r, reused_existing_inspection: reused, next });
+        const output = wrap(trimForResult(final, wrap));
+        // Compact JSON: the text copy must fit the same 40000 character limit as the structured content.
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(output) }],
+          structuredContent: output,
+        };
       } catch (err) {
         return toToolErrorResult(err);
       }

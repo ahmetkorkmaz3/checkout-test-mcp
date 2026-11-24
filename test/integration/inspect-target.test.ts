@@ -274,7 +274,7 @@ describe('inspect_target', () => {
     );
   });
 
-  it('trims the report under 40000 characters and names report_path', async () => {
+  it('keeps the whole tool result under 40000 characters and points to report_path', async () => {
     const big: SiteReport = {
       ...SITE,
       pages: Array.from({ length: 25 }, (_, i) => page('other', `/page-${i}`, 200)),
@@ -282,14 +282,85 @@ describe('inspect_target', () => {
     await setup({ crawl: async () => big });
     const res = await call({ target: 'shop-local', idempotency_key: 'inspect-shop-04' });
     const r = res.structuredContent;
-    const { reused_existing_inspection: _a, next: _b, ...report } = r;
-    expect(JSON.stringify(report).length).toBeLessThanOrEqual(RESULT_CHAR_LIMIT);
+    expect(res.content[0].text.length).toBeLessThanOrEqual(RESULT_CHAR_LIMIT);
+    expect(JSON.stringify(r).length).toBeLessThanOrEqual(RESULT_CHAR_LIMIT);
+    expect(JSON.parse(res.content[0].text)).toEqual(r);
     expect(r.site.pages).toHaveLength(25);
     expect(r.site.pages[0].elements).toEqual([]);
-    const warning = r.warnings.find((w: string) => w.includes(r.report_path));
+    const warning = r.warnings.find((w: string) => w.includes('see report_path'));
     expect(warning).toMatch(/site\.pages\[\]\.elements/);
+    expect(warning).not.toContain(r.report_path);
     const onDisk = JSON.parse(await readFile(r.report_path, 'utf8'));
     expect(onDisk.site.pages[0].elements).toHaveLength(200);
+  });
+
+  it('cuts pages when the other cuts are not enough', async () => {
+    const many: SiteReport = {
+      ...SITE,
+      pages: Array.from({ length: 300 }, (_, i) => ({
+        ...page('other', `/page-${i}`),
+        headings: Array.from({ length: 5 }, (_, j) => `Heading ${j} of a long page number ${i}`),
+      })),
+    };
+    await setup({ crawl: async () => many });
+    const res = await call({ target: 'shop-local', idempotency_key: 'inspect-shop-06' });
+    expect(res.content[0].text.length).toBeLessThanOrEqual(RESULT_CHAR_LIMIT);
+    const warning = res.structuredContent.warnings.find((w: string) => w.includes('see report_path'));
+    expect(warning).toMatch(/site\.pages after the first \d+ of 300/);
+    expect(warning).not.toMatch(/Cut: \./);
+  });
+
+  it('gives the same inspection after a restart without the key index', async () => {
+    const { config } = await setup();
+    const first = (await call({ target: 'shop-local', idempotency_key: 'inspect-shop-07' }))
+      .structuredContent;
+    await managers[0]?.idle();
+    await rm(path.join(config.runs_dir, 'inspections', 'idempotency.json'));
+    let crawls = 0;
+    const restarted = track(
+      new InspectionManager({
+        config,
+        logger: silentLogger,
+        phases: {
+          openContext: async () => fakeContext(),
+          crawl: async () => {
+            crawls++;
+            return SITE;
+          },
+        },
+      }),
+    );
+    await restarted.init();
+    const { report, reused } = await restarted.start({
+      target: 'shop-local',
+      idempotency_key: 'inspect-shop-07',
+      scope: 'both',
+    });
+    expect(reused).toBe(true);
+    expect(report.inspection_id).toBe(first.inspection_id);
+    expect(crawls).toBe(0);
+  });
+
+  it('runs the next job after a job fails before its phases', async () => {
+    class FailOnce extends BrowserSlots {
+      failed = false;
+      override acquire(): Promise<void> {
+        if (!this.failed) {
+          this.failed = true;
+          return Promise.reject(new Error('slot error'));
+        }
+        return super.acquire();
+      }
+    }
+    const slots = new FailOnce(1);
+    await setup({}, slots);
+    const a = (await call({ target: 'shop-local', idempotency_key: 'inspect-fail-01' })).structuredContent;
+    expect(a.status).toBe('finished');
+    expect(a.warnings.join('\n')).toMatch(/^INSPECTION_FAILED/m);
+    const b = (await call({ target: 'shop-local', idempotency_key: 'inspect-fail-02' })).structuredContent;
+    expect(b.status).toBe('finished');
+    expect(b.site).not.toBeNull();
+    expect(slots.inUse).toBe(0);
   });
 
   it('keeps the partial report and warns with INSPECTION_FAILED when a phase crashes', async () => {
@@ -390,6 +461,14 @@ describe('inspect_target refusals', () => {
     config.production_hosts.push('shop.test');
     const res = await call({ target: 'shop-local', idempotency_key: 'inspect-ref-02' });
     expect(res.structuredContent.error.code).toBe('PRODUCTION_HOST_REFUSED');
+  });
+
+  it('refuses a target with a host that has no test label', async () => {
+    const { config } = await setup();
+    // The config load refuses this too. The manager must refuse on its own.
+    config.targets['shop-local']?.allowed_hosts.push('shop.example.com');
+    const res = await call({ target: 'shop-local', idempotency_key: 'inspect-ref-04' });
+    expect(res.structuredContent.error.code).toBe('HOST_NOT_ALLOWED');
   });
 
   it('refuses scope code without source_dirs', async () => {

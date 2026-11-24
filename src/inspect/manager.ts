@@ -136,6 +136,7 @@ export class InspectionManager {
     } catch {
       // No index yet.
     }
+    let rebuilt = false;
     for (const entry of await readdir(this.dir, { withFileTypes: true })) {
       const id = entry.name.replace(/\.json$/, '');
       if (!entry.isFile() || !INSPECTION_ID_PATTERN.test(id)) continue;
@@ -159,9 +160,24 @@ export class InspectionManager {
           void this.save(record);
         }
         this.records.set(record.inspection_id, record);
+        // The server can stop between the record write and the index write. The record has the key too.
+        if (!this.keys.has(record.idempotency_key)) {
+          this.keys.set(record.idempotency_key, {
+            inspection_id: record.inspection_id,
+            request_hash: record.request_hash,
+            created_at: record.created_at,
+          });
+          rebuilt = true;
+        }
       } catch {
         // A broken file. Ignore it.
       }
+    }
+    if (rebuilt) {
+      const index = Object.fromEntries(this.keys);
+      const fn = () => writeJsonAtomic(this.indexFile(), index);
+      const next = this.writeChain.then(fn, fn);
+      this.writeChain = next.catch(() => {});
     }
     await this.writeChain;
   }
@@ -205,7 +221,10 @@ export class InspectionManager {
     });
     this.records.set(id, record);
     const persisted = this.save(record, true);
-    this.jobChain = this.jobChain.then(() => this.runJob(id, target, httpCredentials));
+    const job = () =>
+      this.runJob(id, target, httpCredentials).catch((err: unknown) => this.jobCrashed(id, err));
+    // A failed job never stops the jobs after it.
+    this.jobChain = this.jobChain.then(job, job);
     await persisted;
     return { report: this.toReport(record), reused: false };
   }
@@ -420,6 +439,22 @@ export class InspectionManager {
     if (!current) return;
     await this.save({ ...current, ...change, status: 'finished' }).catch(() => {});
     this.events.emit(id);
+  }
+
+  /** A job that failed outside its phases, for example while it waited for a slot. It finishes, so a poll ends. */
+  private async jobCrashed(id: string, err: unknown): Promise<void> {
+    const text = describeError(err);
+    this.deps.logger.error('inspection job failed', { inspection_id: id, error: text });
+    const current = this.records.get(id);
+    if (!current || current.status === 'finished') return;
+    await this.finish(id, {
+      progress: 'Finished with an error.',
+      finished_at: this.now().toISOString(),
+      warnings: [
+        ...current.warnings,
+        `INSPECTION_FAILED: the inspection stopped with ${text}. Use a new idempotency_key to try again.`,
+      ],
+    });
   }
 
   private async runJob(
