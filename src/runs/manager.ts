@@ -427,9 +427,6 @@ export class RunManager {
       if (number && !(/^\d{13,19}$/.test(number) && luhnValid(number))) {
         invalidLive.push(`${card.id} (env ${entry.number_env})`);
       }
-      redactor.register(number);
-      redactor.register(expiry);
-      redactor.register(cvc);
       if (number) allowedCardNumbers.add(number);
       params.cards[param] = { ...card, number, expiry, cvc };
     }
@@ -508,8 +505,11 @@ export class RunManager {
 
     const data = await this.loadData(scenario.data, scenario.id);
     const cardList = Object.values(params.cards);
+    // Live cards and test cards alike. A page can show the number in groups and the expiry in another form.
     for (const c of cardList) {
-      redactor.register(c.number);
+      redactor.registerCardNumber(c.number);
+      redactor.registerExpiry(c.expiry);
+      redactor.registerCvc(c.cvc);
     }
     const ctx = {
       params: params.values,
@@ -681,7 +681,10 @@ export class RunManager {
         },
       };
     } catch (err) {
-      logger.error('run crashed', { run_id: record.run_id, error: (err as Error).message });
+      logger.error('run crashed', {
+        run_id: record.run_id,
+        error: p.redactor.redact((err as Error).message ?? String(err)),
+      });
       const finishedAt = this.now();
       record = {
         ...record,

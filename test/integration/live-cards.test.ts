@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseConfig } from '../../src/config/load-config.js';
 import type { ToolError } from '../../src/errors/tool-error.js';
-import { silentLogger } from '../../src/logger.js';
+import { type Logger, silentLogger } from '../../src/logger.js';
 import type { ExecuteInput, ExecuteOutput } from '../../src/runner/executor.js';
 import { RunManager } from '../../src/runs/manager.js';
 import { RunStore } from '../../src/runs/store.js';
@@ -55,7 +55,10 @@ function execute(input: ExecuteInput): Promise<ExecuteOutput> {
   });
 }
 
-async function manager(env: NodeJS.ProcessEnv): Promise<RunManager> {
+async function manager(
+  env: NodeJS.ProcessEnv,
+  opts: { execute?: typeof execute; logger?: Logger } = {},
+): Promise<RunManager> {
   const config = parseConfig(
     {
       runs_dir: path.join(dir, 'runs'),
@@ -90,7 +93,14 @@ async function manager(env: NodeJS.ProcessEnv): Promise<RunManager> {
   const registry = await ScenarioRegistry.load(config.scenario_dirs);
   const store = new RunStore(config.runs_dir);
   await store.init();
-  const m = new RunManager({ config, registry, store, logger: silentLogger, execute, env });
+  const m = new RunManager({
+    config,
+    registry,
+    store,
+    logger: opts.logger ?? silentLogger,
+    execute: opts.execute ?? execute,
+    env,
+  });
   managers.push(m);
   return m;
 }
@@ -216,5 +226,51 @@ describe('live cards in a run', () => {
       }
     }
     expect(executions).toHaveLength(0);
+  });
+
+  it('redacts formatted forms of the live number and expiry', async () => {
+    const m = await manager({ ...LIVE_ENV });
+    await m.start({
+      target: 'live',
+      scenario_id: 'pay',
+      params: { card: 'live/company-visa' },
+      idempotency_key: 'live-format-01',
+    });
+    await vi.waitFor(() => expect(executions).toHaveLength(1));
+    const r = (executions[0] as ExecuteInput).redactor;
+    expect(r.redact('4242 4242 4242 4242 | 4242-4242-4242-4242 | 12/34')).toBe(
+      '[REDACTED] | [REDACTED] | [REDACTED]',
+    );
+    expect(r.redactFailureText('cvc 123')).toBe('cvc [REDACTED]');
+    await m.idle();
+  });
+
+  it('redacts formatted forms of a test card of the run too', async () => {
+    const m = await manager({});
+    await m.start({ target: 'live', scenario_id: 'pay', params: {}, idempotency_key: 'live-format-02' });
+    await vi.waitFor(() => expect(executions).toHaveLength(1));
+    const r = (executions[0] as ExecuteInput).redactor;
+    expect(r.redact('4242-4242-4242-4242 12/2034')).toBe('[REDACTED] [REDACTED]');
+    await m.idle();
+  });
+
+  it('redacts the error of a crashed run in the log', async () => {
+    const logged: string[] = [];
+    const logger: Logger = {
+      ...silentLogger,
+      error: (msg, data) => logged.push(JSON.stringify({ msg, data })),
+    };
+    const crash = (): Promise<ExecuteOutput> =>
+      Promise.reject(new Error(`boom ${LIVE_ENV.LIVE_VISA_NUMBER} and 4242 4242 4242 4242`));
+    const m = await manager({ ...LIVE_ENV }, { execute: crash, logger });
+    await m.start({
+      target: 'live',
+      scenario_id: 'pay',
+      params: { card: 'live/company-visa' },
+      idempotency_key: 'live-crash-01',
+    });
+    await m.idle();
+    expect(logged.some((l) => l.includes('run crashed'))).toBe(true);
+    expect(logged.join('\n')).not.toMatch(/4242/);
   });
 });

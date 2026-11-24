@@ -760,7 +760,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
         ? 'error'
         : 'failed';
 
-  return redactor.redactDeep({
+  return redactExecuteOutput(redactor, {
     verdict,
     failure,
     steps: stepResults,
@@ -771,6 +771,24 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
     screenshots,
     trace_path: tracePath,
   });
+}
+
+/**
+ * Redacts registered values in the whole output. failure.expected and failure.actual quote page text,
+ * so they also lose a CVC that stands alone.
+ */
+export function redactExecuteOutput(redactor: Redactor, out: ExecuteOutput): ExecuteOutput {
+  const redacted = redactor.redactDeep(out);
+  const f = redacted.failure;
+  if (!f) return redacted;
+  return {
+    ...redacted,
+    failure: {
+      ...f,
+      ...(f.expected !== undefined ? { expected: redactor.redactFailureText(f.expected) } : {}),
+      ...(f.actual !== undefined ? { actual: redactor.redactFailureText(f.actual) } : {}),
+    },
+  };
 }
 
 function firstLine(msg: string): string {

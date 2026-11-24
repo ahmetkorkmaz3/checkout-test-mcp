@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { guardCardValue } from '../../src/runner/executor.js';
+import { guardCardValue, redactExecuteOutput } from '../../src/runner/executor.js';
 import { isCardInput } from '../../src/safety/card-inputs.js';
 import {
   containsCardNumber,
@@ -124,6 +124,37 @@ describe('card guard with live cards of a run', () => {
     expect(() => guardCardValue(live, new Set())).toThrow(
       expect.objectContaining({ category: 'blocked_by_safety' }),
     );
+  });
+});
+
+describe('executor output redaction', () => {
+  it('redacts the CVC in failure.actual and failure.expected only', () => {
+    const r = new Redactor();
+    r.registerCardNumber('4242424242424242');
+    r.registerCvc('123');
+    const out = redactExecuteOutput(r, {
+      verdict: 'failed',
+      failure: {
+        step_id: 's',
+        step_title: 'S',
+        category: 'assertion_failed',
+        message: 'Step 123 failed.',
+        expected: '"123"',
+        actual: '"4242 4242 4242 4242 / 123"',
+        likely_causes: [],
+        next_actions: [],
+      },
+      steps: [],
+      outcome_checks: [],
+      console_errors: [],
+      network_failures: [],
+      blocked_requests: [],
+      screenshots: [],
+      trace_path: null,
+    });
+    expect(out.failure?.actual).toBe('"[REDACTED] / [REDACTED]"');
+    expect(out.failure?.expected).toBe('"[REDACTED]"');
+    expect(out.failure?.message).toBe('Step 123 failed.');
   });
 });
 
@@ -263,6 +294,44 @@ describe('secrets', () => {
     const r = new Redactor();
     r.register('s3cr3t-value');
     expect(r.redactDeep({ a: ['x s3cr3t-value y'], b: 1 })).toEqual({ a: ['x [REDACTED] y'], b: 1 });
+  });
+
+  it('redacts a registered card number in every spacing', () => {
+    const r = new Redactor();
+    r.registerCardNumber('4242424242424242');
+    for (const shown of [
+      '4242424242424242',
+      '4242 4242 4242 4242',
+      '4242-4242-4242-4242',
+      '4242 424242 42424 2',
+    ]) {
+      expect(r.redact(`card ${shown} end`)).toBe('card [REDACTED] end');
+    }
+    expect(r.redact('4242  4242 4242 4242')).not.toBe('[REDACTED]');
+  });
+
+  it('redacts the common forms of a registered expiry', () => {
+    const r = new Redactor();
+    r.registerExpiry('12 / 34');
+    for (const shown of ['12/34', '12 / 34', '12-34', '1234', '12/2034', '12 / 2034']) {
+      expect(r.redact(`exp ${shown}.`)).toBe('exp [REDACTED].');
+    }
+    // Digit boundaries keep longer numbers as they are.
+    expect(r.redact('order 512345')).toBe('order 512345');
+  });
+
+  it('parses a four digit year and a one digit month', () => {
+    const r = new Redactor();
+    r.registerExpiry('3/2031');
+    expect(r.redact('03/31 and 03 / 2031')).toBe('[REDACTED] and [REDACTED]');
+  });
+
+  it('redacts a CVC only in failure fields and only with digit boundaries', () => {
+    const r = new Redactor();
+    r.registerCvc('123');
+    expect(r.redact('qty 123')).toBe('qty 123');
+    expect(r.redactFailureText('value "123"')).toBe('value "[REDACTED]"');
+    expect(r.redactFailureText('order 51234')).toBe('order 51234');
   });
 
   it('redacts query string values', () => {

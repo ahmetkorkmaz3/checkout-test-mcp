@@ -36,14 +36,63 @@ export const REDACTED = '[REDACTED]';
 /** Replaces registered values in strings. Register every secret and card value before a run starts. */
 export class Redactor {
   private readonly values = new Set<string>();
+  /** Card numbers and expiry forms. They match also when a page formats them. */
+  private readonly patterns = new Map<string, RegExp>();
+  /** CVC values. They are short, so they are redacted only in failure fields. */
+  private readonly cvcs = new Map<string, RegExp>();
 
   register(value: string | undefined): void {
     if (value && value.length >= 4) this.values.add(value);
   }
 
+  /**
+   * Registers a card number. It matches with a single space or dash between any two digits,
+   * the separators that findCardSpans accepts.
+   */
+  registerCardNumber(digits: string | undefined): void {
+    if (!digits || !/^\d{4,}$/.test(digits)) return;
+    this.patterns.set(`card:${digits}`, new RegExp(digits.split('').join('[ -]?'), 'g'));
+  }
+
+  /** Registers an expiry in its common forms: MM/YY, MM / YY, MM-YY, MMYY, MM/YYYY, MM / YYYY. */
+  registerExpiry(expiry: string | undefined): void {
+    if (!expiry) return;
+    this.register(expiry);
+    const m = /^\s*(\d{1,2})\s*[/ -]?\s*(\d{4}|\d{2})\s*$/.exec(expiry);
+    if (!m) return;
+    const mm = (m[1] as string).padStart(2, '0');
+    const year = m[2] as string;
+    const yy = year.slice(-2);
+    const yyyy = year.length === 4 ? year : `20${year}`;
+    for (const form of [
+      `${mm}/${yy}`,
+      `${mm} / ${yy}`,
+      `${mm}-${yy}`,
+      `${mm}${yy}`,
+      `${mm}/${yyyy}`,
+      `${mm} / ${yyyy}`,
+    ]) {
+      // Digit boundaries: "1234" must not cut into a longer number such as an order id.
+      this.patterns.set(`exp:${form}`, new RegExp(`(?<!\\d)${escapeRegExp(form)}(?!\\d)`, 'g'));
+    }
+  }
+
+  registerCvc(cvc: string | undefined): void {
+    if (!cvc || !/^\d{3,4}$/.test(cvc)) return;
+    this.cvcs.set(cvc, new RegExp(`(?<!\\d)${cvc}(?!\\d)`, 'g'));
+  }
+
   redact(text: string): string {
     let out = text;
+    for (const re of this.patterns.values()) out = out.replace(re, REDACTED);
     for (const v of this.values) out = out.split(v).join(REDACTED);
+    return out;
+  }
+
+  /** For failure.expected and failure.actual. Also removes a CVC that stands alone. */
+  redactFailureText(text: string): string {
+    let out = this.redact(text);
+    for (const re of this.cvcs.values()) out = out.replace(re, REDACTED);
     return out;
   }
 
@@ -57,6 +106,10 @@ export class Redactor {
     }
     return value;
   }
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /** Removes query string values from a URL: "?a=1&b=2" -> "?a=REDACTED&b=REDACTED". */
