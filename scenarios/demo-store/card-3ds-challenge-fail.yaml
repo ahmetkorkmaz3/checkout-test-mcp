@@ -77,6 +77,12 @@ steps:
     title: Fill the card form
     include: fragments/fill-card.yaml
 
+  - id: accept_terms
+    title: Accept the terms
+    check: { label: I accept the terms }
+    on_failure:
+      hint: The terms checkbox is missing. The store can have a new payment page layout.
+
   - id: submit_payment
     title: Submit the payment
     click: { role: button, name: { matches: "^Pay " } }

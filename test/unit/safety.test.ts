@@ -1,4 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { guardCardValue, redactExecuteOutput } from '../../src/runner/executor.js';
+import { isCardInput } from '../../src/safety/card-inputs.js';
 import {
   containsCardNumber,
   containsUnregisteredCardNumber,
@@ -9,15 +14,21 @@ import {
   checkTargetHost,
   hasTestLabel,
   hostMatches,
+  isHostAllowed,
   isLocalHost,
+  isProductionTarget,
   isUrlAllowed,
 } from '../../src/safety/hosts.js';
+import { redactPath, redactText } from '../../src/safety/redact-text.js';
 import { looksLikeSecret, Redactor, redactQuery } from '../../src/safety/secrets.js';
-import { TEST_CARDS } from '../../src/safety/test-cards.js';
+import { providerForPackage, TEST_CARDS } from '../../src/safety/test-cards.js';
 import type { TargetConfig } from '../../src/schemas/config.js';
+import { resolveInside, YAML_PATH } from '../../src/util/paths.js';
 
 const target = (over: Partial<TargetConfig> = {}): TargetConfig => ({
   description: '',
+  environment: 'test',
+  live_cards: {},
   profile: 'p',
   base_url: 'https://staging.shop.test',
   allowed_hosts: ['staging.shop.test'],
@@ -38,6 +49,20 @@ describe('test card registry', () => {
 
   it('has unique ids', () => {
     expect(new Set(TEST_CARDS.map((c) => c.id)).size).toBe(TEST_CARDS.length);
+  });
+
+  it('has a success and a decline card for iyzico, each with a source', () => {
+    const cards = TEST_CARDS.filter((c) => c.provider === 'iyzico');
+    expect(cards.some((c) => c.behaviour === 'success')).toBe(true);
+    expect(cards.some((c) => c.behaviour.startsWith('declined'))).toBe(true);
+    for (const c of cards) expect(c.source_url).toMatch(/^https:\/\/docs\.iyzico\.com\//);
+  });
+
+  it('maps payment packages to providers', () => {
+    expect(providerForPackage('@stripe/stripe-js')).toBe('stripe');
+    expect(providerForPackage('iyzipay')).toBe('iyzico');
+    expect(providerForPackage('@craftgate/craftgate')).toBe('craftgate');
+    expect(providerForPackage('left-pad')).toBeUndefined();
   });
 });
 
@@ -60,6 +85,103 @@ describe('card guard', () => {
   it('refuses any card number in tool arguments', () => {
     expect(containsCardNumber(JSON.stringify({ note: '4242424242424242' }))).toBe(true);
     expect(containsCardNumber(JSON.stringify({ card: 'stripe/visa-success' }))).toBe(false);
+  });
+});
+
+/** Appends the Luhn check digit. The tests build numbers at run time, so no new card literal enters the repo. */
+function withCheckDigit(body: string): string {
+  for (let d = 0; d <= 9; d++) {
+    if (luhnValid(`${body}${d}`)) return `${body}${d}`;
+  }
+  throw new Error('unreachable');
+}
+
+describe('card guard with live cards of a run', () => {
+  const live = withCheckDigit(`5${'31'.repeat(7)}`);
+  const other = withCheckDigit(`5${'13'.repeat(7)}`);
+
+  it('builds unregistered Luhn-valid numbers', () => {
+    expect(live).toHaveLength(16);
+    expect(other).not.toBe(live);
+    expect(containsUnregisteredCardNumber(live)).toBe(true);
+    expect(containsUnregisteredCardNumber(other)).toBe(true);
+  });
+
+  it('accepts a fill value that is a live card number of this run', () => {
+    const allowed = new Set([live]);
+    expect(() => guardCardValue(live, allowed)).not.toThrow();
+    expect(() => guardCardValue(live.replace(/(\d{4})(?=\d)/g, '$1 '), allowed)).not.toThrow();
+    expect(() => guardCardValue('4242424242424242', allowed)).not.toThrow();
+  });
+
+  it('refuses another unregistered number', () => {
+    expect(() => guardCardValue(other, new Set([live]))).toThrow(
+      expect.objectContaining({ category: 'blocked_by_safety' }),
+    );
+    expect(() => guardCardValue(`${live} ${other}`, new Set([live]))).toThrow(
+      expect.objectContaining({ category: 'blocked_by_safety' }),
+    );
+    expect(() => guardCardValue(live, new Set())).toThrow(
+      expect.objectContaining({ category: 'blocked_by_safety' }),
+    );
+  });
+});
+
+describe('executor output redaction', () => {
+  it('redacts the CVC in failure.actual and failure.expected only', () => {
+    const r = new Redactor();
+    r.registerCardNumber('4242424242424242');
+    r.registerCvc('123');
+    const out = redactExecuteOutput(r, {
+      verdict: 'failed',
+      failure: {
+        step_id: 's',
+        step_title: 'S',
+        category: 'assertion_failed',
+        message: 'Step 123 failed.',
+        expected: '"123"',
+        actual: '"4242 4242 4242 4242 / 123"',
+        likely_causes: [],
+        next_actions: [],
+      },
+      steps: [],
+      outcome_checks: [],
+      console_errors: [],
+      network_failures: [],
+      blocked_requests: [],
+      screenshots: [],
+      trace_path: null,
+    });
+    expect(out.failure?.actual).toBe('"[REDACTED] / [REDACTED]"');
+    expect(out.failure?.expected).toBe('"[REDACTED]"');
+    expect(out.failure?.message).toBe('Step 123 failed.');
+  });
+});
+
+describe('executor output redaction with a live card', () => {
+  const output = (r: Redactor) =>
+    redactExecuteOutput(r, {
+      verdict: 'passed',
+      failure: null,
+      steps: [],
+      outcome_checks: [],
+      console_errors: [{ level: 'error', text: 'cvc 123 refused', step_id: 's', count: 1, relevant: true }],
+      network_failures: [],
+      blocked_requests: [],
+      screenshots: [],
+      trace_path: null,
+    });
+
+  it('removes a standalone CVC from the whole output', () => {
+    const r = new Redactor();
+    r.registerCvc('123', { everywhere: true });
+    expect(output(r).console_errors[0]?.text).toBe('cvc [REDACTED] refused');
+  });
+
+  it('keeps a standalone CVC outside failure fields for a test card', () => {
+    const r = new Redactor();
+    r.registerCvc('123');
+    expect(output(r).console_errors[0]?.text).toBe('cvc 123 refused');
   });
 });
 
@@ -122,6 +244,49 @@ describe('host checks', () => {
       false,
     );
   });
+
+  it('applies the same host rule to a bare host for the guard proxy', () => {
+    const cfg = { production_hosts: ['www.shop.com'] };
+    expect(isHostAllowed('staging.shop.test', target(), cfg)).toBe(true);
+    expect(isHostAllowed('STAGING.shop.test.', target(), cfg)).toBe(true);
+    expect(isHostAllowed('sandbox-api.iyzipay.com', target(), cfg)).toBe(true);
+    expect(isHostAllowed('www.google-analytics.com', target(), cfg)).toBe(false);
+    expect(isHostAllowed('', target(), cfg)).toBe(false);
+    expect(isHostAllowed('www.shop.com', target({ allowed_hosts: ['www.shop.com'] }), cfg)).toBe(false);
+  });
+});
+
+describe('production targets', () => {
+  const prodTarget = target({
+    environment: 'production',
+    base_url: 'https://www.shop.example',
+    allowed_hosts: ['www.shop.example'],
+    third_party_hosts: [],
+  });
+  const cfg = { production_hosts: ['www.shop.example', 'api.other.example'] };
+
+  it('detects a production target', () => {
+    expect(isProductionTarget(prodTarget)).toBe(true);
+    expect(isProductionTarget(target())).toBe(false);
+  });
+
+  it('allows a production host in the target lists', () => {
+    expect(isHostAllowed('www.shop.example', prodTarget, cfg)).toBe(true);
+  });
+
+  it('refuses a production host outside the target lists', () => {
+    expect(isHostAllowed('api.other.example', prodTarget, cfg)).toBe(false);
+  });
+
+  it('keeps refusing a production host for a test target', () => {
+    expect(isHostAllowed('www.shop.example', target({ allowed_hosts: ['www.shop.example'] }), cfg)).toBe(
+      false,
+    );
+  });
+
+  it('passes the host check for a production target', () => {
+    expect(checkTargetHost('www.shop.example', prodTarget, cfg)).toEqual({ ok: true });
+  });
 });
 
 describe('secrets', () => {
@@ -132,14 +297,294 @@ describe('secrets', () => {
     expect(looksLikeSecret('pr-4812-3ds-fail')).toBe(false);
   });
 
+  it('matches Turkish keywords at the start and after a space', () => {
+    expect(looksLikeSecret('şifre: x')).toBe(true);
+    expect(looksLikeSecret('yeni şifre: x')).toBe(true);
+    expect(looksLikeSecret('ŞİFRE: x')).toBe(true);
+    expect(looksLikeSecret('parola=x')).toBe(true);
+    expect(looksLikeSecret('sifremi unuttum')).toBe(false);
+    expect(looksLikeSecret('sifremi: unuttum')).toBe(false);
+  });
+
+  it('keeps the ASCII keyword boundaries', () => {
+    for (const k of ['password', 'passwd', 'pwd', 'secret', 'api_key', 'api-key', 'apikey', 'token']) {
+      expect(looksLikeSecret(`${k}: x`)).toBe(true);
+      expect(looksLikeSecret(`x-${k}=y`)).toBe(true);
+      expect(looksLikeSecret(`${k.toUpperCase()} : y`)).toBe(true);
+    }
+    // An underscore or a letter before the keyword is part of another word, as with \b before.
+    expect(looksLikeSecret('csrf_token: x')).toBe(false);
+    expect(looksLikeSecret('mytoken: x')).toBe(false);
+  });
+
   it('redacts registered values deeply', () => {
     const r = new Redactor();
     r.register('s3cr3t-value');
     expect(r.redactDeep({ a: ['x s3cr3t-value y'], b: 1 })).toEqual({ a: ['x [REDACTED] y'], b: 1 });
   });
 
+  it('redacts a registered card number in every spacing', () => {
+    const r = new Redactor();
+    r.registerCardNumber('4242424242424242');
+    for (const shown of [
+      '4242424242424242',
+      '4242 4242 4242 4242',
+      '4242-4242-4242-4242',
+      '4242 424242 42424 2',
+    ]) {
+      expect(r.redact(`card ${shown} end`)).toBe('card [REDACTED] end');
+    }
+    expect(r.redact('4242  4242 4242 4242')).not.toBe('[REDACTED]');
+  });
+
+  it('redacts the common forms of a registered expiry', () => {
+    const r = new Redactor();
+    r.registerExpiry('12 / 34');
+    for (const shown of ['12/34', '12 / 34', '12-34', '1234', '12/2034', '12 / 2034']) {
+      expect(r.redact(`exp ${shown}.`)).toBe('exp [REDACTED].');
+    }
+    // Digit boundaries keep longer numbers as they are.
+    expect(r.redact('order 512345')).toBe('order 512345');
+  });
+
+  it('parses a four digit year and a one digit month', () => {
+    const r = new Redactor();
+    r.registerExpiry('3/2031');
+    expect(r.redact('03/31 and 03 / 2031')).toBe('[REDACTED] and [REDACTED]');
+  });
+
+  it('redacts a CVC only in failure fields and only with digit boundaries', () => {
+    const r = new Redactor();
+    r.registerCvc('123');
+    expect(r.redact('qty 123')).toBe('qty 123');
+    expect(r.redactFailureText('value "123"')).toBe('value "[REDACTED]"');
+    expect(r.redactFailureText('order 51234')).toBe('order 51234');
+  });
+
   it('redacts query string values', () => {
     expect(redactQuery('https://a.test/p?token=abc&x=1')).toBe('https://a.test/p?token=REDACTED&x=REDACTED');
     expect(redactQuery('https://a.test/p')).toBe('https://a.test/p');
+  });
+
+  it('removes a user name and password from a URL', () => {
+    expect(redactQuery('https://user:pw@a.test/p?x=1')).toBe('https://a.test/p?x=REDACTED');
+    expect(redactQuery('https://user@a.test/p')).toBe('https://a.test/p');
+    expect(redactQuery('not a url //user:pw@a.test/p?x=1')).toBe('not a url //a.test/p?REDACTED');
+  });
+});
+
+describe('resolveInside', () => {
+  let root: string;
+  let outside: string;
+  beforeEach(() => {
+    root = mkdtempSync(path.join(os.tmpdir(), 'ctm-root-'));
+    outside = mkdtempSync(path.join(os.tmpdir(), 'ctm-out-'));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it.each(['../x.yaml', '/etc/x.yaml', 'a/../../x.yaml', 'a\\b.yaml', 'Upper.yaml', 'x.yml.txt'])(
+    'refuses %s',
+    (rel) => {
+      expect(() => resolveInside(root, rel, { pattern: YAML_PATH })).toThrow(
+        expect.objectContaining({ code: 'PATH_REFUSED' }),
+      );
+    },
+  );
+
+  it('refuses a symlinked folder that leaves the root', () => {
+    symlinkSync(outside, path.join(root, 'out'));
+    expect(() => resolveInside(root, 'out/x.yaml', { pattern: YAML_PATH })).toThrow(
+      expect.objectContaining({ code: 'PATH_REFUSED' }),
+    );
+  });
+
+  it('refuses a symlinked folder when the target file does not exist yet in a deeper folder', () => {
+    symlinkSync(outside, path.join(root, 'out'));
+    expect(() => resolveInside(root, 'out/new/x.yaml', { pattern: YAML_PATH })).toThrow(
+      expect.objectContaining({ code: 'PATH_REFUSED' }),
+    );
+  });
+
+  it('refuses a leaf symlink that leaves the root', () => {
+    writeFileSync(path.join(outside, 'evil.yaml'), 'x');
+    symlinkSync(path.join(outside, 'evil.yaml'), path.join(root, 'x.yaml'));
+    expect(() => resolveInside(root, 'x.yaml', { pattern: YAML_PATH })).toThrow(
+      expect.objectContaining({ code: 'PATH_REFUSED' }),
+    );
+  });
+
+  it('refuses a dangling symlink folder', () => {
+    symlinkSync(path.join(outside, 'missing'), path.join(root, 'dang'));
+    expect(() => resolveInside(root, 'dang/x.yaml', { pattern: YAML_PATH })).toThrow(
+      expect.objectContaining({ code: 'PATH_REFUSED' }),
+    );
+  });
+
+  it('refuses a root that does not exist, with a next action', () => {
+    try {
+      resolveInside(path.join(root, 'nope'), 'a.yaml', { pattern: YAML_PATH });
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toMatchObject({ code: 'PATH_REFUSED' });
+      expect((err as { nextActions: unknown[] }).nextActions.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('returns the absolute path for a new file in a new folder', () => {
+    expect(resolveInside(root, 'shop/new-one.yaml', { pattern: YAML_PATH })).toBe(
+      path.join(root, 'shop/new-one.yaml'),
+    );
+  });
+
+  it('accepts an existing folder inside the root', () => {
+    mkdirSync(path.join(root, 'shop'));
+    expect(resolveInside(root, 'shop/a.yaml', { pattern: YAML_PATH })).toBe(path.join(root, 'shop/a.yaml'));
+  });
+
+  it('accepts a root that is itself a symlink', () => {
+    const link = path.join(outside, 'link');
+    symlinkSync(realpathSync(root), link);
+    expect(resolveInside(link, 'shop/a.yaml', { pattern: YAML_PATH })).toBe(path.join(link, 'shop/a.yaml'));
+  });
+
+  it('gives the error a next action', () => {
+    try {
+      resolveInside(root, '../x.yaml', { pattern: YAML_PATH });
+      expect.unreachable();
+    } catch (err) {
+      expect((err as { nextActions: unknown[] }).nextActions.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('unregistered card guard with a registered card next to other digits', () => {
+  it.each(['81578 4242 4242 4242 4242 831484804511', '135643 4242 4242 4242 4242 03246822939421'])(
+    'blocks %s',
+    (text) => {
+      expect(containsUnregisteredCardNumber(text)).toBe(true);
+      expect(redactText(text)).not.toMatch(/4242 4242 4242 4242/);
+    },
+  );
+  it('allows a plain registered test card', () => {
+    expect(containsUnregisteredCardNumber('4242 4242 4242 4242')).toBe(false);
+  });
+});
+
+describe('card guard keeps every shape', () => {
+  it.each([
+    '41111111 11111111',
+    '42424242 42424242',
+    '3056 930902 5904',
+    '4242 4242 4242 4242',
+    '4242-4242-4242-4242',
+    '4242424242424242',
+    'card 4242 4242 4242 4242 2026',
+    'Order 1 4242 4242 4242 4242',
+  ])('flags %s', (text) => {
+    expect(containsCardNumber(text)).toBe(true);
+    expect(findCardLikeNumbers(text).length).toBeGreaterThan(0);
+  });
+  it.each(['20261124123045123456789', '123456789012345678901234'])('accepts the long id %s', (text) => {
+    expect(containsCardNumber(text)).toBe(false);
+  });
+});
+
+describe('redactText', () => {
+  it.each(['41111111 11111111', '42424242 42424242', '3056 930902 5904'])('redacts card shape %s', (text) => {
+    expect(redactText(text)).toBe('<card>');
+  });
+  it('redacts personal data and tokens but keeps product text', () => {
+    expect(redactText('Mail ayse@shop.com, tel 0555 000 00 00, Tabak 19 cm')).toBe(
+      'Mail <email>, tel <phone>, Tabak 19 cm',
+    );
+    expect(redactText('card 4242 4242 4242 4242')).toBe('card <card>');
+  });
+  it('redacts card numbers with dashes and not as a phone', () => {
+    expect(redactText('4242-4242-4242-4242')).toBe('<card>');
+    expect(redactText('4242424242424242')).toBe('<card>');
+  });
+  it('redacts phones with plus and brackets', () => {
+    expect(redactText('+90 (555) 000 00 00')).toBe('<phone>');
+    expect(redactText('+905550000000')).toBe('<phone>');
+  });
+  it('redacts JWT, base64, and hex tokens', () => {
+    expect(redactText('t eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefSIG end')).toBe('t <token> end');
+    expect(redactText('k 0123456789abcdef0123456789abcdef')).toBe('k <token>');
+    expect(redactText('k QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0MTIzNDU2Nzg=')).toBe('k <token>');
+  });
+  it.each([
+    ['card 4242 4242 4242 4242 2026', 'card <card> 2026'],
+    ['Order 1 4242 4242 4242 4242', 'Order 1 <card>'],
+    ['Tel 0212 000 00 00 34000 Istanbul', 'Tel <phone> 34000 Istanbul'],
+  ])('redacts next to other digits: %s', (input, expected) => {
+    expect(redactText(input)).toBe(expected);
+  });
+  it('redacts two phones in a row', () => {
+    expect(redactText('0555 000 00 00 0555 111 11 11')).toBe('<phone> <phone>');
+  });
+  it('redacts a card inside a longer digit run', () => {
+    const out = redactText('4242424242424242424242');
+    expect(out).toContain('<card>');
+    expect(out).not.toContain('4242424242424242');
+  });
+  it('redacts phones with dashes and dots', () => {
+    expect(redactText('0555-000-00-00')).toBe('<phone>');
+    expect(redactText('0555.000.00.00')).toBe('<phone>');
+  });
+  it.each([
+    'data-testid="checkout-payment-card-number-input"',
+    'https://shop.test/products/acme-tabak-seti-porselen-19-cm',
+    'product-card__image-wrapper--large-variant',
+  ])('keeps ordinary identifiers and urls: %s', (text) => {
+    expect(redactText(text)).toBe(text);
+  });
+  it('keeps ordinary short numbers and text', () => {
+    const text = 'Tabak 19 cm, 200 TL, posta kodu 34000, 2026-11-24';
+    expect(redactText(text)).toBe(text);
+  });
+  it('does not report a 16-digit number that fails Luhn as a card', () => {
+    const out = redactText('1234 5678 9012 3456');
+    expect(out).not.toContain('<card>');
+    expect(out).not.toContain('1234 5678');
+  });
+});
+
+describe('redactPath', () => {
+  it('keeps ids and barcodes in a path', () => {
+    expect(redactPath('/urun/tabak-p-8690000000001')).toBe('/urun/tabak-p-8690000000001');
+    expect(redactPath('/orders/5550000000/items')).toBe('/orders/5550000000/items');
+  });
+  it('redacts emails, tokens, and card numbers in a path', () => {
+    expect(redactPath('/account/ayse@shop.example/orders')).toBe('/account/<email>/orders');
+    expect(redactPath('/reset/0123456789abcdef0123456789abcdef')).toBe('/reset/<token>');
+    expect(redactPath('/pay/4242424242424242')).toBe('/pay/<card>');
+  });
+});
+
+describe('isCardInput', () => {
+  const input = (over: Partial<Parameters<typeof isCardInput>[0]>) => ({
+    autocomplete: '',
+    name: '',
+    id: '',
+    placeholder: '',
+    label: '',
+    ...over,
+  });
+  it('finds card inputs by autocomplete, name, id, placeholder, and label', () => {
+    expect(isCardInput(input({ autocomplete: 'cc-number' }))).toBe(true);
+    expect(isCardInput(input({ autocomplete: 'billing cc-exp' }))).toBe(true);
+    expect(isCardInput(input({ name: 'cardNumber' }))).toBe(true);
+    expect(isCardInput(input({ id: 'card-cvv' }))).toBe(true);
+    expect(isCardInput(input({ placeholder: 'Kart numarası' }))).toBe(true);
+    expect(isCardInput(input({ label: 'Son kullanma tarihi' }))).toBe(true);
+    expect(isCardInput(input({ label: 'CVC' }))).toBe(true);
+  });
+  it('does not take address and contact inputs as card inputs', () => {
+    for (const label of ['Email', 'Ad Soyad', 'Cep Telefonu', 'Adres', 'Postcode', 'Gift message']) {
+      expect(isCardInput(input({ label, name: label.toLowerCase() })), label).toBe(false);
+    }
   });
 });

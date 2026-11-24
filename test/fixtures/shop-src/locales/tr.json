@@ -1,0 +1,6 @@
+{
+  "cart": { "title": "Sepetim", "empty": "Sepetiniz boş" },
+  "checkout": { "pay": "Ödemeyi tamamla", "guest": "Üye olmadan devam et" },
+  "footer": { "about": "Hakkımızda" },
+  "login": { "password": "Şifre" }
+}

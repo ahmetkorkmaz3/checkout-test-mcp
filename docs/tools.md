@@ -11,7 +11,10 @@ Contents:
 4. `run_scenario`
 5. `get_run_result`
 6. `compare_runs`
-7. Reasons behind the choices
+7. `save_scenario`
+8. `inspect_target`
+9. Prompts
+10. Reasons behind the choices
 
 ## 1. Shared schemas
 
@@ -70,7 +73,8 @@ export const ToolErrorCode = z.enum([
   'SCENARIO_NOT_COMPATIBLE', // scenario profile does not match target profile
   'INVALID_PARAMS', // scenario-level param validation (types are checked by the SDK)
   'HOST_NOT_ALLOWED',
-  'PRODUCTION_HOST_REFUSED',
+  'PRODUCTION_HOST_REFUSED', // a test target has a host in production_hosts
+  'PRODUCTION_CONFIRMATION_REQUIRED', // run_scenario: a new run on a production target without confirm_production: true
   'REAL_CARD_DATA_REFUSED',
   'SECRET_IN_ARGUMENTS',
   'MISSING_ENV_SECRET',
@@ -79,6 +83,11 @@ export const ToolErrorCode = z.enum([
   'RUN_NOT_FINISHED', // compare_runs only
   'RUNS_NOT_COMPARABLE',
   'QUEUE_FULL',
+  'AUTHORING_DISABLED', // save_scenario: no authoring block, or test data writes are off
+  'SCENARIO_INVALID', // save_scenario: schema, house rule, or trial load issues in details.issues
+  'PATH_REFUSED', // a file path leaves its allowed folder
+  'SCENARIO_EXISTS', // save_scenario: the file exists with other content and overwrite is off
+  'INSPECTION_FAILED', // inspect_target: a phase of the job stopped. A report warning, not a tool error
   'INTERNAL_ERROR',
 ]);
 
@@ -151,9 +160,10 @@ server.registerTool(
   {
     title: 'List checkout test scenarios',
     description: [
-      'Lists the checkout and payment test scenarios this server can run, the targets (test environments) they can run against, and the test cards you can use.',
+      'Lists the checkout and payment test scenarios this server can run, the targets (test or production environments) they can run against, and the test cards you can use.',
       'Call this first, before run_scenario, to get valid values for scenario_id, target, and params.',
       'Each scenario lists its params with type, default, and description. Params of type "test_card" take an id from the test_cards list, never a card number.',
+      'On a production target, a "test_card" param also takes a "live/<name>" id from targets[].live_cards of that target. A production target has a warning: show it to the user before a run.',
       'This tool is read-only and fast.',
     ].join(' '),
     inputSchema: z.object({
@@ -174,6 +184,12 @@ server.registerTool(
           description: z.string(),
           profile: z.string(),
           base_url: z.string(),
+          environment: z.enum(['test', 'production']),
+          warning: z.string().optional(), // production targets only: PRODUCTION_WARNING
+          live_cards: z.array(
+            // production targets only. Empty for a test target. Never a number, an expiry, or a CVC.
+            z.object({ id: z.string() /* "live/<name>" */, behaviour: CardBehaviour, description: z.string() }),
+          ),
         }),
       ),
       scenarios: z.array(
@@ -224,6 +240,12 @@ server.registerTool(
 );
 ```
 
+Each target has `environment`. A production target also has `warning` and its `live_cards`. The warning is one text from `src/safety/production.ts`:
+
+> Production target. A run here can make a real order and a real payment, change stock, start shipping, and send email or SMS to real addresses. Ask the user before each run.
+
+A live card shows only its id, behaviour, and description. The number, expiry, and CVC stay in the env vars of the server process.
+
 ## 4. `run_scenario`
 
 ```ts
@@ -232,10 +254,11 @@ server.registerTool(
   {
     title: 'Start a checkout test run',
     description: [
-      'Starts one checkout test scenario against a configured test environment and returns a run_id at once. The run continues in the background, usually for 30 to 180 seconds.',
+      'Starts one checkout test scenario against a configured target and returns a run_id at once. The run continues in the background, usually for 30 to 180 seconds.',
       'Then call get_run_result with the run_id to get progress and the final verdict. Do not call run_scenario again to check progress.',
       'idempotency_key is required: use the same key when you retry this call after a timeout or transport error, and the server returns the first run instead of starting a second checkout. Use a new key only when you want a new run, for example "pr-4812-3ds-fail-after-deploy".',
-      'target and scenario_id must come from list_scenarios. Only test environments from the server config are accepted, never URLs. Card params take test card ids, never card numbers.',
+      'target and scenario_id must come from list_scenarios. Only targets from the server config are accepted, never URLs. Card params take test card ids, never card numbers.',
+      'A production target (environment "production" in list_scenarios) can make a real order and a real payment. Show its warning to the user and ask before each new run. Only after the user says yes, set confirm_production: true. Without it, the server starts no run and returns PRODUCTION_CONFIRMATION_REQUIRED.',
     ].join(' '),
     inputSchema: z.object({
       target: z
@@ -276,6 +299,12 @@ server.registerTool(
             .describe('Record a Playwright trace file for a human to open later. Makes the run slower.'),
         })
         .default({}),
+      confirm_production: z
+        .boolean()
+        .default(false)
+        .describe(
+          'Only for a production target: true after the user says yes to this run in this conversation. Never set it without that yes. It has no effect on a test target.',
+        ),
     }),
     outputSchema: z.object({
       run_id: RunId,
@@ -285,13 +314,15 @@ server.registerTool(
         .describe('True when this idempotency_key already had a run. No new checkout started.'),
       scenario_id: z.string(),
       target: z.string(),
+      environment: z.enum(['test', 'production']),
+      warning: z.string().optional(), // production targets only: PRODUCTION_WARNING
       resolved_params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
       estimated_duration_s: z.number().int(),
       next: NextAction.describe('Normally: call get_run_result with wait_s 20.'),
     }),
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false, // creates orders on a test environment only
+      destructiveHint: false, // a production run needs confirm_production: true for each new run
       idempotentHint: true, // with the same idempotency_key
       openWorldHint: true,
     },
@@ -309,6 +340,7 @@ Example output:
   "reused_existing_run": false,
   "scenario_id": "card-3ds-challenge-fail",
   "target": "demo-local",
+  "environment": "test",
   "resolved_params": {
     "product_path": "/products/ceramic-mug",
     "quantity": 1,
@@ -323,6 +355,61 @@ Example output:
   }
 }
 ```
+
+### Production targets
+
+A target with `environment: production` can use hosts from `production_hosts`. A run there is real: an order, a payment, stock, shipping, and email or SMS. The server checks these rules in `RunManager.start`, in this order:
+
+1. The argument checks (`REAL_CARD_DATA_REFUSED`, `SECRET_IN_ARGUMENTS`).
+2. The idempotency key. A key that already has a run returns that run with `reused_existing_run: true`. This needs no `confirm_production`. `confirm_production` is not part of the request hash, so `true` and `false` give the same run for the same key.
+3. A new run on a production target without `confirm_production: true`: `PRODUCTION_CONFIRMATION_REQUIRED`. The server writes no run record and reads no live card env var. An unknown target goes on to step 4 and gives `UNKNOWN_TARGET`.
+4. `prepare`: the target, the scenario, the params, the live cards, and the secrets.
+
+On a test target, `confirm_production` has no effect. The output has `environment` for every target, and `warning` only for a production target.
+
+Example: a new run on a production target without the flag.
+
+```json
+{
+  "error": {
+    "code": "PRODUCTION_CONFIRMATION_REQUIRED",
+    "message": "Target \"shop-live\" is a production target. No run started. Production target. A run here can make a real order and a real payment, change stock, start shipping, and send email or SMS to real addresses. Ask the user before each run.",
+    "likely_cause": "A new run on a production target needs confirm_production: true. Set it only after the user says yes to this run.",
+    "retryable": false,
+    "next_actions": [
+      {
+        "kind": "ask_human",
+        "description": "Show the user the warning and ask: may I run \"card-success\" on the production target \"shop-live\" now?"
+      },
+      {
+        "kind": "change_argument",
+        "description": "After the user agrees, call run_scenario for target \"shop-live\" and scenario \"card-success\" with confirm_production: true.",
+        "tool": "run_scenario",
+        "arguments": { "confirm_production": true }
+      }
+    ],
+    "details": { "target": "shop-live", "environment": "production" }
+  }
+}
+```
+
+`retryable` is false, because the same call without the yes of the user never works.
+
+Live cards. A production target can declare `live_cards`. A `test_card` param takes the id `live/<name>`. The server reads the number, expiry, and CVC from the env vars of that entry when the run starts, and only for the live cards that the params name. The `behaviour` constraint of the param applies to live cards too. The executor card guard accepts the live numbers of this run and no other number that is not in the registry. The redactor removes the live number and the expiry, also in formatted forms such as a number in groups of four or an expiry such as `12/34`. With a live card in the run, it removes a standalone CVC from the whole run output, also from `console_errors`. A test card run keeps the number pattern and the exact expiry string, and removes the CVC only in `failure.expected` and `failure.actual`.
+
+The config load refuses a test target when a host in its `allowed_hosts` or `third_party_hosts` overlaps a host of a production target (its `base_url` host or `allowed_hosts`). The message is `Target "<test>": host "<h>" belongs to production target "<prod>".` The `third_party_hosts` of a production target do not count.
+
+Errors on a production target:
+
+| Code | When |
+|---|---|
+| `PRODUCTION_CONFIRMATION_REQUIRED` | A new run without `confirm_production: true`. |
+| `MISSING_ENV_SECRET` | An env var of a live card is not set. `details.missing` names the card id and the env var, for example `live/company-visa (env LIVE_VISA_CVC)`. |
+| `MISSING_ENV_SECRET` | The number env var does not hold 13 to 19 digits with a valid Luhn check. `details.invalid` names the card id and the env var. The message never holds the value. |
+| `INVALID_PARAMS` | An unknown live card name, or a live card with the wrong behaviour for the param. |
+| `INVALID_PARAMS` | `options.trace: true`. A trace holds DOM snapshots with typed values. |
+
+On a test target, a `live/<name>` id gives `INVALID_PARAMS`.
 
 ## 5. `get_run_result`
 
@@ -436,6 +523,8 @@ server.registerTool(
 );
 ```
 
+`blocked_requests` lists each blocked URL once for each step. For an https request or a WebSocket that the guard proxy blocked, the URL is `https://<host>:<port>/` (no port for 443), because a tunnel has no path.
+
 `content` for a finished, failed run: one text block with the summary and the JSON, plus one image block with the failing-step screenshot.
 
 Example `failure` for the 3DS scenario when the challenge did not appear:
@@ -464,7 +553,7 @@ Example `failure` for the 3DS scenario when the challenge did not appear:
       "arguments": { "target": "demo-local", "scenario_id": "card-3ds-challenge-fail" }
     }
   ],
-  "screenshot": "/path/to/.checkout-test-mcp/runs/run_8fK2mQ9xLp3vTz1a/04-submit_payment.png",
+  "screenshot": "/path/to/.checkout-test-mcp/runs/run_8fK2mQ9xLp3vTz1a/05-submit_payment.png",
   "page_url": "http://localhost:4173/checkout/success"
 }
 ```
@@ -552,7 +641,383 @@ server.registerTool(
 - `inconclusive`: one run has verdict `error` or `blocked`. The site was not tested in that run.
 - Each run stores a hash of the scenario file. A different hash gives a warning, not an error.
 
-## 7. Reasons behind the choices
+## 7. `save_scenario`
+
+The agent writes the YAML. The server checks it and writes the file. Source: `src/tools/save-scenario.ts` (tool) and `src/authoring/save.ts` (logic). Design: [scenario authoring spec](superpowers/specs/2026-11-24-scenario-authoring-design.md), sections 7.3 and 7.6.
+
+```ts
+server.registerTool(
+  'save_scenario',
+  {
+    title: 'Save a scenario file',
+    description: SAVE_SCENARIO_DESCRIPTION, // see the source, reviewed through the tools/list snapshot
+    inputSchema: z.object({
+      kind: z.enum(['scenario', 'fragment', 'test_data']),
+      path: z.string().min(1), // relative, kebab-case, ".yaml"
+      yaml: z.string().min(1).max(65_536),
+      overwrite: z.boolean().default(false),
+      validate_on: z
+        .object({ target: z.string().min(1), params: z.record(z.string(), ParamValue).optional() })
+        .optional(), // kind "scenario" only
+    }),
+    outputSchema: z.object({
+      path: z.string(),
+      kind: z.enum(['scenario', 'fragment', 'test_data']),
+      scenario_id: z.string().nullable(),
+      written: z.boolean(),
+      unchanged: z.boolean(),
+      fixes_applied: z.array(z.string()),
+      warnings: z.array(RuleIssue), // { rule, severity, path, message, fix }
+      validation: z
+        .object({ run_id: RunId, status: RunStatus, reused_existing_run: z.boolean() })
+        .nullable(),
+      next: NextAction,
+    }),
+    // openWorldHint: validate_on starts a browser run against a test target.
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  },
+  handler,
+);
+```
+
+The server does these steps in this order. A refusal writes nothing.
+
+1. No `authoring` block in the config: `AUTHORING_DISABLED`. `kind: "test_data"` without `authoring.test_data_dir_writable: true`: `AUTHORING_DISABLED`. `validate_on` with a kind other than `scenario`: `INVALID_PARAMS`.
+2. The path resolves inside `authoring.dir` (scenario, fragment) or `test_data_dir` (test data). A path with `..`, an absolute path, a wrong name, or a symlink that leaves the folder: `PATH_REFUSED`.
+3. A card-like number anywhere in the text, also a registry test card number: `REAL_CARD_DATA_REFUSED`. Secret-like text: `SECRET_IN_ARGUMENTS`. A key whose whole value is one template, for example `password: "{{secrets.member_password}}"`, is not a secret value. A key that opens a nested map is not a secret value either, unless its block has a literal `default:`.
+4. Automatic fixes (schema line, `schema_version: 1`), YAML parse, zod schema, trial load of all scenario folders with the new text, and the house rules. Test data gets no fixes and uses the test data rules. Any error: `SCENARIO_INVALID` with every issue in `details.issues`. An issue never shows a YAML key with other characters than letters, digits, `_`, and `-`. Such a key shows as `<key>`, because it can be an email or another value.
+5. The file exists with the same text after the fixes: success with `unchanged: true` and `written: false`. Other text and `overwrite: false`: `SCENARIO_EXISTS`.
+6. Atomic write (temp file in the same folder, then rename). A read or write error, for example a folder with the file name, gives `PATH_REFUSED` with the relative path and the error code, never the absolute path. The server swaps in the trial registry, so `list_scenarios` and `run_scenario` see the file at once.
+7. `validate_on` starts a run. The server makes the idempotency key: `save-<first 60 characters of scenario_id>-<first 16 hex of sha256(target + scenario hash + params JSON with sorted keys)>`. The scenario hash comes from the trial load and covers the scenario text and all its fragment texts. The same file, fragments, target, and params give the same run, also with the params in another key order. A changed file, a changed fragment, or another target gives a new run. When the run does not start, the error message says that the file was saved, and `details` has `saved: true`. On a production target the validation run never starts: `save_scenario` has no `confirm_production`, so it returns `PRODUCTION_CONFIRMATION_REQUIRED`. The agent then asks the user and calls `run_scenario` with `confirm_production: true`.
+
+Example: save and validate.
+
+```json
+{
+  "kind": "scenario",
+  "path": "guest/card-success-two-items.yaml",
+  "yaml": "id: card-success-two-items\ntitle: ...",
+  "validate_on": { "target": "demo-local", "params": { "quantity": 2 } }
+}
+```
+
+```json
+{
+  "path": "guest/card-success-two-items.yaml",
+  "kind": "scenario",
+  "scenario_id": "card-success-two-items",
+  "written": true,
+  "unchanged": false,
+  "fixes_applied": ["Added \"schema_version: 1\"."],
+  "warnings": [],
+  "validation": { "run_id": "run_8fK2mQ9xLp3vTz1a", "status": "queued", "reused_existing_run": false },
+  "next": {
+    "kind": "call_tool",
+    "description": "Wait for the validation run and get the result.",
+    "tool": "get_run_result",
+    "arguments": { "run_id": "run_8fK2mQ9xLp3vTz1a", "wait_s": 20 }
+  }
+}
+```
+
+Example: a weak outcome check.
+
+```json
+{
+  "error": {
+    "code": "SCENARIO_INVALID",
+    "message": "The scenario breaks 1 rule. Nothing was written.",
+    "likely_cause": "The YAML does not match the schema, a house rule, or the other scenario files.",
+    "retryable": false,
+    "next_actions": [
+      {
+        "kind": "fix_scenario",
+        "description": "Fix every issue in details.issues, then call save_scenario again with the fixed YAML.",
+        "tool": "save_scenario"
+      }
+    ],
+    "details": {
+      "issues": [
+        {
+          "rule": "outcome-proves-order",
+          "severity": "error",
+          "path": "outcome",
+          "message": "expected_outcome is order_placed, but no outcome check of kind \"response\" or \"url\" counts. A check with \"when\" does not count.",
+          "fix": "Add an outcome check without \"when\" that waits for the order response (\"response\") or the confirmation page URL (\"url\")."
+        }
+      ]
+    }
+  }
+}
+```
+
+Errors:
+
+| Code | When |
+|---|---|
+| `AUTHORING_DISABLED` | No `authoring` block, or test data writes are off. |
+| `PATH_REFUSED` | The path is not relative, does not match the name rule, or leaves the folder. The server cannot read or write the file. |
+| `REAL_CARD_DATA_REFUSED` | The text has a card-like number. |
+| `SECRET_IN_ARGUMENTS` | The text has secret-like text. |
+| `SCENARIO_INVALID` | Schema, house rule, or trial load issues. See `details.issues`. |
+| `SCENARIO_EXISTS` | The file exists with other text and `overwrite` is false. |
+| `INVALID_PARAMS` | `validate_on` with a kind other than `scenario`. |
+| Errors of `run_scenario` | The file is saved, but the validation run did not start. |
+
+## 8. `inspect_target`
+
+The tool reads a test target and suggests scenarios. One tool starts the background job and long polls it, like `run_scenario` plus `get_run_result` in one call. Source: `src/tools/inspect-target.ts` (tool), `src/inspect/manager.ts` (jobs), `src/inspect/report.ts` (report schema and trim), and `src/inspect/suggest.ts` (rules). Design: [scenario authoring spec](superpowers/specs/2026-11-24-scenario-authoring-design.md), sections 7.2 and 7.4.
+
+```ts
+server.registerTool(
+  'inspect_target',
+  {
+    title: 'Inspect a test target',
+    description: INSPECT_TARGET_DESCRIPTION, // see the source, reviewed through the tools/list snapshot
+    inputSchema: z.object({
+      target: z.string().min(1),
+      idempotency_key: z.string().regex(/^[A-Za-z0-9._:-]{8,128}$/), // same regex as run_scenario
+      scope: z.enum(['site', 'code', 'both']).default('both'),
+      wait_s: z.number().int().min(0).max(20).default(20),
+      // Read arguments: one page of a list from the full stored report. Not part of the request hash.
+      section: z.enum(['pages', 'api_calls', 'ui_strings', 'test_ids', 'routes', 'otp_hints', 'probe_steps']).optional(),
+      offset: z.number().int().min(0).default(0),
+    }),
+    outputSchema: InspectionReport.extend({
+      reused_existing_inspection: z.boolean(),
+      slice: z
+        .object({
+          section: ReportSection,
+          offset: z.number().int(),
+          total: z.number().int(),
+          items: z.array(z.record(z.string(), z.unknown())),
+          next_offset: z.number().int().nullable(), // null when no items are left
+        })
+        .nullable(), // null without section
+      next: NextAction,
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  handler,
+);
+
+const InspectionReport = z.object({
+  inspection_id: z.string().regex(/^insp_[A-Za-z0-9_-]{16}$/),
+  target: z.string(),
+  status: z.enum(['queued', 'running', 'finished']),
+  interrupted: z.boolean(), // the server stopped during the job. It was not repeated.
+  progress: z.string(),
+  site: SiteReport.nullable(), // pages, api_calls, blocked_hosts
+  checkout_probe: ProbeResult.nullable(), // reached, stopped_reason, steps, dialogs, guest_option, payment, side_effects
+  code: CodeReport.nullable(), // frameworks, routes, ui_strings, test_ids, payment_hints, otp_hints, stats, warnings
+  suggested_scenarios: z.array(Suggestion),
+  warnings: z.array(z.string()),
+  side_effects: z.array(z.string()),
+  report_path: z.string(), // runs_dir/inspections/<id>.json
+});
+
+const Suggestion = z.object({
+  id: z.string(), // "<target>-guest-card"
+  title: z.string(),
+  expected_outcome: ExpectedOutcome,
+  baseline: z.boolean(), // write and run in the first setup with no question
+  why: z.string(),
+  evidence: z.array(z.string()), // report paths, for example "checkout_probe.payment.test_card_select"
+  missing: z.array(z.string()), // inputs to ask the user for
+  card_source: z
+    .discriminatedUnion('kind', [
+      z.object({ kind: z.literal('site_select'), option: z.string(), value: z.string().optional() }),
+      z.object({ kind: z.literal('registry'), card_id: z.string() }),
+    ])
+    .nullable(), // site_select: select by value when it is set, else by the option text
+});
+```
+
+`ProbeResult.payment.test_card_select` is `{ label, options: { text, value? }[] } | null`. The option text is redacted, so a text with a card number shows `<card>`. `value` is the option value when it is not empty and holds no card-like number or other personal data. A `site_select` card source has `value` when the option has one. The scenario then selects with `option: <value>`. When an option text hides a card number and the option has no usable value, the suggestion has no card source, and `missing` says so.
+
+URL paths in the report (`site.pages[].url_path`, `checkout_probe.steps[].url_path`) keep ids and barcodes. They lose emails, tokens, and card numbers.
+
+`ProbeResult.payment` also has `card_frames` (`{ host, title, name? }[]`) and `card_fields` (`{ label?, placeholder?, autocomplete?, in_frame }[]`). The probe reads a card frame from the iframe element on the parent page, so a frame on a blocked host is listed too. A frame counts when it has card fields, or when the guard blocked it and it looks like a payment frame. `card_fields` has the inline card inputs and the inputs of card frames on allowed hosts: labels, placeholders, and autocomplete values, never values. When a card frame host is blocked, a warning says that the card fields are unknown and names the host to add to `third_party_hosts`.
+
+`ProbeResult.stopped_reason` is one of `payment_step_reached`, `login_required`, `no_product`, `no_add_to_cart`, `no_checkout_button`, `form_not_understood`, `timeout`, `blocked_by_safety`, `verification_required`. `ProbeResult.dialogs` lists the dialogs that opened during the probe.
+
+The server does these steps in this order:
+
+1. Unknown target: `UNKNOWN_TARGET`. A test target with a host in `production_hosts`: `PRODUCTION_HOST_REFUSED` (the config load refuses it too). A test target host without a test label: `HOST_NOT_ALLOWED`. A production target skips these two host checks. `scope: "code"` without `inspect.source_dirs`: `INVALID_PARAMS`.
+2. The key has an inspection with the same target and scope: the server returns it with `reused_existing_inspection: true`. Other arguments: `IDEMPOTENCY_CONFLICT`. `wait_s` is not part of the comparison.
+3. `http_credentials` secrets that are not set: `MISSING_ENV_SECRET`.
+4. The job waits in the queue. One inspection runs at a time, and it needs a browser slot that it shares with the runs (`max_parallel_runs`).
+5. Site phase (`scope` "site" or "both"): the crawl. Then the checkout probe, only with `inspect.probe_checkout: true`. Without the flag, `checkout_probe` is null and a warning names the flag and the side effects.
+6. Code phase (`scope` "code" or "both"): the scan of `inspect.source_dirs`. With `scope: "both"` and no source folders, the scan does not run and a warning says so.
+7. Suggestions from the rules in the spec, section 7.4. Then `status: "finished"`.
+
+On a production target, the inspection needs no `confirm_production`, because the probe never pays. `warnings[0]` is the production warning from the start of the job. A result with `section` keeps it first too, and it counts in the 40 000 character limit. The probe can still make a guest account, an address, and an unpaid order draft on the live site.
+
+A phase that crashes does not give a tool error. The job keeps the parts that are done, finishes, and adds a warning that starts with `INSPECTION_FAILED`. The warning has the phase, the error class, and a short message without URLs or absolute paths.
+
+After a restart, an inspection that was `queued` or `running` becomes `finished` with `interrupted: true` and a warning. The server does not repeat it. Each record on disk has its idempotency key, so the server rebuilds a key that the index file does not have. A failed job never stops the jobs after it.
+
+The compact JSON of the whole output object (the report, `reused_existing_inspection`, and `next`) stays under 40 000 characters. The text block is that compact JSON, not a pretty-printed copy. To fit, the server cuts page `elements` first, then `code.ui_strings`, then `site.api_calls`. If that is not enough, it cuts `code.test_ids`, `code.routes`, `code.otp_hints`, then pages from the end, and then `checkout_probe.steps`. It adds one warning that lists the cut parts and tells the agent to read them with `section` and `offset`. The file at `report_path` also has the full report, but an agent with only the MCP tools cannot read it.
+
+To read a cut list, call `inspect_target` with the same target, key, and scope, plus `section` and `offset` (start with 0). The key must already have an inspection. Otherwise the tool refuses with `INVALID_PARAMS` and starts nothing. `section` and `offset` are read arguments: they are not part of the request hash, so they never give `IDEMPOTENCY_CONFLICT`. When the inspection is finished, the result has `slice` with as many items from `offset` as fit under the same 40 000 character limit (at least one). When one item alone is larger than the limit, the server cuts the longest lists of that item in the result and adds a warning that names each cut list. The result also has `total` and `next_offset` (null at the end). In this result `site`, `checkout_probe`, and `code` are null, `suggested_scenarios` and `side_effects` are empty, and one warning says so. `next` holds the call for the next page. When the inspection is not finished, `slice` is null and the result is the usual progress.
+
+`next`: while the status is not `finished`, a `call_tool` of `inspect_target` with the same arguments. When it is finished, a `call_tool` of `save_scenario` if a baseline suggestion exists, else `ask_human` for the missing inputs.
+
+Example: a finished inspection (trimmed).
+
+```json
+{
+  "inspection_id": "insp_Q2x8LmN4pR7sTv0a",
+  "target": "demo-local",
+  "status": "finished",
+  "interrupted": false,
+  "progress": "Finished.",
+  "site": {
+    "pages": [
+      { "path_pattern": "/products/*", "url_path": "/products/ceramic-mug", "kind": "product", "title": "Ceramic mug", "...": "..." },
+      { "path_pattern": "/checkout", "url_path": "/checkout", "kind": "checkout", "...": "..." }
+    ],
+    "api_calls": [
+      { "method": "GET", "path_pattern": "/api/products/*", "status": 200, "content_type": "application/json", "page_kind": "product" }
+    ],
+    "blocked_hosts": []
+  },
+  "checkout_probe": {
+    "reached": "payment",
+    "stopped_reason": "payment_step_reached",
+    "steps": [{ "action": "add to cart: \"Add to cart\"", "page_kind": "product", "url_path": "/", "result": "done" }],
+    "dialogs": [],
+    "guest_option": true,
+    "payment": {
+      "methods": [],
+      "card_form": true,
+      "card_iframe_hosts": ["localhost"],
+      "card_frames": [{ "host": "localhost", "title": "Secure card payment input" }],
+      "card_fields": [
+        { "placeholder": "Card number", "autocomplete": "cc-number", "in_frame": true },
+        { "placeholder": "MM / YY", "autocomplete": "cc-exp", "in_frame": true },
+        { "placeholder": "CVC", "autocomplete": "cc-csc", "in_frame": true }
+      ],
+      "test_card_select": null,
+      "agreement_checkbox": "I accept the terms",
+      "pay_button": "Pay now"
+    },
+    "side_effects": ["cart item", "guest account inspect-0a1b2c3d@example.test", "address"]
+  },
+  "code": {
+    "frameworks": [],
+    "routes": [],
+    "ui_strings": [],
+    "test_ids": [{ "value": "pay-button", "file": "app/checkout/page.tsx", "line": 9 }],
+    "payment_hints": [{ "provider": "stripe", "package": "@stripe/stripe-js", "file": "package.json" }],
+    "otp_hints": [],
+    "stats": { "files": 2, "skipped": 0, "truncated": false },
+    "warnings": []
+  },
+  "suggested_scenarios": [
+    {
+      "id": "demo-local-guest-card",
+      "title": "Guest checkout with a test card that succeeds",
+      "expected_outcome": "order_placed",
+      "baseline": true,
+      "why": "Proves that a guest can place an order with a card. It is the main checkout path.",
+      "evidence": ["checkout_probe.reached (payment)", "checkout_probe.guest_option", "code.payment_hints[0] (@stripe/stripe-js)"],
+      "missing": [],
+      "card_source": { "kind": "registry", "card_id": "stripe/visa-success" }
+    },
+    {
+      "id": "demo-local-member-card",
+      "title": "Member login and checkout with a test card that succeeds",
+      "expected_outcome": "order_placed",
+      "baseline": false,
+      "why": "Proves that a logged-in member can place an order with a card.",
+      "evidence": ["code.payment_hints[0] (@stripe/stripe-js)"],
+      "missing": ["a login page on the site", "member secrets: map member_email and member_password in the target secrets config"],
+      "card_source": { "kind": "registry", "card_id": "stripe/visa-success" }
+    }
+  ],
+  "warnings": [],
+  "side_effects": ["cart item", "guest account inspect-0a1b2c3d@example.test", "address"],
+  "report_path": "/home/me/shop-tests/.checkout-test-mcp/runs/inspections/insp_Q2x8LmN4pR7sTv0a.json",
+  "reused_existing_inspection": false,
+  "next": {
+    "kind": "call_tool",
+    "description": "Write each baseline scenario in suggested_scenarios, then save it with save_scenario and validate_on on this target.",
+    "tool": "save_scenario"
+  }
+}
+```
+
+Suggestion rules (spec section 7.4):
+
+| Suggestion | Baseline when |
+|---|---|
+| `<target>-guest-card` | The probe reached the payment step, and a test card source has a success card. |
+| `<target>-card-declined` | The same, and the source has a decline card. |
+| `<target>-terms-required` | The payment step has an agreement checkbox. |
+| `<target>-member-card` | A login page exists, the target maps `member_email` and `member_password` in `secrets`, and a test card source has a success card. |
+| `<target>-otp-login` (offer) | A page has a one-time code field, or the code scan found OTP hints. |
+| `<target>-gift-card`, `<target>-wallet-<name>` (offers) | The payment step lists these methods. |
+
+The four baseline rows are always in the list. A row with missing evidence has `baseline: false` and says what is missing. Test card source order: the site test card select (decline options match the `decline` word list), then the first `code.payment_hints` provider with registry cards, then a `card_iframe_hosts` host that contains a provider name. A provider without published cards, for example Craftgate, gives `card_source: null` and a `missing` entry.
+
+Errors:
+
+| Code | When |
+|---|---|
+| `UNKNOWN_TARGET` | The target is not in the config. |
+| `PRODUCTION_HOST_REFUSED` | A test target host is in `production_hosts`. |
+| `HOST_NOT_ALLOWED` | A test target host has no test label. |
+| `INVALID_PARAMS` | `scope: "code"` without `inspect.source_dirs`, or `section` with a key that has no inspection. |
+| `IDEMPOTENCY_CONFLICT` | The key has an inspection with another target or scope. |
+| `MISSING_ENV_SECRET` | An `http_credentials` secret is not set. |
+| `INSPECTION_FAILED` | Not a tool error. A warning in the report when a phase stopped. |
+
+## 9. Prompts
+
+The server has two MCP prompts. A client shows them as commands, for example `/setup_checkout_tests` in Claude Code. A prompt returns one user message with the procedure. The texts are product text, like the tool descriptions. The source is `src/prompts/`.
+
+Both prompts start with the config facts and the fragments that no tool shows. The fragment list comes from the files in `authoring.dir` when the prompt runs: path, id, description, and args with descriptions and defaults (at most 50 fragments). The config facts are: whether the checkout probe is on, the source folders, the authoring folder, test data writes, the secret names with their env var names (never the values), and the third-party hosts. So the agent asks the user only for what the config and the report cannot answer. For a target that is not in the config, a prompt returns only a text that lists the targets and tells the agent to stop.
+
+The config facts also name the environment of the target. For a production target, both prompts add a "Production target" block after the facts. It has the production warning and these rules: show the warning before each `run_scenario` call, ask the user for a yes for that one run, and set `confirm_production: true` only after that yes in this conversation. It also says that `save_scenario` with `validate_on` cannot start a production run, that a `test_card` param takes a `live/<name>` id, and that the probe acts on the live site.
+
+Both prompts also say that the server reads the config once: a change to `authoring`, `inspect`, `third_party_hosts`, or `secrets` needs a server restart. The agent waits for the restart before it runs card scenarios. A `blocked` verdict that names a host is a config fix, not one of the 3 tries. When a result is cut, the agent reads the lists with `section` and `offset`.
+
+### 9.1 `setup_checkout_tests`
+
+Arguments: `target` (target name, never a URL).
+
+The first setup of a target. The agent does these steps in order:
+
+1. Calls `list_scenarios` and checks that the target exists.
+2. Asks the user once, in one message, for the config changes that the setup needs. When `inspect.probe_checkout` is not `true`, it asks to allow the probe and lists the side effects: a guest account with an `example.test` email, an address, an unpaid order draft, and a cart item. The user edits the config.
+3. Calls `inspect_target` with a new key (for example `setup-<target>-<YYYYMMDD>`) and polls with the same key until `finished`. When `reused_existing_inspection` is true and the config changed after that inspection, it adds a counter to the key.
+4. Shows `blocked_hosts`. A payment or 3D Secure host must go into `third_party_hosts`. Analytics and ad hosts stay blocked.
+5. Writes and saves the fragments first: add to cart, guest start, address, pay.
+6. Writes a customer test data file when `test_data_dir_writable` is on, with a reserved email domain and the site's own city and district options.
+7. Writes each suggestion with `baseline: true`, saves it with `validate_on`, polls `get_run_result`, reads the failure when the verdict is not `passed`, fixes, and saves again. Maximum 3 tries for each scenario. After that, the scenario is "needs a human" with the last failure.
+8. Ends with a table (scenario, what it proves, verdict, run id), then lists: needs a human, offers (`baseline: false`), missing inputs, side effects (also the test orders of `order_placed` validation runs), and the saved files.
+
+The text also has the secret rules (the agent never asks for a password in the chat), a short scenario format, the house rules by id, and writing rules from earlier setups:
+
+- After a step opens a page, an expect `response` check before the first click, because a click before hydration does nothing. The url is `"**"` plus the `path_pattern` of the call. Without a call for the page kind, a `wait_for` step with a `visible` check.
+- Card fields in a frame: `within: { frame: { css: "iframe[title='<title>']" } }` with the labels from `card_fields`. The `prefer-semantic-locator` warning is expected there.
+- `exact: true` role names for duplicated buttons.
+- `url: { regex: "^https?://[^/]+/path/?(\\?.*)?$" }` for paths, not a `**` glob.
+- `capture.body_regex` for a Next.js server action body, `json_path` for JSON.
+- A boolean `three_ds` param with a `when` on the 3D Secure fragment when the provider decides.
+- Custom comboboxes: click the combobox, then the option by exact name.
+- A site test card select: select the option by its text. Never a card number.
+
+### 9.2 `create_scenario`
+
+Arguments: `target`, `request` (what the scenario must prove, in plain words, max 2000 characters).
+
+The same loop for one scenario. The agent checks that no scenario already does the request, reads the latest finished inspection of the target, asks the user once for what is missing (also the probe, when the report has no payment step), reuses the fragments in the authoring folder, saves the scenario with `validate_on`, and fixes it in at most 3 tries.
+
+The prompt names the key of the latest finished inspection of the target that read the site and that the server did not interrupt. An inspection whose probe reached the payment step wins over a newer one whose probe did not. A call with that key returns the stored report and starts no probe. When the target has no such inspection, the prompt tells the agent to use a new key.
+
+## 10. Reasons behind the choices
 
 1. **The description tells the model the order of calls.** Each description says which tool comes before it, which comes after it, and what not to do ("Do not call run_scenario again to check progress"). Models follow sequence text in descriptions well.
 2. **Examples inside `.describe()`.** A concrete example value ("pr-4812-3ds-fail-after-deploy") gives the model the format at once. This lowers first-call errors more than a long rule.
@@ -560,5 +1025,5 @@ server.registerTool(
 4. **Types in the schema, business rules in the server.** The SDK rejects a wrong type before the handler runs. Rules that need config (target exists, card behaviour fits) give a `ToolError` with a fix.
 5. **Verdict and category are enums.** The agent can branch on them without text parsing. `summary` is for the human reading the agent transcript.
 6. **`relevant` flags and caps in summary mode.** A checkout page can log hundreds of console lines. The model gets at most ten items of each kind, ordered by relevance.
-7. **Annotations are honest.** `run_scenario` is not read-only and is open-world. Clients that ask the user before side effects ask for this tool only.
-8. **`tools/list` snapshot test.** A test stores the generated JSON of all four tools. Any change to a description or schema shows in review as a diff.
+7. **Annotations are honest.** `run_scenario`, `inspect_target`, and `save_scenario` are not read-only. All three are open-world: they open the site of a target in a browser, and `save_scenario` can start a validation run. That site can be a test site or a production site. `save_scenario` also writes files, so it is marked destructive. A client can use these hints to ask the user before a side effect. Clients differ in how they use them. `run_scenario` keeps `destructiveHint: false`, because the server itself asks for `confirm_production: true` on each new production run. A run on a test target makes only test orders.
+8. **`tools/list` snapshot test.** A test stores the generated JSON of all tools. Any change to a description or schema shows in review as a diff.

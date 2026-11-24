@@ -87,8 +87,13 @@ async function manager(env: NodeJS.ProcessEnv): Promise<RunManager> {
   const registry = await ScenarioRegistry.load(config.scenario_dirs);
   const store = new RunStore(config.runs_dir);
   await store.init();
-  return new RunManager({ config, registry, store, logger: silentLogger, execute, env });
+  const m = new RunManager({ config, registry, store, logger: silentLogger, execute, env });
+  managers.push(m);
+  return m;
 }
+
+// Every manager that a test makes. afterEach waits until all of them are idle.
+const managers: RunManager[] = [];
 
 beforeEach(() => {
   dir = mkdtempSync(path.join(os.tmpdir(), 'ctm-when-'));
@@ -99,7 +104,9 @@ beforeEach(() => {
   writeFileSync(path.join(dir, 'scenarios/fragments/login.yaml'), LOGIN);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // The fake runner finishes at once. Wait for the background writes before the folder goes.
+  await Promise.all(managers.splice(0).map((m) => m.idle()));
   rmSync(dir, { recursive: true, force: true });
 });
 

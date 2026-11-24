@@ -1,6 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { toToolErrorResult } from '../errors/tool-error.js';
+import { isProductionTarget } from '../safety/hosts.js';
+import { PRODUCTION_WARNING } from '../safety/production.js';
 import { NextAction, ParamValue, RunId, RunStatus } from '../schemas/common.js';
 import { RunOptions } from '../schemas/run.js';
 import type { ServerDeps } from '../server.js';
@@ -21,6 +23,12 @@ export const RunScenarioInput = z.object({
     .regex(/^[A-Za-z0-9._:-]{8,128}$/)
     .describe('8 to 128 characters: letters, digits, ".", "_", ":", "-". Same key = same run.'),
   options: RunOptions.default({ timeout_multiplier: 1, capture: 'failure_only', trace: false }),
+  confirm_production: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Only for a production target: true after the user says yes to this run in this conversation. Never set it without that yes. It has no effect on a test target.',
+    ),
 });
 
 export const RunScenarioOutput = z.object({
@@ -31,16 +39,22 @@ export const RunScenarioOutput = z.object({
     .describe('True when this idempotency_key already had a run. No new checkout started.'),
   scenario_id: z.string(),
   target: z.string(),
+  environment: z.enum(['test', 'production']).describe('The environment of the target.'),
+  warning: z
+    .string()
+    .optional()
+    .describe('Only for a production target: the side effects of the run. Show it to the user.'),
   resolved_params: z.record(z.string(), ParamValue),
   estimated_duration_s: z.number().int(),
   next: NextAction.describe('Normally: call get_run_result with wait_s 20.'),
 });
 
 export const RUN_SCENARIO_DESCRIPTION = [
-  'Starts one checkout test scenario against a configured test environment and returns a run_id at once. The run continues in the background, usually for 30 to 180 seconds.',
+  'Starts one checkout test scenario against a configured target and returns a run_id at once. The run continues in the background, usually for 30 to 180 seconds.',
   'Then call get_run_result with the run_id to get progress and the final verdict. Do not call run_scenario again to check progress.',
   'idempotency_key is required: use the same key when you retry this call after a timeout or transport error, and the server returns the first run instead of starting a second checkout. Use a new key only when you want a new run, for example "pr-4812-3ds-fail-after-deploy".',
-  'target and scenario_id must come from list_scenarios. Only test environments from the server config are accepted, never URLs. Card params take test card ids, never card numbers.',
+  'target and scenario_id must come from list_scenarios. Only targets from the server config are accepted, never URLs. Card params take test card ids, never card numbers.',
+  'A production target (environment "production" in list_scenarios) can make a real order and a real payment. Show its warning to the user and ask before each new run. Only after the user says yes, set confirm_production: true. Without it, the server starts no run and returns PRODUCTION_CONFIRMATION_REQUIRED.',
 ].join(' ');
 
 export function registerRunScenario(server: McpServer, deps: ServerDeps): void {
@@ -61,7 +75,10 @@ export function registerRunScenario(server: McpServer, deps: ServerDeps): void {
           params: args.params,
           idempotency_key: args.idempotency_key,
           options: args.options,
+          confirm_production: args.confirm_production,
         });
+        const target = deps.config.targets[record.target];
+        const production = target !== undefined && isProductionTarget(target);
         const scenario = deps.registry.get(record.scenario_id)?.scenario;
         return jsonResult({
           run_id: record.run_id,
@@ -69,6 +86,8 @@ export function registerRunScenario(server: McpServer, deps: ServerDeps): void {
           reused_existing_run: reused,
           scenario_id: record.scenario_id,
           target: record.target,
+          environment: production ? 'production' : 'test',
+          ...(production ? { warning: PRODUCTION_WARNING } : {}),
           resolved_params: record.params,
           estimated_duration_s: 10 + (scenario?.steps.length ?? 0) * 4,
           next: {

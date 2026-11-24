@@ -1,0 +1,467 @@
+import { z } from 'zod';
+import { PRODUCTION_WARNING } from '../safety/production.js';
+import { ExpectedOutcome } from '../schemas/common.js';
+import type { CodeReport } from './code-scan.js';
+import type { SiteReport } from './crawl.js';
+import type { ProbeResult } from './probe.js';
+import type { Suggestion } from './suggest.js';
+
+export const INSPECTION_ID_PATTERN = /^insp_[A-Za-z0-9_-]{16}$/;
+/** The tool result stays under this many characters of JSON. The file on disk has the rest. */
+export const RESULT_CHAR_LIMIT = 40_000;
+
+export const InspectionId = z
+  .string()
+  .regex(INSPECTION_ID_PATTERN)
+  .describe('Inspection id, for example "insp_Q2x8LmN4pR7sTv0a".');
+
+const PageKind = z.enum(['home', 'listing', 'product', 'cart', 'login', 'checkout', 'result', 'other']);
+
+export const PageSnapshotSchema = z.object({
+  path_pattern: z.string().describe('URL path with ids and slugs as "*". No query.'),
+  url_path: z.string(),
+  kind: PageKind,
+  kind_reasons: z.array(z.string()),
+  title: z.string(),
+  headings: z.array(z.string()),
+  landmarks: z.array(z.string()),
+  elements: z.array(
+    z.object({
+      role: z.string(),
+      name: z.string(),
+      label: z.string().optional(),
+      test_id: z.string().optional(),
+      visible: z.boolean(),
+    }),
+  ),
+  forms: z.array(
+    z.object({
+      fields: z.array(
+        z.object({
+          label: z.string(),
+          type: z.string(),
+          autocomplete: z.string().optional(),
+          required: z.boolean(),
+        }),
+      ),
+    }),
+  ),
+  selects: z.array(z.object({ label: z.string(), options: z.array(z.string()) })),
+  iframes: z.array(z.object({ host: z.string(), title: z.string().optional() })),
+  dialogs: z.array(z.string()),
+});
+
+export const SiteReportSchema = z.object({
+  pages: z.array(PageSnapshotSchema),
+  api_calls: z.array(
+    z.object({
+      method: z.string(),
+      path_pattern: z.string(),
+      status: z.number(),
+      content_type: z.string(),
+      page_kind: PageKind,
+    }),
+  ),
+  blocked_hosts: z
+    .array(z.object({ host: z.string(), count: z.number().int() }))
+    .describe('Hosts that the guard blocked. Ask the user before you add one to third_party_hosts.'),
+});
+
+export const ProbeResultSchema = z.object({
+  reached: z.enum(['none', 'product', 'cart', 'checkout', 'payment']),
+  stopped_reason: z.enum([
+    'payment_step_reached',
+    'login_required',
+    'no_product',
+    'no_add_to_cart',
+    'no_checkout_button',
+    'form_not_understood',
+    'timeout',
+    'blocked_by_safety',
+    'verification_required',
+  ]),
+  steps: z.array(
+    z.object({
+      action: z.string(),
+      page_kind: PageKind,
+      url_path: z.string(),
+      result: z.enum(['done', 'skipped']),
+    }),
+  ),
+  dialogs: z.array(z.string()).describe('Dialogs that opened during the probe, by name or first line.'),
+  guest_option: z.boolean(),
+  payment: z
+    .object({
+      methods: z.array(z.string()),
+      card_form: z.boolean(),
+      card_iframe_hosts: z.array(z.string()),
+      card_frames: z
+        .array(z.object({ host: z.string(), title: z.string(), name: z.string().optional() }))
+        .describe(
+          'Card iframes, read from the iframe element on the payment page. A frame on a blocked host is listed too. Fill it with within: { frame: { css: "iframe[title=\'<title>\']" } }.',
+        ),
+      card_fields: z
+        .array(
+          z.object({
+            label: z.string().optional(),
+            placeholder: z.string().optional(),
+            autocomplete: z.string().optional(),
+            in_frame: z.boolean(),
+          }),
+        )
+        .describe(
+          'Card inputs by label, placeholder, and autocomplete. Never values. Fields in a frame on a blocked host are unknown.',
+        ),
+      test_card_select: z
+        .object({
+          label: z.string(),
+          options: z.array(
+            z.object({
+              text: z.string(),
+              value: z
+                .string()
+                .optional()
+                .describe('The option value. Missing when it is empty or looks like personal data.'),
+            }),
+          ),
+        })
+        .nullable(),
+      agreement_checkbox: z.string().nullable(),
+      pay_button: z.string().nullable(),
+    })
+    .nullable(),
+  side_effects: z.array(z.string()),
+});
+
+const Evidence = z.object({ name: z.string(), reason: z.string(), file: z.string() });
+
+export const CodeReportSchema = z.object({
+  frameworks: z.array(Evidence),
+  routes: z.array(z.object({ path: z.string(), file: z.string() })),
+  ui_strings: z.array(z.object({ key: z.string(), text: z.string(), file: z.string(), line: z.number() })),
+  test_ids: z.array(z.object({ value: z.string(), file: z.string(), line: z.number() })),
+  payment_hints: z.array(
+    z.object({ provider: z.string().nullable(), package: z.string(), file: z.string() }),
+  ),
+  otp_hints: z.array(z.object({ text: z.string(), file: z.string(), line: z.number() })),
+  stats: z.object({ files: z.number(), skipped: z.number(), truncated: z.boolean() }),
+  warnings: z.array(z.string()),
+});
+
+export const SuggestionSchema = z.object({
+  id: z.string().describe('Scenario id to use, for example "my-staging-guest-card".'),
+  title: z.string(),
+  expected_outcome: ExpectedOutcome,
+  baseline: z
+    .boolean()
+    .describe('True: write and run this scenario in the first setup with no question to the user.'),
+  why: z.string(),
+  evidence: z.array(z.string()).describe('Report paths that this suggestion rests on.'),
+  missing: z.array(z.string()).describe('Inputs that are missing. Ask the user for them.'),
+  card_source: z
+    .discriminatedUnion('kind', [
+      z.object({
+        kind: z.literal('site_select'),
+        option: z.string(),
+        value: z.string().optional(),
+      }),
+      z.object({ kind: z.literal('registry'), card_id: z.string() }),
+    ])
+    .nullable()
+    .describe(
+      'site_select: select this option in the site test card select. Use `value` as the select option when it is set, else the `option` text. registry: use this test card id in a test_card param.',
+    ),
+});
+
+export const InspectionStatus = z.enum(['queued', 'running', 'finished']);
+
+export const InspectionReport = z.object({
+  inspection_id: InspectionId,
+  target: z.string(),
+  status: InspectionStatus,
+  interrupted: z
+    .boolean()
+    .describe('True when the server stopped during the inspection. It was not repeated.'),
+  progress: z.string(),
+  site: SiteReportSchema.nullable().describe('null when scope is "code" or the crawl did not run.'),
+  checkout_probe: ProbeResultSchema.nullable().describe(
+    'null when the config does not allow the probe, or scope is "code".',
+  ),
+  code: CodeReportSchema.nullable().describe('null without source_dirs, or when scope is "site".'),
+  suggested_scenarios: z.array(SuggestionSchema),
+  warnings: z.array(z.string()),
+  side_effects: z.array(z.string()).describe('What the inspection made on the test site.'),
+  report_path: z.string().describe('The full report on disk. The tool result can be shorter.'),
+});
+export type InspectionReport = z.infer<typeof InspectionReport>;
+
+export const InspectionScope = z.enum(['site', 'code', 'both']);
+export type InspectionScope = z.infer<typeof InspectionScope>;
+
+/** The file on disk: the report plus the fields that make a key give the same inspection. */
+export const InspectionRecord = InspectionReport.extend({
+  idempotency_key: z.string(),
+  request_hash: z.string(),
+  scope: InspectionScope,
+  created_at: z.string(),
+  finished_at: z.string().nullable(),
+});
+export type InspectionRecord = z.infer<typeof InspectionRecord>;
+
+/**
+ * Keeps the compact JSON of the tool output under RESULT_CHAR_LIMIT characters.
+ * `wrap` makes the output object from the report, so the fields that the tool adds count too.
+ * It cuts the largest and least needed lists first: page elements, then UI strings,
+ * then API calls. Only if that is not enough, it cuts test ids, routes, OTP hints, and pages.
+ * The warning does not hold report_path, because that is an absolute path that is already in the output.
+ */
+export function trimForResult(
+  report: InspectionReport,
+  wrap: (r: InspectionReport) => object = (r) => r,
+): InspectionReport {
+  const size = (r: InspectionReport): number => JSON.stringify(wrap(r)).length;
+  if (size(report) <= RESULT_CHAR_LIMIT) return report;
+  const r = structuredClone(report);
+  const cut: string[] = [];
+  const clear = (has: () => boolean, empty: () => void) => () => {
+    if (!has()) return false;
+    empty();
+    return true;
+  };
+  const steps: [string, () => boolean][] = [
+    [
+      'site.pages[].elements',
+      clear(
+        () => !!r.site?.pages.some((p) => p.elements.length > 0),
+        () => {
+          for (const p of r.site?.pages ?? []) p.elements = [];
+        },
+      ),
+    ],
+    [
+      'code.ui_strings',
+      clear(
+        () => !!r.code?.ui_strings.length,
+        () => {
+          if (r.code) r.code.ui_strings = [];
+        },
+      ),
+    ],
+    [
+      'site.api_calls',
+      clear(
+        () => !!r.site?.api_calls.length,
+        () => {
+          if (r.site) r.site.api_calls = [];
+        },
+      ),
+    ],
+    [
+      'code.test_ids',
+      clear(
+        () => !!r.code?.test_ids.length,
+        () => {
+          if (r.code) r.code.test_ids = [];
+        },
+      ),
+    ],
+    [
+      'code.routes',
+      clear(
+        () => !!r.code?.routes.length,
+        () => {
+          if (r.code) r.code.routes = [];
+        },
+      ),
+    ],
+    [
+      'code.otp_hints',
+      clear(
+        () => !!r.code?.otp_hints.length,
+        () => {
+          if (r.code) r.code.otp_hints = [];
+        },
+      ),
+    ],
+  ];
+  const warningAt = r.warnings.length;
+  // Each size check runs after the warning text changes, so the warning counts in the size.
+  const setWarning = (extra?: string): void => {
+    const parts = extra ? [...cut, extra] : cut;
+    r.warnings[warningAt] =
+      `The tool result is shorter than the report. Cut: ${parts.join(', ') || 'nothing'}. Read a cut list with inspect_target, the same arguments, and section (${REPORT_SECTIONS.join(', ')}) with offset 0, then next_offset. The full report is also in the file at report_path.`;
+  };
+  for (const [name, apply] of steps) {
+    if (apply()) cut.push(name);
+    setWarning();
+    if (size(r) <= RESULT_CHAR_LIMIT) return r;
+  }
+  let pagesCut: string | undefined;
+  if (r.site && r.site.pages.length > 0) {
+    const total = r.site.pages.length;
+    // The page count is in the warning, so set the warning before each size check.
+    do {
+      r.site.pages.pop();
+      pagesCut = `site.pages after the first ${r.site.pages.length} of ${total}`;
+      setWarning(pagesCut);
+    } while (r.site.pages.length > 0 && size(r) > RESULT_CHAR_LIMIT);
+    if (size(r) <= RESULT_CHAR_LIMIT) return r;
+  }
+  // A report without site pages can still be too large, for example with many probe steps.
+  if (pagesCut) cut.push(pagesCut);
+  if (r.checkout_probe && r.checkout_probe.steps.length > 0) {
+    r.checkout_probe.steps = [];
+    cut.push('checkout_probe.steps');
+    setWarning();
+  }
+  return r;
+}
+
+export const REPORT_SECTIONS = [
+  'pages',
+  'api_calls',
+  'ui_strings',
+  'test_ids',
+  'routes',
+  'otp_hints',
+  'probe_steps',
+] as const;
+export const ReportSection = z.enum(REPORT_SECTIONS);
+export type ReportSection = z.infer<typeof ReportSection>;
+
+export const ReportSlice = z
+  .object({
+    section: ReportSection,
+    offset: z.number().int(),
+    total: z.number().int().describe('Number of items in the section of the full report.'),
+    items: z.array(z.record(z.string(), z.unknown())),
+    next_offset: z
+      .number()
+      .int()
+      .nullable()
+      .describe('Send this as offset to read the next items. null when no items are left.'),
+  })
+  .describe('One page of a list from the full stored report. Only with section.');
+export type ReportSlice = z.infer<typeof ReportSlice>;
+
+function sectionItems(report: InspectionReport, section: ReportSection): Record<string, unknown>[] {
+  switch (section) {
+    case 'pages':
+      return report.site?.pages ?? [];
+    case 'api_calls':
+      return report.site?.api_calls ?? [];
+    case 'ui_strings':
+      return report.code?.ui_strings ?? [];
+    case 'test_ids':
+      return report.code?.test_ids ?? [];
+    case 'routes':
+      return report.code?.routes ?? [];
+    case 'otp_hints':
+      return report.code?.otp_hints ?? [];
+    case 'probe_steps':
+      return report.checkout_probe?.steps ?? [];
+  }
+}
+
+/**
+ * One page of a list from the full report. The other report parts are left out, so the result
+ * holds as many items as fit under RESULT_CHAR_LIMIT. It always holds at least one item.
+ */
+export function sliceForResult(
+  report: InspectionReport,
+  section: ReportSection,
+  offset: number,
+  wrap: (r: InspectionReport, slice: ReportSlice) => object,
+): { report: InspectionReport; slice: ReportSlice } {
+  const all = sectionItems(report, section);
+  const head: InspectionReport = {
+    ...report,
+    site: null,
+    checkout_probe: null,
+    code: null,
+    suggested_scenarios: [],
+    side_effects: [],
+    warnings: [
+      // A slice of a production report keeps the production warning first. It counts in the size.
+      ...(report.warnings[0] === PRODUCTION_WARNING ? [PRODUCTION_WARNING] : []),
+      `This result holds only the section "${section}" of the report. Call inspect_target without section to get the other parts.`,
+    ],
+  };
+  const slice: ReportSlice = { section, offset, total: all.length, items: [], next_offset: null };
+  const fits = () => JSON.stringify(wrap(head, slice)).length <= RESULT_CHAR_LIMIT;
+  for (let i = offset; i < all.length; i++) {
+    const item = all[i];
+    if (item === undefined) break;
+    slice.items.push(item);
+    // The next action holds next_offset, so set it before each size check.
+    slice.next_offset = i + 1 < all.length ? i + 1 : null;
+    if (slice.items.length === 1) {
+      if (!fits()) cutFirstItem(head, slice, section, i, fits);
+      continue;
+    }
+    if (!fits()) {
+      slice.items.pop();
+      slice.next_offset = i;
+      break;
+    }
+  }
+  return { report: head, slice };
+}
+
+/** Every list inside a value, with a path for the warning, for example "elements" or "forms[0].fields". */
+function listsOf(value: unknown, at = ''): { path: string; list: unknown[] }[] {
+  if (Array.isArray(value)) {
+    return [{ path: at, list: value }, ...value.flatMap((v, i) => listsOf(v, `${at}[${i}]`))];
+  }
+  if (value && typeof value === 'object') {
+    return Object.entries(value).flatMap(([k, v]) => listsOf(v, at ? `${at}.${k}` : k));
+  }
+  return [];
+}
+
+/**
+ * Cuts the lists of the only item in a slice until the result fits. The longest list loses half
+ * of its entries each time. The warning names each cut list with the count that is left.
+ * The stored report keeps the full item.
+ */
+function cutFirstItem(
+  head: InspectionReport,
+  slice: ReportSlice,
+  section: ReportSection,
+  index: number,
+  fits: () => boolean,
+): void {
+  const copy = structuredClone(slice.items[0]) as Record<string, unknown>;
+  slice.items[0] = copy;
+  const totals = new Map<string, number>();
+  const note = `The item ${index} of "${section}" is larger than the cap, so its lists are cut in this result. The full item is in the file at report_path.`;
+  head.warnings.push(note);
+  const setNote = () => {
+    const cuts = [...totals].map(([p, total]) => {
+      const left = listsOf(copy).find((l) => l.path === p)?.list.length ?? 0;
+      return `${p} to ${left} of ${total}`;
+    });
+    head.warnings[head.warnings.length - 1] = `${note} Cut: ${cuts.join(', ')}.`;
+  };
+  while (!fits()) {
+    const longest = listsOf(copy)
+      .filter((l) => l.path !== '' && l.list.length > 0)
+      .sort((a, b) => JSON.stringify(b.list).length - JSON.stringify(a.list).length)[0];
+    if (!longest) break;
+    if (!totals.has(longest.path)) totals.set(longest.path, longest.list.length);
+    longest.list.length = Math.floor(longest.list.length / 2);
+    setNote();
+  }
+}
+
+/** True only when A and B are the same type. */
+type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+
+// Compile-time links between the report schemas and the types that the phases return.
+// A change to one side without the other fails `npm run typecheck`.
+export const SCHEMA_TYPES_MATCH: {
+  site: Equals<z.infer<typeof SiteReportSchema>, SiteReport>;
+  probe: Equals<z.infer<typeof ProbeResultSchema>, ProbeResult>;
+  code: Equals<z.infer<typeof CodeReportSchema>, CodeReport>;
+  suggestion: Equals<z.infer<typeof SuggestionSchema>, Suggestion>;
+} = { site: true, probe: true, code: true, suggestion: true };

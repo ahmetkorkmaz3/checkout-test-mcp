@@ -2,7 +2,7 @@
   {
     "name": "list_scenarios",
     "title": "List checkout test scenarios",
-    "description": "Lists the checkout and payment test scenarios this server can run, the targets (test environments) they can run against, and the test cards you can use. Call this first, before run_scenario, to get valid values for scenario_id, target, and params. Each scenario lists its params with type, default, and description. Params of type \"test_card\" take an id from the test_cards list, never a card number. This tool is read-only and fast.",
+    "description": "Lists the checkout and payment test scenarios this server can run, the targets (test or production environments) they can run against, and the test cards you can use. Call this first, before run_scenario, to get valid values for scenario_id, target, and params. Each scenario lists its params with type, default, and description. Params of type \"test_card\" take an id from the test_cards list, never a card number. On a production target, a \"test_card\" param also takes a \"live/<name>\" id from targets[].live_cards of that target. A production target has a warning: show it to the user before a run. This tool is read-only and fast.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -40,13 +40,59 @@
               },
               "base_url": {
                 "type": "string"
+              },
+              "environment": {
+                "type": "string",
+                "enum": [
+                  "test",
+                  "production"
+                ],
+                "description": "\"production\" is a live site. Each new run there needs the yes of the user."
+              },
+              "warning": {
+                "description": "Only for a production target: the side effects of a run. Show it to the user.",
+                "type": "string"
+              },
+              "live_cards": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "behaviour": {
+                      "type": "string",
+                      "enum": [
+                        "success",
+                        "challenge_required",
+                        "frictionless_3ds",
+                        "declined_generic",
+                        "declined_insufficient_funds",
+                        "declined_expired"
+                      ]
+                    },
+                    "description": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "behaviour",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                },
+                "description": "Only on a production target: live card ids for a test_card param. The number comes from env vars and never shows."
               }
             },
             "required": [
               "name",
               "description",
               "profile",
-              "base_url"
+              "base_url",
+              "environment",
+              "live_cards"
             ],
             "additionalProperties": false
           }
@@ -223,7 +269,7 @@
   {
     "name": "run_scenario",
     "title": "Start a checkout test run",
-    "description": "Starts one checkout test scenario against a configured test environment and returns a run_id at once. The run continues in the background, usually for 30 to 180 seconds. Then call get_run_result with the run_id to get progress and the final verdict. Do not call run_scenario again to check progress. idempotency_key is required: use the same key when you retry this call after a timeout or transport error, and the server returns the first run instead of starting a second checkout. Use a new key only when you want a new run, for example \"pr-4812-3ds-fail-after-deploy\". target and scenario_id must come from list_scenarios. Only test environments from the server config are accepted, never URLs. Card params take test card ids, never card numbers.",
+    "description": "Starts one checkout test scenario against a configured target and returns a run_id at once. The run continues in the background, usually for 30 to 180 seconds. Then call get_run_result with the run_id to get progress and the final verdict. Do not call run_scenario again to check progress. idempotency_key is required: use the same key when you retry this call after a timeout or transport error, and the server returns the first run instead of starting a second checkout. Use a new key only when you want a new run, for example \"pr-4812-3ds-fail-after-deploy\". target and scenario_id must come from list_scenarios. Only targets from the server config are accepted, never URLs. Card params take test card ids, never card numbers. A production target (environment \"production\" in list_scenarios) can make a real order and a real payment. Show its warning to the user and ask before each new run. Only after the user says yes, set confirm_production: true. Without it, the server starts no run and returns PRODUCTION_CONFIRMATION_REQUIRED.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -287,6 +333,11 @@
               "type": "boolean"
             }
           }
+        },
+        "confirm_production": {
+          "default": false,
+          "description": "Only for a production target: true after the user says yes to this run in this conversation. Never set it without that yes. It has no effect on a test target.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -320,6 +371,18 @@
           "type": "string"
         },
         "target": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string",
+          "enum": [
+            "test",
+            "production"
+          ],
+          "description": "The environment of the target."
+        },
+        "warning": {
+          "description": "Only for a production target: the side effects of the run. Show it to the user.",
           "type": "string"
         },
         "resolved_params": {
@@ -388,6 +451,7 @@
         "reused_existing_run",
         "scenario_id",
         "target",
+        "environment",
         "resolved_params",
         "estimated_duration_s",
         "next"
@@ -1143,6 +1207,1286 @@
       "readOnlyHint": true,
       "idempotentHint": true,
       "openWorldHint": false
+    }
+  },
+  {
+    "name": "save_scenario",
+    "title": "Save a scenario file",
+    "description": "Writes one scenario, fragment, or test data YAML file that you wrote, after the server checks it. The path is relative to the authoring folder of the server config (test data: the test data folder). The server adds the schema line and schema_version, validates the schema, and loads all scenario folders with the new file as a trial. It refuses literal emails, phones, and passwords, and weak outcome checks. A rule failure is SCENARIO_INVALID with every issue in details.issues. Other refusals: REAL_CARD_DATA_REFUSED (a card number), SECRET_IN_ARGUMENTS (a secret), PATH_REFUSED, SCENARIO_EXISTS, AUTHORING_DISABLED. A refusal writes nothing. Saving the same content again is safe and returns unchanged: true. To change a file, set overwrite: true. validate_on starts a run of the saved scenario on a test target. Then call get_run_result with the run_id. The same file, fragments, target, and params give the same run.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "scenario",
+            "fragment",
+            "test_data"
+          ],
+          "description": "\"scenario\" for a runnable scenario, \"fragment\" for reusable steps (kind: fragment), \"test_data\" for a data file such as customers/guest.yaml."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Relative path with lowercase letters, digits, and hyphens, ending in \".yaml\", for example \"guest/card-success.yaml\". Scenarios and fragments are relative to the authoring folder. Test data is relative to the test data folder. No \"..\", no absolute path."
+        },
+        "yaml": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536,
+          "description": "The full file text. Max 65536 characters."
+        },
+        "overwrite": {
+          "default": false,
+          "description": "Set to true to replace a file that exists with different content.",
+          "type": "boolean"
+        },
+        "validate_on": {
+          "description": "Only for kind \"scenario\". Starts a run of the saved scenario on this target.",
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Target name from list_scenarios.targets. Never a URL."
+            },
+            "params": {
+              "description": "Scenario params for the validation run. Omit a param to use its default.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            }
+          },
+          "required": [
+            "target"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "path",
+        "yaml"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The relative path of the file."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "scenario",
+            "fragment",
+            "test_data"
+          ]
+        },
+        "scenario_id": {
+          "description": "The scenario id. null for a fragment or test data.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "written": {
+          "type": "boolean",
+          "description": "True when the server wrote the file in this call."
+        },
+        "unchanged": {
+          "type": "boolean",
+          "description": "True when the file already had this content. A retry after a lost response is safe."
+        },
+        "fixes_applied": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Changes that the server made to the text before the write."
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "rule": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "error",
+                  "warning"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "description": "YAML path, for example \"steps.3.click\"."
+              },
+              "message": {
+                "type": "string"
+              },
+              "fix": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rule",
+              "severity",
+              "path",
+              "message",
+              "fix"
+            ],
+            "additionalProperties": false
+          },
+          "description": "Rule issues that did not stop the save. Fix them in a later save."
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "run_id": {
+                  "type": "string",
+                  "pattern": "^run_[A-Za-z0-9_-]{16}$",
+                  "description": "Run id returned by run_scenario, for example \"run_8fK2mQ9xLp3vTz1a\"."
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "queued",
+                    "running",
+                    "finished"
+                  ]
+                },
+                "reused_existing_run": {
+                  "type": "boolean",
+                  "description": "True when the same file, fragments, target, and params already had a validation run."
+                }
+              },
+              "required": [
+                "run_id",
+                "status",
+                "reused_existing_run"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The validation run. null without validate_on."
+        },
+        "next": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "call_tool",
+                "change_argument",
+                "wait_and_retry",
+                "fix_scenario",
+                "treat_as_regression",
+                "ask_human"
+              ]
+            },
+            "description": {
+              "type": "string",
+              "description": "One sentence the agent can act on."
+            },
+            "tool": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "after_s": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "kind",
+            "description"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "scenario_id",
+        "written",
+        "unchanged",
+        "fixes_applied",
+        "warnings",
+        "validation",
+        "next"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "inspect_target",
+    "title": "Inspect a test target",
+    "description": "Inspects a configured target and suggests checkout test scenarios with the evidence for each. It reads the site pages and API calls through the host guard, and it reads the shop source code when the target config has inspect.source_dirs. Only when the target config has inspect.probe_checkout: true, a checkout probe goes up to the payment step with fictional test data. It never pays and never sends a phone number for a code. Side effects of the probe on the test site: a cart item, a guest account with an example.test email, an address, and possibly an unpaid order draft. The report lists them in side_effects. The call starts a background job and waits up to wait_s seconds. While status is not \"finished\", call inspect_target again with the same target, idempotency_key, and scope. The same key never starts a second inspection, also after a restart. On a production target, warnings[0] is the production warning. Show it to the user. The probe there acts on the live site. Read warnings and suggested_scenarios[].missing to know what to ask the user. Then write the baseline scenarios and save each with save_scenario. When a warning says that the result is cut, call inspect_target again with the same target, key, and scope, plus section and offset, to read the cut list in pages. section and offset only read: they never start an inspection.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Target name from list_scenarios.targets, for example \"my-staging\". Never a URL."
+        },
+        "idempotency_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{8,128}$",
+          "description": "8 to 128 characters: letters, digits, \".\", \"_\", \":\", \"-\". Same key = same inspection, for example \"setup-my-staging-01\"."
+        },
+        "scope": {
+          "default": "both",
+          "description": "\"site\" reads the site only. \"code\" reads the source folders only. \"both\" (default) reads both.",
+          "type": "string",
+          "enum": [
+            "site",
+            "code",
+            "both"
+          ]
+        },
+        "wait_s": {
+          "default": 20,
+          "description": "Seconds to wait for the inspection to finish before the call returns. 0 to 20.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "section": {
+          "description": "Only to read a list that the result cut: \"pages\", \"api_calls\", \"ui_strings\", \"test_ids\", \"routes\", \"otp_hints\", or \"probe_steps\". Needs a key that already has an inspection. The result then holds only that list.",
+          "type": "string",
+          "enum": [
+            "pages",
+            "api_calls",
+            "ui_strings",
+            "test_ids",
+            "routes",
+            "otp_hints",
+            "probe_steps"
+          ]
+        },
+        "offset": {
+          "default": 0,
+          "description": "With section: the first item to return. Start with 0, then send next_offset.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "target",
+        "idempotency_key"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "inspection_id": {
+          "type": "string",
+          "pattern": "^insp_[A-Za-z0-9_-]{16}$",
+          "description": "Inspection id, for example \"insp_Q2x8LmN4pR7sTv0a\"."
+        },
+        "target": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "running",
+            "finished"
+          ]
+        },
+        "interrupted": {
+          "type": "boolean",
+          "description": "True when the server stopped during the inspection. It was not repeated."
+        },
+        "progress": {
+          "type": "string"
+        },
+        "site": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "pages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path_pattern": {
+                        "type": "string",
+                        "description": "URL path with ids and slugs as \"*\". No query."
+                      },
+                      "url_path": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "home",
+                          "listing",
+                          "product",
+                          "cart",
+                          "login",
+                          "checkout",
+                          "result",
+                          "other"
+                        ]
+                      },
+                      "kind_reasons": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "headings": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "landmarks": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "elements": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "role": {
+                              "type": "string"
+                            },
+                            "name": {
+                              "type": "string"
+                            },
+                            "label": {
+                              "type": "string"
+                            },
+                            "test_id": {
+                              "type": "string"
+                            },
+                            "visible": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "role",
+                            "name",
+                            "visible"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "forms": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "fields": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": {
+                                    "type": "string"
+                                  },
+                                  "type": {
+                                    "type": "string"
+                                  },
+                                  "autocomplete": {
+                                    "type": "string"
+                                  },
+                                  "required": {
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": [
+                                  "label",
+                                  "type",
+                                  "required"
+                                ],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": [
+                            "fields"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "selects": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "label": {
+                              "type": "string"
+                            },
+                            "options": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "required": [
+                            "label",
+                            "options"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "iframes": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "host": {
+                              "type": "string"
+                            },
+                            "title": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "host"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "dialogs": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "path_pattern",
+                      "url_path",
+                      "kind",
+                      "kind_reasons",
+                      "title",
+                      "headings",
+                      "landmarks",
+                      "elements",
+                      "forms",
+                      "selects",
+                      "iframes",
+                      "dialogs"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "api_calls": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "method": {
+                        "type": "string"
+                      },
+                      "path_pattern": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "number"
+                      },
+                      "content_type": {
+                        "type": "string"
+                      },
+                      "page_kind": {
+                        "type": "string",
+                        "enum": [
+                          "home",
+                          "listing",
+                          "product",
+                          "cart",
+                          "login",
+                          "checkout",
+                          "result",
+                          "other"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "method",
+                      "path_pattern",
+                      "status",
+                      "content_type",
+                      "page_kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "blocked_hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "host": {
+                        "type": "string"
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "host",
+                      "count"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "description": "Hosts that the guard blocked. Ask the user before you add one to third_party_hosts."
+                }
+              },
+              "required": [
+                "pages",
+                "api_calls",
+                "blocked_hosts"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null when scope is \"code\" or the crawl did not run."
+        },
+        "checkout_probe": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reached": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "product",
+                    "cart",
+                    "checkout",
+                    "payment"
+                  ]
+                },
+                "stopped_reason": {
+                  "type": "string",
+                  "enum": [
+                    "payment_step_reached",
+                    "login_required",
+                    "no_product",
+                    "no_add_to_cart",
+                    "no_checkout_button",
+                    "form_not_understood",
+                    "timeout",
+                    "blocked_by_safety",
+                    "verification_required"
+                  ]
+                },
+                "steps": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string"
+                      },
+                      "page_kind": {
+                        "type": "string",
+                        "enum": [
+                          "home",
+                          "listing",
+                          "product",
+                          "cart",
+                          "login",
+                          "checkout",
+                          "result",
+                          "other"
+                        ]
+                      },
+                      "url_path": {
+                        "type": "string"
+                      },
+                      "result": {
+                        "type": "string",
+                        "enum": [
+                          "done",
+                          "skipped"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "page_kind",
+                      "url_path",
+                      "result"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "dialogs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Dialogs that opened during the probe, by name or first line."
+                },
+                "guest_option": {
+                  "type": "boolean"
+                },
+                "payment": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "methods": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "card_form": {
+                          "type": "boolean"
+                        },
+                        "card_iframe_hosts": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "card_frames": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "host": {
+                                "type": "string"
+                              },
+                              "title": {
+                                "type": "string"
+                              },
+                              "name": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "host",
+                              "title"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "description": "Card iframes, read from the iframe element on the payment page. A frame on a blocked host is listed too. Fill it with within: { frame: { css: \"iframe[title='<title>']\" } }."
+                        },
+                        "card_fields": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "label": {
+                                "type": "string"
+                              },
+                              "placeholder": {
+                                "type": "string"
+                              },
+                              "autocomplete": {
+                                "type": "string"
+                              },
+                              "in_frame": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "in_frame"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "description": "Card inputs by label, placeholder, and autocomplete. Never values. Fields in a frame on a blocked host are unknown."
+                        },
+                        "test_card_select": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "label": {
+                                  "type": "string"
+                                },
+                                "options": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "text": {
+                                        "type": "string"
+                                      },
+                                      "value": {
+                                        "description": "The option value. Missing when it is empty or looks like personal data.",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": [
+                                      "text"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                }
+                              },
+                              "required": [
+                                "label",
+                                "options"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "agreement_checkbox": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "pay_button": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "methods",
+                        "card_form",
+                        "card_iframe_hosts",
+                        "card_frames",
+                        "card_fields",
+                        "test_card_select",
+                        "agreement_checkbox",
+                        "pay_button"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "side_effects": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "reached",
+                "stopped_reason",
+                "steps",
+                "dialogs",
+                "guest_option",
+                "payment",
+                "side_effects"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null when the config does not allow the probe, or scope is \"code\"."
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "frameworks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "reason": {
+                        "type": "string"
+                      },
+                      "file": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "reason",
+                      "file"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "routes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "file": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "file"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "ui_strings": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "file": {
+                        "type": "string"
+                      },
+                      "line": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "text",
+                      "file",
+                      "line"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "test_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "value": {
+                        "type": "string"
+                      },
+                      "file": {
+                        "type": "string"
+                      },
+                      "line": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "value",
+                      "file",
+                      "line"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "payment_hints": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "provider": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "package": {
+                        "type": "string"
+                      },
+                      "file": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "provider",
+                      "package",
+                      "file"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "otp_hints": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "type": "string"
+                      },
+                      "file": {
+                        "type": "string"
+                      },
+                      "line": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "text",
+                      "file",
+                      "line"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "stats": {
+                  "type": "object",
+                  "properties": {
+                    "files": {
+                      "type": "number"
+                    },
+                    "skipped": {
+                      "type": "number"
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "files",
+                    "skipped",
+                    "truncated"
+                  ],
+                  "additionalProperties": false
+                },
+                "warnings": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "frameworks",
+                "routes",
+                "ui_strings",
+                "test_ids",
+                "payment_hints",
+                "otp_hints",
+                "stats",
+                "warnings"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null without source_dirs, or when scope is \"site\"."
+        },
+        "suggested_scenarios": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Scenario id to use, for example \"my-staging-guest-card\"."
+              },
+              "title": {
+                "type": "string"
+              },
+              "expected_outcome": {
+                "type": "string",
+                "enum": [
+                  "order_placed",
+                  "payment_declined",
+                  "validation_error",
+                  "custom"
+                ]
+              },
+              "baseline": {
+                "type": "boolean",
+                "description": "True: write and run this scenario in the first setup with no question to the user."
+              },
+              "why": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Report paths that this suggestion rests on."
+              },
+              "missing": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Inputs that are missing. Ask the user for them."
+              },
+              "card_source": {
+                "anyOf": [
+                  {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "site_select"
+                          },
+                          "option": {
+                            "type": "string"
+                          },
+                          "value": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "option"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "registry"
+                          },
+                          "card_id": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "card_id"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "site_select: select this option in the site test card select. Use `value` as the select option when it is set, else the `option` text. registry: use this test card id in a test_card param."
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "expected_outcome",
+              "baseline",
+              "why",
+              "evidence",
+              "missing",
+              "card_source"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "side_effects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What the inspection made on the test site."
+        },
+        "report_path": {
+          "type": "string",
+          "description": "The full report on disk. The tool result can be shorter."
+        },
+        "reused_existing_inspection": {
+          "type": "boolean",
+          "description": "True when this idempotency_key already had an inspection. No new inspection started."
+        },
+        "slice": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "section": {
+                  "type": "string",
+                  "enum": [
+                    "pages",
+                    "api_calls",
+                    "ui_strings",
+                    "test_ids",
+                    "routes",
+                    "otp_hints",
+                    "probe_steps"
+                  ]
+                },
+                "offset": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                "total": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "Number of items in the section of the full report."
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  }
+                },
+                "next_offset": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Send this as offset to read the next items. null when no items are left."
+                }
+              },
+              "required": [
+                "section",
+                "offset",
+                "total",
+                "items",
+                "next_offset"
+              ],
+              "additionalProperties": false,
+              "description": "One page of a list from the full stored report. Only with section."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null without section. With section: one page of that list. site, checkout_probe, and code are then null."
+        },
+        "next": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "call_tool",
+                "change_argument",
+                "wait_and_retry",
+                "fix_scenario",
+                "treat_as_regression",
+                "ask_human"
+              ]
+            },
+            "description": {
+              "type": "string",
+              "description": "One sentence the agent can act on."
+            },
+            "tool": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "after_s": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "kind",
+            "description"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "inspection_id",
+        "target",
+        "status",
+        "interrupted",
+        "progress",
+        "site",
+        "checkout_probe",
+        "code",
+        "suggested_scenarios",
+        "warnings",
+        "side_effects",
+        "report_path",
+        "reused_existing_inspection",
+        "slice",
+        "next"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     }
   }
 ]

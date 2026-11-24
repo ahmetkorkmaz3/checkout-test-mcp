@@ -1,8 +1,10 @@
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ToolError } from '../../src/errors/tool-error.js';
 import { globToRegExp, statusMatches } from '../../src/runner/match.js';
-import { resolveParams } from '../../src/scenarios/params.js';
+import { type RunCard, resolveParams } from '../../src/scenarios/params.js';
 import { parseScenario, ScenarioRegistry } from '../../src/scenarios/registry.js';
 import { collectTokens, renderDeep, renderString, TemplateError } from '../../src/scenarios/template.js';
 
@@ -76,6 +78,49 @@ describe('params', () => {
     expect(() => resolveParams(scenario, { nope: 1 })).toThrow(/has no param "nope"/);
     expect(() => resolveParams(scenario, { card: 'stripe/declined-generic' })).toThrow(/needs "success"/);
   });
+
+  describe('live cards', () => {
+    // Placeholder values. The run manager puts the env values in after this check.
+    const live = (behaviour: RunCard['behaviour']): Record<string, RunCard> => ({
+      'live/company-visa': {
+        id: 'live/company-visa',
+        provider: 'live',
+        brand: 'unknown',
+        number: '',
+        expiry: '',
+        cvc: '',
+        behaviour,
+        description: 'Company card.',
+      },
+    });
+
+    it('resolves a live card id to the live card', () => {
+      const r = resolveParams(scenario, { card: 'live/company-visa' }, live('success'));
+      expect(r.values.card).toBe('live/company-visa');
+      expect(r.cards.card?.id).toBe('live/company-visa');
+    });
+
+    it('refuses an unknown live card name', () => {
+      expect(() => resolveParams(scenario, { card: 'live/nope' }, live('success'))).toThrow(
+        expect.objectContaining({ code: 'INVALID_PARAMS' }),
+      );
+    });
+
+    it('refuses a live card without live cards for the target', () => {
+      expect(() => resolveParams(scenario, { card: 'live/company-visa' })).toThrow(
+        expect.objectContaining({
+          code: 'INVALID_PARAMS',
+          message: expect.stringMatching(/need a production target/),
+        }),
+      );
+    });
+
+    it('applies the behaviour constraint to a live card', () => {
+      expect(() => resolveParams(scenario, { card: 'live/company-visa' }, live('declined_generic'))).toThrow(
+        /needs "success"/,
+      );
+    });
+  });
 });
 
 describe('template', () => {
@@ -108,5 +153,88 @@ describe('match helpers', () => {
     expect(statusMatches(201, '2xx')).toBe(true);
     expect(statusMatches(402, '2xx')).toBe(false);
     expect(statusMatches(201, 201)).toBe(true);
+  });
+});
+
+describe('registry trial load and swap', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'reg-'));
+  const fragFile = path.join(tmp, 'frag', 'f.yaml');
+  mkdirSync(path.dirname(fragFile));
+  writeFileSync(
+    fragFile,
+    'schema_version: 1\nkind: fragment\nid: f\ndescription: d\nsteps:\n  - id: g\n    title: G\n    goto: /\n',
+  );
+  writeFileSync(
+    path.join(tmp, 'inc.yaml'),
+    MINIMAL.replace('id: s', 'id: inc').replace('goto: /', 'include: frag/f.yaml'),
+  );
+
+  it('trial load uses override text and a new file', async () => {
+    const file = path.join(tmp, 'new.yaml');
+    const reg = await ScenarioRegistry.load([tmp], {
+      overrides: new Map([[file, MINIMAL.replace('id: s', 'id: added')]]),
+    });
+    expect(reg.ids()).toContain('added');
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it('trial load sees a broken fragment override in an including scenario', async () => {
+    await expect(
+      ScenarioRegistry.load([tmp], { overrides: new Map([[fragFile, 'kind: fragment\nsteps: 7']]) }),
+    ).rejects.toThrow(/invalid fragment/);
+  });
+
+  it('trial load drops a file with a null override', async () => {
+    const reg = await ScenarioRegistry.load([tmp], {
+      overrides: new Map([[path.join(tmp, 'inc.yaml'), null]]),
+    });
+    expect(reg.ids()).not.toContain('inc');
+  });
+
+  const FRAG = (goto: string) =>
+    `schema_version: 1\nkind: fragment\nid: f\ndescription: d\nsteps:\n  - id: g\n    title: G\n    goto: ${goto}\n`;
+  const gotoOf = (reg: ScenarioRegistry, id: string) =>
+    (reg.get(id)?.scenario.steps[0] as { goto?: string } | undefined)?.goto;
+
+  it('a valid fragment override changes the including scenario and its hash', async () => {
+    const plain = await ScenarioRegistry.load([tmp]);
+    const reg = await ScenarioRegistry.load([tmp], { overrides: new Map([[fragFile, FRAG('/other')]]) });
+    expect(gotoOf(plain, 'inc')).toBe('/');
+    expect(gotoOf(reg, 'inc')).toBe('/other');
+    expect(reg.get('inc')?.hash).not.toBe(plain.get('inc')?.hash);
+  });
+
+  it('an including scenario loads a fragment that exists only in overrides', async () => {
+    const newFrag = path.join(tmp, 'frag', 'only.yaml');
+    const user = path.join(tmp, 'user.yaml');
+    const reg = await ScenarioRegistry.load([tmp], {
+      overrides: new Map([
+        [newFrag, FRAG('/new')],
+        [user, MINIMAL.replace('id: s', 'id: user').replace('goto: /', 'include: frag/only.yaml')],
+      ]),
+    });
+    expect(gotoOf(reg, 'user')).toBe('/new');
+    expect(existsSync(newFrag)).toBe(false);
+  });
+
+  it('a null fragment override makes the include fail', async () => {
+    await expect(ScenarioRegistry.load([tmp], { overrides: new Map([[fragFile, null]]) })).rejects.toThrow(
+      /does not exist/,
+    );
+  });
+
+  it('matches overrides when the dir is relative', async () => {
+    const rel = path.relative(process.cwd(), tmp);
+    const reg = await ScenarioRegistry.load([rel], {
+      overrides: new Map([[path.join(tmp, 'inc.yaml'), MINIMAL.replace('id: s', 'id: renamed')]]),
+    });
+    expect(reg.ids()).toContain('renamed');
+    expect(reg.ids()).not.toContain('inc');
+  });
+
+  it('swap changes what an existing holder sees', async () => {
+    const reg = await ScenarioRegistry.load([tmp]);
+    reg.swap(ScenarioRegistry.fromLoaded([]));
+    expect(reg.ids()).toEqual([]);
   });
 });

@@ -132,8 +132,18 @@ targets:
     secrets: # name in scenario -> env var name
       basic_auth_user: STAGING_BASIC_USER
       basic_auth_pass: STAGING_BASIC_PASS
+    inspect: # optional. Settings for inspect_target. All fields have defaults.
+      source_dirs: [../my-storefront] # read-only code scan. Relative to this file.
+      start_paths: ["/"] # crawl seeds
+      product_paths: [] # optional hint: product pages to try first
+      max_pages: 25 # 1..100
+      probe_checkout: false # true lets the probe click add-to-cart and checkout, never pay
 
-production_hosts: # always refused, even if listed above
+authoring: # optional. Without it, save_scenario refuses with AUTHORING_DISABLED.
+  dir: ./scenarios/local # must be inside one of scenario_dirs
+  test_data_dir_writable: false # true lets save_scenario write test data files
+
+production_hosts: # refused for test targets, even if listed above. See section 12.
   - example-shop.com
   - www.example-shop.com
 ```
@@ -260,13 +270,21 @@ get_run_result ◄── reads run record from disk (optional long poll, max 20 
 
 The server refuses before it starts a browser. The browser layer enforces the same rules again during the run.
 
-1. **Host allowlist.** Every request from the page goes through `context.route('**/*')`. A request to a host outside `allowed_hosts` and `third_party_hosts` is aborted. A top-level navigation to such a host stops the run with verdict `blocked`.
+1. **Host allowlist.** The host guard has two layers. A request must pass both. A top-level navigation to a blocked host stops the run with verdict `blocked`.
+   - **Route layer (URL level, first hops).** Every request that Playwright routes goes through `context.route('**/*')`. The guard checks the full URL against `allowed_hosts` and `third_party_hosts`. It aborts a request outside the allowlist with `blockedbyclient` and calls `onBlocked` with the frame. It lets an allowed request go on with `route.continue()`. Playwright routes only the first URL of a redirect chain, so this layer never sees a redirect hop.
+   - **Proxy layer (host level, every request).** Each guarded browser uses its own forward proxy on `127.0.0.1` with a random port (`src/runner/guard-proxy.ts`). Every request of the browser goes through it, also each redirect hop, image, and stream. The bypass list is `<-loopback>`, so the proxy also checks `localhost` and `127.0.0.1`. The proxy applies the same host rule as the route layer (`isHostAllowed`): `allowed_hosts` and `third_party_hosts`, never `production_hosts`. It forwards an allowed plain http request. It tunnels an allowed CONNECT request without TLS interception. It answers 403 to any other host, so that host never gets a request. It calls `onBlocked` without a frame. A blocked CONNECT tunnel, also for a WebSocket, shows in `blocked_requests` as `https://<host>:<port>/` (no port for 443), because a tunnel has no path and no scheme. The runner lists each blocked URL once for each step. `close()` of the guarded context also closes the proxy, its open upstream connections, and its connection pool.
+   - **WebRTC.** WebRTC sends UDP, for example to a STUN server, past an HTTP proxy. The browser starts with `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`, so it sends no UDP that the proxy does not carry.
+   - **Blocked redirects in a run.** The runner marks a main-frame navigation to a host outside the allowlist from the browser `request` event, because a proxy block has no frame. A blocked redirect of the run page thus ends with verdict `blocked`, and `blocked_requests` shows the redirect target. A 403 response or a failed request of a blocked host is not a network failure of the site.
+   - **Unreachable hosts.** If the proxy cannot reach an allowed http host (for example connection refused or a DNS failure), it answers 502 with the header `x-checkout-test-guard-error`. The header value is a random token for each proxy. The proxy removes that header from every site response. The runner reads a 502 with the right token as `target_unreachable`, so a site cannot fake this error. A failed CONNECT tunnel shows as `ERR_TUNNEL_CONNECTION_FAILED`, which is also `target_unreachable` unless the host was blocked.
+   - **Basic auth.** The context gets `http_credentials` with `origin` set to the origin of `base_url`. The browser sends the credentials to that origin only, also after a same-host redirect. Other hosts in `allowed_hosts` do not get them. A third-party host never gets them, also when it asks for them.
+   - **Inspections.** The crawl skips a link that redirects to a blocked host, and it does not read the 403 page of the proxy. The probe stops with `blocked_by_safety` when its page goes to a blocked host. That covers a redirect that the proxy layer blocks, and a main-frame navigation that the route layer aborts, for example a script that sets `location` to an outside host. It does no action on that page.
+   - **Blocked URLs.** The guard removes a user name and password from a blocked URL. `redactQuery` also removes them before a URL goes into a result.
 2. **Production check.** A target host must satisfy one of these:
    - It is `localhost`, `127.0.0.1`, `[::1]`, `*.localhost`, or `*.test`.
    - One host label starts with `staging`, `stage`, `stg`, `test`, `qa`, `dev`, `sandbox`, `preview`, or `uat`.
    - The target sets `allow_unlabeled_host: true`, and `production_hosts` in the config is not empty.
 
-   A host in `production_hosts` is always refused. This check runs at config load and again for each run.
+   A host in `production_hosts` is always refused for a test target. This check runs at config load and again for each run. A production target skips this check. See section 12.
 3. **Card guard.** Card values come only from `src/safety/test-cards.ts`. Each entry has the provider, the published source URL, and the behaviour. Before each `fill`, the runner checks the value. A Luhn-valid 13 to 19 digit number that is not in the registry stops the run with verdict `blocked`. The same check runs on all tool arguments.
 4. **Secrets.** Secrets come from env vars named in the config. Tool arguments that look like secrets (`sk_live_`, `Bearer `, `password=`, a value equal to a known secret) are refused with `SECRET_IN_ARGUMENTS`. The logger and result writer redact all registered secret and card values. Screenshots use Playwright `mask` on password, card, and one-time code fields. A value read by `capture` is registered for redaction as soon as the runner reads it.
 5. **Stdout is the protocol.** All logs go to stderr. A `console.log` in `src/` is a lint error.
@@ -307,7 +325,7 @@ Decisions taken with the go-ahead on 2026-11-22. They follow the recommendations
 - Q1: the repo bundles `examples/demo-store` (no dependencies) with a mock card provider and a 3DS challenge. It also has fault injection (`skip-3ds`) so tests can show a real regression.
 - Q2: `idempotency_key` is required. The request hash uses the arguments as sent, so a retry matches before any other work.
 - Q11: `engines.node` is `>=22.12`, the Vitest 5 minimum. Develop on Node 26.
-- Q3, Q8, Q9: still open. The card registry has Stripe test cards only. iyzico cards need a verified source URL first.
+- Q3, Q8, Q9: still open. The card registry has Stripe and iyzico test cards. Each iyzico card cites the official page https://docs.iyzico.com/en/add-ons/test-cards. Craftgate cards are not in the registry yet, because the Craftgate docs need a login.
 
 Format details that the design did not fix:
 
@@ -326,3 +344,108 @@ Many test environments return an SMS or email code in the API response of the pa
 - The value is never stored. The run record and the result show `[REDACTED]`.
 - `body_regex` reads a code from a body that is not JSON, for example the `text/x-component` body of a Next.js server action. Error messages name the regex and the count of checked responses. They never show the body.
 - A separate OTP service that the runner must call is out of scope. It needs a new safety review.
+
+## 11. Authoring
+
+Two tools let an agent write scenarios: `inspect_target` reads a test target and suggests scenarios, and `save_scenario` checks and writes a scenario, fragment, or test data file. The design is in the [scenario authoring spec](superpowers/specs/2026-11-24-scenario-authoring-design.md). The tool contract of `save_scenario` is in [tools.md](tools.md), section 7.
+
+### Inspection jobs and browser slots
+
+`InspectionManager` (`src/inspect/manager.ts`) runs the `inspect_target` jobs. It stores each report in `runs_dir/inspections/<id>.json` and the key index in `runs_dir/inspections/idempotency.json`, with atomic writes (temp file, then rename). The same key gives the same inspection, also after a restart. At startup, an inspection that was `queued` or `running` becomes `finished` with `interrupted: true`, and the server does not repeat it.
+
+Runs and inspections share one `BrowserSlots` object (`src/runs/browser-slots.ts`) with `max_parallel_runs` slots. So the server never has more browsers open than the config allows. Rules:
+
+- One inspection runs at a time. The jobs wait on one chain.
+- An inspection waits for a free slot. With the default `max_parallel_runs: 1`, an inspection never runs while a run is active, and a run waits while an inspection is active.
+- A freed slot goes to a waiting inspection before a queued run, so a stream of runs cannot keep an inspection waiting for ever. A run starts when the inspection frees its slot.
+- A `scope: "code"` inspection takes a slot too. It is short, and one rule is simpler than two.
+
+A phase that crashes (browser start, crawl, probe, code scan) adds a warning that starts with `INSPECTION_FAILED`. The job keeps the other parts and finishes. The warning has the error class and a short message without URLs or absolute paths.
+
+### Checkout probe
+
+The probe (`src/inspect/probe.ts`) goes through the checkout of a test target up to the payment step with fictional data. Every click, fill, select, and key press goes through `src/inspect/actions.ts`:
+
+- A click needs a name that matches the step: add to cart, cart, checkout, guest, cookie reject, or continue. A list click needs the combobox or option role.
+- Checkout words start the checkout only. A form step is saved only with a continue word or an explicit go-to-payment phrase, such as "Continue to payment" or "Ödemeye geç". On some shops a checkout phrase, such as "Passer la commande", places the order. Such phrases and wallet names (PayPal, Apple Pay, Klarna) are in the `pay` list.
+- A click is refused when the element has no name, or when any of its texts names a pay, cookie accept, or send-code action. A click is also refused on a page with card fields or a one-time code field, and in a form with a password field.
+- A fill is refused for password, card, and one-time code fields, and for a field whose label names a secret.
+- One rule finds card inputs: `isCardInput` and `cardInputs()` in `src/safety/card-inputs.ts`. It reads the `cc-*` autocomplete and card hints in the name, id, placeholder, and label. The probe, the guarded actions, and the run screenshot mask all use it.
+- The only key press is Escape.
+
+The payment step has card fields in any frame, a frame that the host guard blocked, a visible terms checkbox, or a visible payment method radio or tab. A payment method is a card, wallet, cash on delivery, or bank transfer label, for example "Kapıda ödeme" or "Virement". A pay button alone counts only when no empty field is left, because express wallet buttons also show on the contact step.
+
+The crawl and the probe keep the raw URL path, because they navigate with it. The report gets the path through `redactPath`: it removes emails, tokens, and card numbers, and keeps ids and barcodes. The crawl does not open links whose path has a data change segment, such as `remove`, `delete`, `clear`, `add`, `sil`, `temizle`, `kaldır`, or `ekle`.
+
+`ProbeResult.dialogs` lists every native dialog and dialog element that the probe saw. `ProbeResult.steps` holds only the dialogs that a probe action opened. A dialog that is already open when a page loads, such as a cookie banner, is in `ProbeResult.dialogs` only.
+
+The probe records a blocked frame by its URL and by its Playwright frame. It reads each child-frame navigation request from the browser `request` event and records the ones to a host outside the target. That covers a frame that the route layer blocks, and a same-host frame that redirects to a blocked host, which the proxy layer blocks. The probe lists such a frame with the blocked host. If the probe cannot read the iframes after a blocked load, it acts as if a blocked payment frame is on the page.
+
+The probe also refuses every click on a page with a payment-like iframe whose load the host guard blocked. That frame can be a card form on a provider host that the target does not list. A blocked frame counts only when its host or title has a payment word (for example pay, card, checkout, 3ds, or a provider name), or when the text of its nearest container names a card or payment. Blocked ad, tag manager, and chat frames do not count.
+
+Stop reasons: `payment_step_reached`, `login_required`, `no_product`, `no_add_to_cart`, `no_checkout_button`, `form_not_understood`, `timeout`, `blocked_by_safety`, and `verification_required`. The probe stops with `verification_required` when a page with a phone field says that it sends a code. It reads send-code and verification phrases, such as "SMS ile doğrulama", "doğrulama kodu", or "verification code". A bare "SMS" does not count, because a marketing consent such as "Kampanyalardan SMS ile haberdar olmak istiyorum" often stands next to the phone field. It stops before it clicks to go on.
+
+Probe risks:
+
+- The fictional phone number (`555` and zeros) can belong to a real subscriber. The probe never clicks a send-code button, and it stops before it continues on a page that says it sends a code to the phone.
+- The probe makes a cart item, a guest checkout with an `example.test` email, an address, and possibly an unpaid order draft. `side_effects` lists them.
+
+Known limits:
+
+- The test id attribute is global in Playwright (`selectors.setTestIdAttribute`). Two targets with different `test_id_attribute` values that run at the same time can use the wrong attribute. With the default `max_parallel_runs: 1`, this does not occur.
+- The server does not reload a symlinked subfolder of `authoring.dir` at startup. Save scenarios into real folders.
+- The guard covers requests of the browser. The server code sends no request of its own with `context.request` or Node. Do not add one without a guard.
+
+## 12. Production targets
+
+Added on 2026-11-24. Spec: [production targets design](superpowers/specs/2026-11-24-production-targets-design.md).
+
+A user can run the scenarios on the live site. The server warns about the side effects. It does not refuse the run. It asks for a confirmation for each new run.
+
+### Config
+
+```yaml
+production_hosts: [www.shop.example]
+
+targets:
+  shop-live:
+    description: The live shop. Each run makes a real order.
+    environment: production # default: test
+    profile: my-store
+    base_url: https://www.shop.example
+    allowed_hosts: [www.shop.example]
+    live_cards: # only on a production target
+      company-visa:
+        number_env: SHOP_LIVE_CARD_NUMBER
+        expiry_env: SHOP_LIVE_CARD_EXPIRY
+        cvc_env: SHOP_LIVE_CARD_CVC
+        behaviour: success
+        description: Company card for live checks.
+```
+
+### Rules
+
+1. `environment` is `test` or `production`. The default is `test`.
+2. A production target may use hosts from `production_hosts`. It skips the test label rule. The host guard still allows only `allowed_hosts` and `third_party_hosts`. A test target keeps every check. A test target with a host in `production_hosts` stays a config error, and `inspect_target` gives `PRODUCTION_HOST_REFUSED` for it. The config load also refuses a test target when a host in its `allowed_hosts` or `third_party_hosts` overlaps the `base_url` host or an `allowed_hosts` entry of a production target. A `*.` wildcard counts on both sides. The `third_party_hosts` of a production target do not count, because a CDN or a payment host can be shared.
+3. `live_cards` is allowed only on a production target. Each entry names three env vars, a behaviour, and a description. The card number never goes into YAML, a tool argument, a log, a result, or a snapshot.
+4. A `test_card` param takes the id `live/<name>` at run time. The run manager reads the env vars when the run starts, and only for the live cards that the params name. A missing env var or a number that is not a valid card number gives `MISSING_ENV_SECRET`. The message never holds the value. A live id on a test target, or an unknown live name, gives `INVALID_PARAMS`. Scenario defaults stay test card ids.
+5. The executor card guard accepts the live numbers of this run and no other number that is not in the registry. The redactor removes the live number and expiry, also in formatted forms. A run with a live card loses a standalone live CVC in the whole run output, also in `console_errors`. A test card keeps the number pattern, the exact expiry string, and the CVC only in failure texts, because the short forms also match order numbers and dates.
+6. `options.trace: true` on a production target gives `INVALID_PARAMS`. A trace holds DOM snapshots with typed values.
+7. `run_scenario` needs `confirm_production: true` for each new run on a production target. Without it, the server returns `PRODUCTION_CONFIRMATION_REQUIRED` (`retryable: false`) with an `ask_human` action and a `change_argument` action. The check runs after the idempotency check and before `prepare`, so a refused call writes nothing and reads no live card env var. A key that already has a run returns that run without the flag. The flag is not part of the request hash. On a test target the flag has no effect.
+8. `save_scenario` has no `confirm_production`. Its validation run on a production target gives `PRODUCTION_CONFIRMATION_REQUIRED`. The file is saved. The agent asks the user and calls `run_scenario`.
+
+### Warning
+
+One constant, `PRODUCTION_WARNING` in `src/safety/production.ts`, holds the warning text:
+
+> Production target. A run here can make a real order and a real payment, change stock, start shipping, and send email or SMS to real addresses. Ask the user before each run.
+
+- `list_scenarios.targets[]` has `environment`, `live_cards` (id, behaviour, description), and `warning` for a production target.
+- `run_scenario` output has `environment`, and `warning` for a production target.
+- `inspect_target` puts the warning first in `warnings`. A result with `section` keeps it first. The inspection needs no confirmation, because the probe never pays. The probe can still make a guest account, an address, and an unpaid order draft on the live site.
+- The `setup_checkout_tests` and `create_scenario` prompts add a "Production target" block. It tells the agent to show the warning and ask the user before each `run_scenario` call. The agent never sets `confirm_production` without the yes of the user in this conversation.
+
+### Not in scope
+
+- No automatic cancel or refund of live orders. The user handles them.
+- The probe of `inspect_target` still never clicks a pay button.

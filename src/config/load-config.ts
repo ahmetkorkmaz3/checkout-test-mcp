@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
-import { checkTargetHost, hostOf, matchesAny } from '../safety/hosts.js';
+import { checkTargetHost, hostMatches, hostOf, matchesAny } from '../safety/hosts.js';
 import { type ResolvedConfig, ServerConfig } from '../schemas/config.js';
 
 export class ConfigError extends Error {
@@ -33,8 +33,16 @@ export function parseConfig(raw: unknown, configDir: string): ResolvedConfig {
     runs_dir: resolve(cfg.runs_dir),
     test_data_dir: resolve(cfg.test_data_dir),
     scenario_dirs: cfg.scenario_dirs.map(resolve),
+    targets: Object.fromEntries(
+      Object.entries(cfg.targets).map(([name, t]) => [
+        name,
+        t.inspect ? { ...t, inspect: { ...t.inspect, source_dirs: t.inspect.source_dirs.map(resolve) } } : t,
+      ]),
+    ),
+    ...(cfg.authoring ? { authoring: { ...cfg.authoring, dir: resolve(cfg.authoring.dir) } } : {}),
   };
   validateTargets(resolved);
+  validateAuthoring(resolved);
   return resolved;
 }
 
@@ -45,6 +53,9 @@ function validateTargets(cfg: ResolvedConfig): void {
     const baseHost = hostOf(target.base_url);
     if (!matchesAny(baseHost, target.allowed_hosts)) {
       problems.push(`Target "${name}": base_url host "${baseHost}" is not in allowed_hosts.`);
+    }
+    if (target.environment !== 'production' && Object.keys(target.live_cards).length > 0) {
+      problems.push(`Target "${name}": live_cards needs environment: production.`);
     }
     if (target.allow_unlabeled_host && cfg.production_hosts.length === 0) {
       problems.push(`Target "${name}": allow_unlabeled_host needs a non-empty production_hosts list.`);
@@ -60,7 +71,10 @@ function validateTargets(cfg: ResolvedConfig): void {
       }
     }
     for (const host of target.third_party_hosts) {
-      if (matchesAny(host.replace(/^\*\./, ''), cfg.production_hosts)) {
+      if (
+        target.environment !== 'production' &&
+        matchesAny(host.replace(/^\*\./, ''), cfg.production_hosts)
+      ) {
         problems.push(`Target "${name}": third-party host "${host}" is in production_hosts.`);
       }
     }
@@ -76,5 +90,42 @@ function validateTargets(cfg: ResolvedConfig): void {
       }
     }
   }
+  problems.push(...sharedProductionHosts(cfg));
   if (problems.length > 0) throw new ConfigError(`Config refused:\n- ${problems.join('\n- ')}`);
+}
+
+/** True when one host pattern matches the other. A "*." wildcard can be on either side. */
+function hostsOverlap(a: string, b: string): boolean {
+  return hostMatches(a, b) || hostMatches(b, a);
+}
+
+/**
+ * A test target must never reach a host that a production target owns.
+ * The third_party_hosts of a production target do not count: a CDN or a payment host can be shared.
+ */
+function sharedProductionHosts(cfg: ResolvedConfig): string[] {
+  const problems: string[] = [];
+  const production = Object.entries(cfg.targets)
+    .filter(([, t]) => t.environment === 'production')
+    .map(([name, t]) => ({ name, hosts: [hostOf(t.base_url), ...t.allowed_hosts] }));
+  for (const [name, target] of Object.entries(cfg.targets)) {
+    if (target.environment === 'production') continue;
+    for (const host of new Set([...target.allowed_hosts, ...target.third_party_hosts])) {
+      const owner = production.find((p) => p.hosts.some((h) => hostsOverlap(host, h)));
+      if (owner)
+        problems.push(`Target "${name}": host "${host}" belongs to production target "${owner.name}".`);
+    }
+  }
+  return problems;
+}
+
+function validateAuthoring(cfg: ResolvedConfig): void {
+  if (!cfg.authoring) return;
+  const dir = cfg.authoring.dir;
+  const inside = cfg.scenario_dirs.some((s) => dir === s || dir.startsWith(s + path.sep));
+  if (!inside) {
+    throw new ConfigError(
+      `Config refused:\n- authoring.dir must be inside one of scenario_dirs. Got "${dir}".`,
+    );
+  }
 }

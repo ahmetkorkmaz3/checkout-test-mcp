@@ -7,10 +7,12 @@ import { ToolError } from '../errors/tool-error.js';
 import type { Logger } from '../logger.js';
 import { classify } from '../runner/classify.js';
 import { type ExecuteInput, type ExecuteOutput, executeRun } from '../runner/executor.js';
-import { containsCardNumber } from '../safety/cards.js';
+import { containsCardNumber, luhnValid } from '../safety/cards.js';
+import { isProductionTarget } from '../safety/hosts.js';
+import { PRODUCTION_WARNING } from '../safety/production.js';
 import { looksLikeSecret, Redactor } from '../safety/secrets.js';
 import { conditionsPass } from '../scenarios/expand.js';
-import { resolveParams } from '../scenarios/params.js';
+import { LIVE_CARD_PREFIX, type RunCard, resolveParams } from '../scenarios/params.js';
 import type { LoadedScenario, ScenarioRegistry } from '../scenarios/registry.js';
 import { capturedPlaceholders, collectTokens, renderDeep, TemplateError } from '../scenarios/template.js';
 import type { ParamValue } from '../schemas/common.js';
@@ -18,6 +20,7 @@ import type { ResolvedConfig, TargetConfig } from '../schemas/config.js';
 import { RunOptions, type RunRecord } from '../schemas/run.js';
 import type { OutcomeCheck, Step } from '../schemas/scenario.js';
 import { closest } from '../util/closest.js';
+import { BrowserSlots } from './browser-slots.js';
 import type { RunStore } from './store.js';
 import { buildSummary } from './summary.js';
 
@@ -27,6 +30,8 @@ export interface StartRunInput {
   params: Record<string, ParamValue>;
   idempotency_key: string;
   options?: Partial<RunOptions>;
+  /** The user said yes to this run on a production target. It is not part of the request hash. */
+  confirm_production?: boolean;
 }
 
 export interface RunManagerDeps {
@@ -37,6 +42,8 @@ export interface RunManagerDeps {
   execute?: (input: ExecuteInput) => Promise<ExecuteOutput>;
   env?: NodeJS.ProcessEnv;
   now?: () => Date;
+  /** Shared with InspectionManager. Default: a new set of max_parallel_runs slots. */
+  slots?: BrowserSlots;
 }
 
 interface Prepared {
@@ -46,7 +53,27 @@ interface Prepared {
   steps: Step[];
   outcome: OutcomeCheck[];
   redactor: Redactor;
+  allowedCardNumbers: ReadonlySet<string>;
   httpCredentials: { username: string; password: string } | undefined;
+}
+
+/** The live cards of a target with empty values. resolveParams checks ids and behaviour with them. */
+function liveCardPlaceholders(target: TargetConfig): Record<string, RunCard> {
+  const out: Record<string, RunCard> = {};
+  for (const [name, entry] of Object.entries(target.live_cards)) {
+    const id = `${LIVE_CARD_PREFIX}${name}`;
+    out[id] = {
+      id,
+      provider: 'live',
+      brand: 'unknown',
+      number: '',
+      expiry: '',
+      cvc: '',
+      behaviour: entry.behaviour,
+      description: entry.description,
+    };
+  }
+  return out;
 }
 
 export function newRunId(): string {
@@ -56,17 +83,20 @@ export function newRunId(): string {
 export class RunManager {
   private readonly events = new EventEmitter();
   private readonly queue: Prepared[] = [];
-  private running = 0;
   private readonly execute: (input: ExecuteInput) => Promise<ExecuteOutput>;
   private readonly env: NodeJS.ProcessEnv;
   private readonly now: () => Date;
   private readonly active = new Set<Promise<void>>();
+  private readonly slots: BrowserSlots;
 
   constructor(private readonly deps: RunManagerDeps) {
     this.execute = deps.execute ?? executeRun;
     this.env = deps.env ?? process.env;
     this.now = deps.now ?? (() => new Date());
     this.events.setMaxListeners(0);
+    this.slots = deps.slots ?? new BrowserSlots(deps.config.max_parallel_runs);
+    // An inspection that ends frees a slot. A queued run can then start.
+    this.slots.onFree(() => this.pump());
   }
 
   /** Call once at startup. Marks runs that were in progress as finished with verdict "error". */
@@ -159,6 +189,9 @@ export class RunManager {
     const early = this.checkExisting(input.idempotency_key, requestHash);
     if (early) return { record: early, reused: true };
 
+    // Before prepare: a refused run reads no live card env and writes nothing.
+    this.checkProductionConfirmation(input);
+
     const prepared = await this.prepare(input, options, requestHash);
 
     // A parallel call with the same key can finish prepare() first.
@@ -223,6 +256,34 @@ export class RunManager {
       });
     }
     return this.get(existing.run_id);
+  }
+
+  /** An unknown target goes on to prepare, which gives UNKNOWN_TARGET. */
+  private checkProductionConfirmation(input: StartRunInput): void {
+    const target = Object.hasOwn(this.deps.config.targets, input.target)
+      ? this.deps.config.targets[input.target]
+      : undefined;
+    if (!target || !isProductionTarget(target) || input.confirm_production === true) return;
+    throw new ToolError({
+      code: 'PRODUCTION_CONFIRMATION_REQUIRED',
+      message: `Target "${input.target}" is a production target. No run started. ${PRODUCTION_WARNING}`,
+      likelyCause:
+        'A new run on a production target needs confirm_production: true. Set it only after the user says yes to this run.',
+      retryable: false,
+      nextActions: [
+        {
+          kind: 'ask_human',
+          description: `Show the user the warning and ask: may I run "${input.scenario_id}" on the production target "${input.target}" now?`,
+        },
+        {
+          kind: 'change_argument',
+          description: `After the user agrees, call run_scenario for target "${input.target}" and scenario "${input.scenario_id}" with confirm_production: true.`,
+          tool: 'run_scenario',
+          arguments: { confirm_production: true },
+        },
+      ],
+      details: { target: input.target, environment: 'production' },
+    });
   }
 
   private checkArgumentSafety(input: StartRunInput): void {
@@ -360,8 +421,65 @@ export class RunManager {
       });
     }
 
-    const params = resolveParams(scenario, input.params);
+    const production = isProductionTarget(target);
+    if (production && options.trace) {
+      throw new ToolError({
+        code: 'INVALID_PARAMS',
+        message: `Target "${input.target}" is a production target. A trace is not allowed on it.`,
+        likelyCause: 'A trace holds DOM snapshots with typed values, such as card data and addresses.',
+        nextActions: [
+          {
+            kind: 'change_argument',
+            description: 'Call run_scenario again with options.trace set to false.',
+            tool: 'run_scenario',
+            arguments: { options: { trace: false } },
+          },
+        ],
+        details: { option: 'trace' },
+      });
+    }
+
+    // Placeholders only. The env values are read below, and only for the live cards that the params name.
+    const liveCards = production ? liveCardPlaceholders(target) : undefined;
+    const params = resolveParams(scenario, input.params, liveCards);
     const redactor = new Redactor();
+    const missing: string[] = [];
+    const invalidLive: string[] = [];
+    const allowedCardNumbers = new Set<string>();
+    for (const [param, card] of Object.entries(params.cards)) {
+      if (!card.id.startsWith(LIVE_CARD_PREFIX)) continue;
+      const entry = target.live_cards[card.id.slice(LIVE_CARD_PREFIX.length)];
+      if (!entry) continue;
+      const read = (envName: string) => {
+        const value = this.env[envName];
+        if (!value) missing.push(`${card.id} (env ${envName})`);
+        return value ?? '';
+      };
+      const number = read(entry.number_env);
+      const expiry = read(entry.expiry_env);
+      const cvc = read(entry.cvc_env);
+      if (number && !(/^\d{13,19}$/.test(number) && luhnValid(number))) {
+        invalidLive.push(`${card.id} (env ${entry.number_env})`);
+      }
+      if (number) allowedCardNumbers.add(number);
+      params.cards[param] = { ...card, number, expiry, cvc };
+    }
+    if (invalidLive.length > 0) {
+      throw new ToolError({
+        code: 'MISSING_ENV_SECRET',
+        message: `The live card env value is not a valid card number: ${invalidLive.join(', ')}.`,
+        likelyCause:
+          'The environment variable does not hold 13 to 19 digits with a valid Luhn check. Spaces and dashes are not allowed.',
+        nextActions: [
+          {
+            kind: 'ask_human',
+            description:
+              'Ask a human to check the live card environment variable and restart the MCP server.',
+          },
+        ],
+        details: { invalid: invalidLive },
+      });
+    }
 
     // Secrets referenced by the scenario and by http_credentials.
     // Steps and outcome checks whose "when" conditions pass for these params. Only they run.
@@ -391,7 +509,6 @@ export class RunManager {
       secretNames.add(target.http_credentials.password_secret);
     }
     const secrets: Record<string, string> = {};
-    const missing: string[] = [];
     for (const name of secretNames) {
       const envName = target.secrets[name];
       const value = envName ? this.env[envName] : undefined;
@@ -422,8 +539,14 @@ export class RunManager {
 
     const data = await this.loadData(scenario.data, scenario.id);
     const cardList = Object.values(params.cards);
+    // A page can show the number in groups. The short expiry forms and a standalone CVC also match
+    // order numbers and dates, so only a live card gets them.
     for (const c of cardList) {
-      redactor.register(c.number);
+      const live = c.id.startsWith(LIVE_CARD_PREFIX);
+      redactor.registerCardNumber(c.number);
+      if (live) redactor.registerExpiry(c.expiry);
+      else redactor.register(c.expiry);
+      redactor.registerCvc(c.cvc, { everywhere: live });
     }
     const ctx = {
       params: params.values,
@@ -484,7 +607,7 @@ export class RunManager {
       artifacts: { run_dir: this.deps.store.runDir(runId), screenshots: [], trace_path: null },
     };
     record.summary = buildSummary(record);
-    return { record, loaded, target, steps, outcome, redactor, httpCredentials };
+    return { record, loaded, target, steps, outcome, redactor, allowedCardNumbers, httpCredentials };
   }
 
   private async loadData(refs: Record<string, string>, scenarioId: string): Promise<Record<string, unknown>> {
@@ -518,13 +641,12 @@ export class RunManager {
   }
 
   private pump(): void {
-    while (this.running < this.deps.config.max_parallel_runs && this.queue.length > 0) {
+    while (this.queue.length > 0 && this.slots.tryAcquire()) {
       const next = this.queue.shift() as Prepared;
-      this.running++;
       const p = this.runOne(next).finally(() => {
-        this.running--;
         this.active.delete(p);
-        this.pump();
+        // release() calls pump() through onFree when no inspection waits for the slot.
+        this.slots.release();
       });
       this.active.add(p);
     }
@@ -555,6 +677,7 @@ export class RunManager {
         options: record.options,
         ...(p.httpCredentials ? { httpCredentials: p.httpCredentials } : {}),
         redactor: p.redactor,
+        allowedCardNumbers: p.allowedCardNumbers,
         onProgress: (prog) => {
           record = {
             ...record,
@@ -595,7 +718,10 @@ export class RunManager {
         },
       };
     } catch (err) {
-      logger.error('run crashed', { run_id: record.run_id, error: (err as Error).message });
+      logger.error('run crashed', {
+        run_id: record.run_id,
+        error: p.redactor.redact((err as Error).message ?? String(err)),
+      });
       const finishedAt = this.now();
       record = {
         ...record,
@@ -628,6 +754,7 @@ export class RunManager {
   }
 }
 
-function sortKeys(obj: Record<string, unknown>): Record<string, unknown> {
+/** Same key order for the same params. save_scenario uses it for its validation key too. */
+export function sortKeys(obj: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(obj).sort(([a], [b]) => a.localeCompare(b)));
 }

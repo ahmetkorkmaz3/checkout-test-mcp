@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseConfig } from '../../src/config/load-config.js';
+import { InspectionManager } from '../../src/inspect/manager.js';
 import { silentLogger } from '../../src/logger.js';
 import type { ExecuteInput, ExecuteOutput } from '../../src/runner/executor.js';
 import { RunManager } from '../../src/runs/manager.js';
@@ -19,7 +20,13 @@ let client: Client;
 let executions: ExecuteInput[];
 let release: () => void;
 let releaseAll: Array<() => void> = [];
-let activeManager: RunManager | undefined;
+// Every manager that a test makes. afterEach waits until all of them are idle.
+let managers: RunManager[] = [];
+
+function track(m: RunManager): RunManager {
+  managers.push(m);
+  return m;
+}
 
 function fakeExecute(input: ExecuteInput): Promise<ExecuteOutput> {
   executions.push(input);
@@ -73,15 +80,23 @@ async function setup(env: NodeJS.ProcessEnv = {}) {
   const registry = await ScenarioRegistry.load(config.scenario_dirs);
   const store = new RunStore(config.runs_dir);
   await store.init();
-  const manager = new RunManager({
+  const manager = track(
+    new RunManager({
+      config,
+      registry,
+      store,
+      logger: silentLogger,
+      execute: fakeExecute,
+      env,
+    }),
+  );
+  const server = createServer({
     config,
     registry,
-    store,
+    manager,
+    inspections: new InspectionManager({ config, logger: silentLogger }),
     logger: silentLogger,
-    execute: fakeExecute,
-    env,
   });
-  const server = createServer({ config, registry, manager, logger: silentLogger });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   client = new Client({ name: 'test', version: '0.0.0' });
@@ -97,26 +112,36 @@ async function call(name: string, args: Record<string, unknown>): Promise<any> {
 beforeEach(() => {
   releaseAll = [];
   release = () => {};
-  activeManager = undefined;
+  managers = [];
 });
 
 afterEach(async () => {
-  release();
-  // Background runs write to the runs dir. Wait for them before the folder is removed.
-  await activeManager?.idle();
+  // Background runs write to the runs dir. Release every fake run, also the ones that a queue
+  // starts after a release, until all managers are idle. Then the folder can go.
+  let settled = false;
+  const idle = Promise.all(managers.map((m) => m.idle())).finally(() => {
+    settled = true;
+  });
+  while (!settled) {
+    for (const done of releaseAll.splice(0)) done();
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  await idle;
   await client?.close();
   await rm(dir, { recursive: true, force: true });
 });
 
 describe('tools/list', () => {
-  it('exposes exactly four tools with descriptions and schemas', async () => {
+  it('exposes the expected tools with descriptions and schemas', async () => {
     await setup();
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       'compare_runs',
       'get_run_result',
+      'inspect_target',
       'list_scenarios',
       'run_scenario',
+      'save_scenario',
     ]);
     for (const t of tools) {
       expect(t.description?.length ?? 0).toBeGreaterThan(100);
@@ -128,6 +153,14 @@ describe('tools/list', () => {
       expect.arrayContaining(['target', 'scenario_id', 'idempotency_key']),
     );
     expect(run?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: true });
+    const inspect = tools.find((t) => t.name === 'inspect_target');
+    expect(inspect?.inputSchema.required).toEqual(['target', 'idempotency_key']);
+    expect(inspect?.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    });
     await expect(JSON.stringify(tools, null, 2)).toMatchFileSnapshot('./__snapshots__/tools-list.json');
   });
 });
@@ -202,13 +235,15 @@ describe('run_scenario and get_run_result', () => {
 
     const store2 = new RunStore(config.runs_dir);
     await store2.init();
-    const manager2 = new RunManager({
-      config,
-      registry,
-      store: store2,
-      logger: silentLogger,
-      execute: fakeExecute,
-    });
+    const manager2 = track(
+      new RunManager({
+        config,
+        registry,
+        store: store2,
+        logger: silentLogger,
+        execute: fakeExecute,
+      }),
+    );
     const again = await manager2.start({ ...args, params: {} });
     expect(again.reused).toBe(true);
     expect(again.record.run_id).toBe(first.structuredContent.run_id);
@@ -225,13 +260,15 @@ describe('run_scenario and get_run_result', () => {
     await new Promise((r) => setTimeout(r, 50));
     const store2 = new RunStore(config.runs_dir);
     const interrupted = await store2.init();
-    const manager2 = new RunManager({
-      config,
-      registry,
-      store: store2,
-      logger: silentLogger,
-      execute: fakeExecute,
-    });
+    const manager2 = track(
+      new RunManager({
+        config,
+        registry,
+        store: store2,
+        logger: silentLogger,
+        execute: fakeExecute,
+      }),
+    );
     await manager2.recover(interrupted);
     const r = manager2.get(first.structuredContent.run_id);
     expect(r).toMatchObject({ status: 'finished', verdict: 'error' });

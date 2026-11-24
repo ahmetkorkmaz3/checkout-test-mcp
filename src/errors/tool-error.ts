@@ -8,6 +8,7 @@ export const ToolErrorCode = z.enum([
   'INVALID_PARAMS',
   'HOST_NOT_ALLOWED',
   'PRODUCTION_HOST_REFUSED',
+  'PRODUCTION_CONFIRMATION_REQUIRED',
   'REAL_CARD_DATA_REFUSED',
   'SECRET_IN_ARGUMENTS',
   'MISSING_ENV_SECRET',
@@ -16,6 +17,11 @@ export const ToolErrorCode = z.enum([
   'RUN_NOT_FINISHED',
   'RUNS_NOT_COMPARABLE',
   'QUEUE_FULL',
+  'AUTHORING_DISABLED',
+  'SCENARIO_INVALID',
+  'PATH_REFUSED',
+  'SCENARIO_EXISTS',
+  'INSPECTION_FAILED',
   'INTERNAL_ERROR',
 ]);
 export type ToolErrorCode = z.infer<typeof ToolErrorCode>;

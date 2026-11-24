@@ -6,6 +6,7 @@
       "!dist",
       "!node_modules",
       "!.checkout-test-mcp",
+      "!test/fixtures/shop-src",
       "!schemas/*.json",
       "!**/__snapshots__",
       "!**/*.md"

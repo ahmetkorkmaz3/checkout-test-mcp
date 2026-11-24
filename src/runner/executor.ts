@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { type Browser, type BrowserContext, chromium, errors, type Page, selectors } from 'playwright';
+import { type BrowserContext, errors, type Locator, type Page } from 'playwright';
+import { cardInputs } from '../safety/card-inputs.js';
 import { containsUnregisteredCardNumber } from '../safety/cards.js';
 import { hostOf, isUrlAllowed } from '../safety/hosts.js';
 import { type Redactor, redactQuery } from '../safety/secrets.js';
@@ -17,7 +18,9 @@ import type {
   StepResult,
 } from '../schemas/run.js';
 import type { Action, Capture, Expectation, OutcomeCheck, Scenario, Step } from '../schemas/scenario.js';
+import { openGuardedContext, stripUserInfo } from './browser.js';
 import { classify } from './classify.js';
+import { PROXY_ERROR_HEADER } from './guard-proxy.js';
 import { describeLocator, scopeFor, toLocator } from './locator.js';
 import {
   describeResponseMatch,
@@ -39,6 +42,8 @@ export interface ExecuteInput {
   options: RunOptions;
   httpCredentials?: { username: string; password: string };
   redactor: Redactor;
+  /** Live card numbers of this run. The card guard lets them through. Empty for a test card run. */
+  allowedCardNumbers: ReadonlySet<string>;
   onProgress: (p: { completed_steps: number; current_step_id: string | null; steps: StepResult[] }) => void;
 }
 
@@ -66,10 +71,34 @@ class StepFailure extends Error {
   }
 }
 
+const BLOCKED_BY_GUARD = 'net::ERR_BLOCKED_BY_CLIENT';
+// ERR_TUNNEL_CONNECTION_FAILED: the guard proxy could not open a tunnel to an allowed host. A host that the
+// proxy refused is a blocked navigation, which the runner checks first.
 const UNREACHABLE =
-  /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_CONNECTION_TIMED_OUT|ERR_INTERNET_DISCONNECTED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_|ERR_SSL_/;
+  /ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_CONNECTION_TIMED_OUT|ERR_INTERNET_DISCONNECTED|ERR_ADDRESS_UNREACHABLE|ERR_TUNNEL_CONNECTION_FAILED|ERR_CERT_|ERR_SSL_/;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const SECRET_INPUTS = 'input[type=password i], input[autocomplete="one-time-code" i]';
+
+/**
+ * Screenshot masks for password, card, and one-time code inputs in every frame of the page.
+ * A card iframe that no step addresses, or a nested frame, is masked too. Card inputs use the shared
+ * rule in src/safety/card-inputs.ts, so a card input without autocomplete is masked too.
+ */
+export function sensitiveMask(page: Page): Locator[] {
+  return page.frames().flatMap((f) => [f.locator(SECRET_INPUTS), cardInputs(f)]);
+}
+
+/** Stops the run before it fills or captures a card number that is not a test card or a live card of this run. */
+export function guardCardValue(value: string, allowed: ReadonlySet<string>): void {
+  if (containsUnregisteredCardNumber(value, allowed)) {
+    throw new StepFailure(
+      'blocked_by_safety',
+      'The run stopped before it filled a value that looks like a card number outside the test card registry.',
+    );
+  }
+}
 
 export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   const { scenario, target, options, redactor } = input;
@@ -83,7 +112,6 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   const consoleMap = new Map<string, ConsoleError>();
   const networkFailures: NetworkFailure[] = [];
   const blocked: BlockedRequest[] = [];
-  const blockedUrls = new Set<string>();
   const screenshots: ExecuteOutput['screenshots'] = [];
   let stepIndex = 0;
   let currentStepId = 'setup';
@@ -96,28 +124,19 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   const consoleIgnored = (text: string) => scenario.ignore.console.some((i) => text.includes(i.pattern));
   const networkIgnored = (url: string) => scenario.ignore.network.some((i) => urlMatchesGlob(url, i.url));
 
-  let browser: Browser | undefined;
+  /** Closes the browser and its guard proxy. */
+  let closeGuarded: (() => Promise<void>) | undefined;
+  let proxyErrorToken: string | undefined;
   let context: BrowserContext | undefined;
   let page: Page | undefined;
   let failure: Failure | null = null;
-
-  const frameCss = new Set<string>();
-  for (const s of input.steps) {
-    for (const w of [s.within, ...(s.then ?? []).map((t) => t.within)])
-      if (w?.frame.css) frameCss.add(w.frame.css);
-  }
 
   async function screenshot(stepId: string, n: number): Promise<string | undefined> {
     const p = page;
     if (!p || p.isClosed()) return undefined;
     const file = path.join(input.runDir, `${String(n).padStart(2, '0')}-${stepId}.png`);
-    const sensitive = 'input[type=password], input[autocomplete^="cc-"], input[autocomplete="one-time-code"]';
-    const mask = [
-      p.locator(sensitive),
-      ...[...frameCss].map((css) => p.frameLocator(css).locator(sensitive)),
-    ];
     try {
-      await p.screenshot({ path: file, mask, timeout: 10_000 });
+      await p.screenshot({ path: file, mask: sensitiveMask(p), timeout: 10_000 });
       screenshots.push({ step_id: stepId, path: file, uri: pathToFileURL(file).toString() });
       return file;
     } catch {
@@ -126,12 +145,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   }
 
   function guardValue(value: string): void {
-    if (containsUnregisteredCardNumber(value)) {
-      throw new StepFailure(
-        'blocked_by_safety',
-        'The run stopped before it filled a value that looks like a card number outside the test card registry.',
-      );
-    }
+    guardCardValue(value, input.allowedCardNumbers);
   }
 
   function checkBlockedNavigation(): void {
@@ -149,6 +163,13 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       try {
         const res = await p.goto(action.goto, { timeout, waitUntil: 'load' });
         checkBlockedNavigation();
+        // Only the guard proxy knows its token, so a site cannot fake this error.
+        if (res && res.status() === 502 && (await res.headerValue(PROXY_ERROR_HEADER)) === proxyErrorToken) {
+          throw new StepFailure(
+            'target_unreachable',
+            `The guard proxy could not reach ${redactQuery(res.url())}.`,
+          );
+        }
         if (res && res.status() >= 500) {
           throw new StepFailure(
             'navigation_failed',
@@ -513,26 +534,28 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   }
 
   const main = async () => {
-    selectors.setTestIdAttribute(target.test_id_attribute);
-    browser = await chromium.launch({ headless: input.config.headless });
-    context = await browser.newContext({
-      baseURL: target.base_url,
-      viewport: { width: 1280, height: 900 },
-      ...(target.locale ? { locale: target.locale } : {}),
+    const guarded = await openGuardedContext({
+      config: input.config,
+      target,
       ...(input.httpCredentials ? { httpCredentials: input.httpCredentials } : {}),
+      onBlocked: (url, frame, isNavigation) => {
+        const entry = { url: redactQuery(stripUserInfo(url)), step_id: currentStepId };
+        // Chromium can open several CONNECT tunnels for one https host. One entry for each step is enough.
+        if (!blocked.some((b) => b.url === entry.url && b.step_id === entry.step_id)) blocked.push(entry);
+        // Only a navigation of the run's own page stops the run. A popup has no frame yet, so it is only listed.
+        if (isNavigation && page && frame === page.mainFrame())
+          blockedNavigation = redactQuery(stripUserInfo(url));
+      },
     });
+    // After a run timeout the cleanup has run already, so this browser must close here.
+    if (runTimedOut) {
+      await guarded.close();
+      return;
+    }
+    closeGuarded = guarded.close;
+    proxyErrorToken = guarded.proxyErrorToken;
+    context = guarded.context;
     if (options.trace) await context.tracing.start({ screenshots: true, snapshots: true });
-
-    await context.route('**/*', async (route) => {
-      const req = route.request();
-      const url = req.url();
-      if (isUrlAllowed(url, target, input.config)) return route.continue();
-      blockedUrls.add(url);
-      blocked.push({ url: redactQuery(url), step_id: currentStepId });
-      if (req.isNavigationRequest() && page && req.frame() === page.mainFrame())
-        blockedNavigation = redactQuery(url);
-      return route.abort('blockedbyclient');
-    });
 
     page = await context.newPage();
     page.on('console', (msg) => {
@@ -546,8 +569,23 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       const text = redactor.redact(`Uncaught ${err.name}: ${err.message}`).slice(0, 500);
       if (!consoleIgnored(text)) addConsole('error', text, undefined);
     });
+    // The route handler sees only the first URL of a redirect chain. The proxy refuses a later hop to a
+    // host outside the allowlist, but it has no frame. This listener marks such a hop of the main frame.
+    page.on('request', (req) => {
+      if (!page || !req.isNavigationRequest() || !/^https?:/.test(req.url())) return;
+      if (isUrlAllowed(req.url(), target, input.config)) return;
+      let frame: ReturnType<typeof req.frame> | null = null;
+      try {
+        frame = req.frame();
+      } catch {
+        frame = null;
+      }
+      if (frame === page.mainFrame()) blockedNavigation = redactQuery(stripUserInfo(req.url()));
+    });
     page.on('response', (res) => {
       const req = res.request();
+      // A response from a host outside the allowlist is the 403 of the guard proxy, not a site failure.
+      if (!isUrlAllowed(res.url(), target, input.config)) return;
       const rec: RecordedResponse = { method: req.method(), url: res.url(), status: res.status(), stepIndex };
       const specs = input.steps[stepIndex]?.capture ?? [];
       if (specs.some((c) => responseMatches(rec, c.from_response))) rec.body = res.text().catch(() => null);
@@ -564,7 +602,10 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       }
     });
     page.on('requestfailed', (req) => {
-      if (blockedUrls.has(req.url()) || networkIgnored(req.url())) return;
+      // Only the route guard aborts with this error. Chromium can add a suffix, such as ".Inspector" for a fetch.
+      if (req.failure()?.errorText.startsWith(BLOCKED_BY_GUARD) || networkIgnored(req.url())) return;
+      // A request to a host outside the allowlist failed at the guard proxy.
+      if (!isUrlAllowed(req.url(), target, input.config)) return;
       networkFailures.push({
         method: req.method(),
         url: redactQuery(req.url()),
@@ -687,7 +728,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
         tracePath = null;
       });
     }
-    await browser?.close().catch(() => {});
+    await closeGuarded?.();
   }
 
   if (fatal && !failure) {
@@ -719,7 +760,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
         ? 'error'
         : 'failed';
 
-  return redactor.redactDeep({
+  return redactExecuteOutput(redactor, {
     verdict,
     failure,
     steps: stepResults,
@@ -730,6 +771,25 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
     screenshots,
     trace_path: tracePath,
   });
+}
+
+/**
+ * Redacts registered values in the whole output. failure.expected and failure.actual quote page text,
+ * so they also lose a CVC that stands alone. With a live card in the run, every text loses it.
+ */
+export function redactExecuteOutput(redactor: Redactor, out: ExecuteOutput): ExecuteOutput {
+  if (redactor.redactsCvcEverywhere) return redactor.redactDeep(out, (s) => redactor.redactFailureText(s));
+  const redacted = redactor.redactDeep(out);
+  const f = redacted.failure;
+  if (!f) return redacted;
+  return {
+    ...redacted,
+    failure: {
+      ...f,
+      ...(f.expected !== undefined ? { expected: redactor.redactFailureText(f.expected) } : {}),
+      ...(f.actual !== undefined ? { actual: redactor.redactFailureText(f.actual) } : {}),
+    },
+  };
 }
 
 function firstLine(msg: string): string {

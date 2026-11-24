@@ -236,7 +236,7 @@ Later steps use the value as `{{captured.<name>}}`. Use it for a one-time code t
 - The runner reads the value after the actions and the `expect` list of the step. It waits up to the step timeout for the response.
 - Only responses that arrive during the step count. The response must come from an allowed host, because the host guard blocks all other requests.
 - The value must be a string or a number. The step fails with `unexpected_response` when the response does not arrive, the body is not JSON, the path is missing, or no body matches `body_regex`. It fails with `assertion_failed` when the value does not match `pattern`.
-- A captured value is a secret. Results, logs, and run files show `[REDACTED]` in its place. Values shorter than 4 characters are not redacted. Screenshots mask fields with `autocomplete="one-time-code"`.
+- A captured value is a secret. Results, logs, and run files show `[REDACTED]` in its place. Values shorter than 4 characters are not redacted. Screenshots mask password, card (`cc-*`), and `one-time-code` inputs in every frame of the page.
 - A value that looks like a card number outside the test card registry stops the run with verdict `blocked`.
 - `{{captured.<name>}}` works only in a step after the capture step, and in outcome checks. The server checks this when it loads the scenario.
 - When a `when` condition skips the capture step, a later step that uses the value stops the run before the browser starts (`INVALID_PARAMS`).
@@ -261,3 +261,36 @@ Outcome checks run after the last step. Each one has an `id`, one expectation, a
 - Templates are plain substitution. No expressions, no code.
 - An unknown token stops the run before the browser starts.
 - Secret and card values are redacted in logs and results.
+
+## 9. House rules
+
+`save_scenario` checks every scenario and fragment against these rules. An error refuses the save. A warning does not. The result lists each issue with its `rule`, `path`, `message`, and `fix`.
+
+| Rule id | Severity | What it checks |
+|---|---|---|
+| `param-described` | error | Every param has a `description`, and a `default` or `required: true`. Every fragment arg has a `description`. |
+| `outcome-proves-order` | error | `expected_outcome: order_placed` needs one `response` or `url` outcome check, and one `visible` or `text` outcome check. A check with `when` does not count. |
+| `outcome-proves-no-success` | error | `payment_declined` and `validation_error` need one `hidden` or `no_response` outcome check without `when`. |
+| `no-literal-personal-data` | error | No literal email, phone number, or password in a `fill` value (also inside `then`), a `fill_form` value, a param default, a fragment arg default, or a `with` value. The rule uses two keyword sets. Names and ids use the full set as a substring: password, passwd, pwd, secret, api_key (also apikey and api-key), token, şifre, sifre, and parola. This set applies to a param name, a fragment arg name, a `with` name, and a locator test id, role, or css. Free text uses only the strong words as whole words: password, passwd, şifre, sifre, parola, "api key", and "secret key". This set applies to a param or arg description and to a locator name, label, text, or placeholder. So a "Discount token" description or a "Promo token" label does not make a literal value a password. A value with `{{` is a template, not a literal. Use `{{secrets.<name>}}`, `{{data.<name>.<field>}}`, or `{{params.<name>}}`. |
+| `id-format` | error | The scenario id is kebab-case. Step ids are snake_case. Two underscores in a row are reserved for expanded fragment steps. |
+| `prefer-semantic-locator` | warning | A `css` locator. Use role, test id, label, placeholder, or text. |
+| `payment-step-hint` | warning | A step whose title or locator has a pay word, such as "pay", "place order", or "öde", and no `on_failure.hint`. |
+| `url-glob-query` | warning | A `url.matches` glob that contains `**`, also at the start. The glob also matches a query string such as `?return=/sepet`. Use `regex` with `^https?://[^/]+/path/?(\?.*)?$`. |
+
+Rules run on the scenario file as written. They also run on the steps that come from fragments. The issue `path` of a fragment step is the `include` step in the scenario file.
+
+The id of a scenario must be unique in all scenario folders. The trial load of `save_scenario` checks this.
+
+### 9.1 Automatic fixes
+
+`save_scenario` adds these when they are missing, and keeps comments and key order:
+
+1. The line `# yaml-language-server: $schema=<path>` at the top of the file.
+2. `schema_version: 1` as the first key.
+
+### 9.2 Test data files
+
+| Rule id | Severity | What it checks |
+|---|---|---|
+| `test-data-email-domain` | error | Every email uses a reserved domain: `example.test`, `example.com`, `example.org`, `example.net`, or a domain that ends in `.invalid` or `.test`. |
+| `test-data-card` | error | No card-like number. The `path` of these issues is `line N`. The message never repeats the value. |
