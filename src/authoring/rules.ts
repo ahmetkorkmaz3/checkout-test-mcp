@@ -1,4 +1,5 @@
 import { isMap, parseDocument } from 'yaml';
+import { SECRET_KEYWORDS } from '../safety/secrets.js';
 import type { Fragment, Scenario, Step } from '../schemas/scenario.js';
 import { checkTestData } from './test-data.js';
 
@@ -58,7 +59,6 @@ const SNAKE = /^[a-z][a-z0-9]*(_[a-z0-9]+)*$/;
 
 const EMAIL_LIKE = /@.*\./;
 const PHONE_LIKE = /^\+?[\d\s\-.()[\]]+$/;
-const SECRET_WORDS = /password|şifre|sifre|parola/i;
 // A small local list. The shared word list of the inspect module replaces it.
 const PAY_WORDS =
   /(?<![\p{L}])(pay|place order|complete order|öde|güvenli öde|siparişi tamamla)(?![\p{L}])/iu;
@@ -143,7 +143,8 @@ function checkFillValues(action: Rec, path: string, issues: RuleIssue[]): void {
   if (action.fill !== undefined && (typeof action.value === 'string' || typeof action.value === 'number')) {
     const value = String(action.value);
     const kind = personalKind(value);
-    const secret = isLiteral(value) && secretTargetStrings(action.fill).some((s) => hasWord(SECRET_WORDS, s));
+    const secret =
+      isLiteral(value) && secretTargetStrings(action.fill).some((s) => hasWord(SECRET_KEYWORDS, s));
     if (kind) issues.push(personalIssue(kind, `${path}.value`, `The "fill" action at ${path}`));
     else if (secret) issues.push(personalIssue('password', `${path}.value`, `The "fill" action at ${path}`));
   }
@@ -154,7 +155,7 @@ function checkFillValues(action: Rec, path: string, issues: RuleIssue[]): void {
       const p = `${path}.fill_form.${i}.value`;
       const kind = personalKind(field.value);
       const secret =
-        isLiteral(field.value) && secretTargetStrings(field.field).some((s) => hasWord(SECRET_WORDS, s));
+        isLiteral(field.value) && secretTargetStrings(field.field).some((s) => hasWord(SECRET_KEYWORDS, s));
       if (kind) issues.push(personalIssue(kind, p, `The "fill_form" value at ${p}`));
       else if (secret) issues.push(personalIssue('password', p, `The "fill_form" value at ${p}`));
     });
@@ -175,7 +176,7 @@ function checkWith(step: Step, path: string, issues: RuleIssue[]): number {
     const value = String(v);
     const kind = personalKind(value);
     if (kind) issues.push(personalIssue(kind, p, `The "with" value at ${p}`));
-    else if (isLiteral(value) && hasWord(SECRET_WORDS, name)) {
+    else if (isLiteral(value) && hasWord(SECRET_KEYWORDS, name)) {
       issues.push(personalIssue('password', p, `The "with" value at ${p}`));
     }
   }
@@ -329,7 +330,10 @@ function checkDefault(
   const text = String(value);
   const kind = personalKind(text);
   if (kind) issues.push(personalIssue(kind, path, where));
-  else if (isLiteral(text) && (hasWord(SECRET_WORDS, name) || hasWord(SECRET_WORDS, description ?? ''))) {
+  else if (
+    isLiteral(text) &&
+    (hasWord(SECRET_KEYWORDS, name) || hasWord(SECRET_KEYWORDS, description ?? ''))
+  ) {
     issues.push(personalIssue('password', path, where));
   }
 }

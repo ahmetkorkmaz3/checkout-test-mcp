@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import type { z } from 'zod';
 import { ToolError } from '../errors/tool-error.js';
+import { sortKeys } from '../runs/manager.js';
 import { containsCardNumber } from '../safety/cards.js';
 import { looksLikeSecret } from '../safety/secrets.js';
 import { ScenarioRegistry } from '../scenarios/registry.js';
@@ -67,15 +68,34 @@ function issue(rule: string, pathText: string, message: string, fix: string): Ru
   return { rule, severity: 'error', path: pathText, message, fix };
 }
 
+// A YAML key is user text. Only a key with plain name characters can show in a result.
+const PLAIN_KEY = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * zod puts a bad record key into the path and an unknown key into the message.
+ * Such a key can be an email or another value, so it shows only when it is a plain name.
+ */
 function zodIssues(error: z.ZodError, what: string): RuleIssue[] {
-  return error.issues.map((i) =>
-    issue(
+  return error.issues.map((i) => {
+    const issuePath = i.path
+      .map((seg) => (typeof seg === 'number' || PLAIN_KEY.test(String(seg)) ? String(seg) : '<key>'))
+      .join('.');
+    let message = i.message;
+    if (i.code === 'unrecognized_keys') {
+      const plain = i.keys.filter((k) => PLAIN_KEY.test(k));
+      const hidden = i.keys.length - plain.length;
+      message = `Unknown key${i.keys.length === 1 ? '' : 's'}: ${[
+        ...plain.map((k) => `"${k}"`),
+        ...(hidden > 0 ? [`${hidden} key${hidden === 1 ? '' : 's'} with other characters`] : []),
+      ].join(', ')}. Remove ${i.keys.length === 1 ? 'it' : 'them'}.`;
+    }
+    return issue(
       'schema',
-      i.path.join('.'),
-      `${what} schema: ${i.message}`,
+      issuePath,
+      `${what} schema: ${message}`,
       `Change the value to match the ${what} schema. docs/scenario-format.md describes every field.`,
-    ),
-  );
+    );
+  });
 }
 
 function parseYaml(text: string): unknown {
@@ -98,14 +118,41 @@ function parseYaml(text: string): unknown {
 
 // A key whose whole value is one template, for example `password: "{{secrets.member_password}}"`.
 // The value is a reference, not a secret. A literal value or text next to the template stays in.
+// A template-only "default:" goes too, so the map key check below sees only literal defaults.
 const TEMPLATE_ONLY_VALUE = /[\w-]+\s*[=:][ \t]*(["']?)\{\{[^{}\n]*\}\}\1(?=[ \t]*(?:$|[,}\]#]))/gm;
-// A key that opens a nested map, for example a fragment arg "password:" with a "description:" line below.
-// Without this, the secret pattern reads the next line as the value. A scalar on the next line stays in.
-const MAP_KEY = /[\w-]+:[ \t]*(?=\r?\n[ \t]+[\w-]+[ \t]*:)/g;
+const MAP_KEY_LINE = /^([ \t]*)[\w-]+:[ \t]*\r?$/;
+const NESTED_KEY_LINE = /^([ \t]+)[\w-]+[ \t]*:/;
+const LITERAL_DEFAULT = /^[ \t]+default[ \t]*:[ \t]*\S/;
 
-/** Removes keys that hold no literal value, so the secret check sees only literal values. */
+const indentOf = (line: string): number => /^[ \t]*/.exec(line)?.[0].length ?? 0;
+
+/**
+ * Removes keys that hold no literal value, so the secret check sees only literal values.
+ * 1. A key whose whole value is one template.
+ * 2. A key that opens a nested map, for example a fragment arg "password:" with a "description:" line
+ *    below. Without this, the secret pattern reads the next line as the value. The key stays when its
+ *    block has a literal "default:", because a param or arg default is a value of that key.
+ *    A scalar on the next line also keeps the key.
+ */
 function withoutReferenceValues(text: string): string {
-  return text.replace(TEMPLATE_ONLY_VALUE, '').replace(MAP_KEY, '');
+  const lines = text.replace(TEMPLATE_ONLY_VALUE, '').split('\n');
+  return lines
+    .map((line, i) => {
+      const key = MAP_KEY_LINE.exec(line);
+      const next = lines[i + 1];
+      if (!key || next === undefined) return line;
+      const keyIndent = (key[1] as string).length;
+      const nested = NESTED_KEY_LINE.exec(next);
+      if (!nested || (nested[1] as string).length <= keyIndent) return line;
+      for (let j = i + 1; j < lines.length; j++) {
+        const l = lines[j] as string;
+        if (l.trim() === '') continue;
+        if (indentOf(l) <= keyIndent) break;
+        if (LITERAL_DEFAULT.test(l)) return line;
+      }
+      return '';
+    })
+    .join('\n');
 }
 
 function checkInputSafety(text: string): void {
@@ -161,6 +208,23 @@ function authoringDisabled(message: string, description: string): ToolError {
   });
 }
 
+/** An fs error message holds the absolute path. The result names only the relative path and the code. */
+function fsRefused(rel: string, err: unknown): ToolError {
+  const code = (err as NodeJS.ErrnoException).code ?? 'unknown';
+  return new ToolError({
+    code: 'PATH_REFUSED',
+    message: `The server cannot read or write "${rel}" (${code}). Nothing was written.`,
+    likelyCause:
+      code === 'EISDIR'
+        ? 'A folder has this name.'
+        : 'A folder or file in the path has the wrong type or permissions.',
+    nextActions: [
+      { kind: 'change_argument', description: 'Use another path for the file.', tool: 'save_scenario' },
+    ],
+    details: { reason: code },
+  });
+}
+
 async function readIfExists(file: string): Promise<string | undefined> {
   try {
     return await readFile(file, 'utf8');
@@ -190,6 +254,8 @@ interface Checked {
   warnings: RuleIssue[];
   scenarioId: string | null;
   trial: ScenarioRegistry | null;
+  /** Hash of the scenario text and all its fragment texts, from the trial load. */
+  loadedHash: string | null;
 }
 
 async function checkScenarioOrFragment(
@@ -230,18 +296,27 @@ async function checkScenarioOrFragment(
 
   let issues: RuleIssue[];
   let scenarioId: string | null = null;
+  let loadedHash: string | null = null;
   if (kind === 'scenario') {
     const raw = parsed.data as Scenario;
-    const expanded = trial.list().find((l) => path.resolve(l.file) === file)?.scenario;
-    if (!expanded) throw new Error(`Trial load has no scenario for ${file}.`);
-    issues = checkHouseRules({ kind: 'scenario', raw, expanded });
+    const loaded = trial.list().find((l) => path.resolve(l.file) === file);
+    if (!loaded) throw new Error('The trial load has no scenario for the saved file.');
+    issues = checkHouseRules({ kind: 'scenario', raw, expanded: loaded.scenario });
     scenarioId = raw.id;
+    loadedHash = loaded.hash;
   } else {
     issues = checkHouseRules({ kind: 'fragment', raw: parsed.data as Fragment });
   }
   const errors = issues.filter((i) => i.severity === 'error');
   if (errors.length > 0) throw invalid(errors, kind);
-  return { text, fixes, warnings: issues.filter((i) => i.severity === 'warning'), scenarioId, trial };
+  return {
+    text,
+    fixes,
+    warnings: issues.filter((i) => i.severity === 'warning'),
+    scenarioId,
+    trial,
+    loadedHash,
+  };
 }
 
 function checkTestDataText(yaml: string): Checked {
@@ -255,6 +330,7 @@ function checkTestDataText(yaml: string): Checked {
     warnings: issues.filter((i) => i.severity === 'warning'),
     scenarioId: null,
     trial: null,
+    loadedHash: null,
   };
 }
 
@@ -314,7 +390,12 @@ async function doSave(deps: ServerDeps, input: SaveInput): Promise<SaveResult> {
       ? checkTestDataText(input.yaml)
       : await checkScenarioOrFragment(deps, input.kind, file, input.yaml);
 
-  const existing = await readIfExists(file);
+  let existing: string | undefined;
+  try {
+    existing = await readIfExists(file);
+  } catch (err) {
+    throw fsRefused(input.path, err);
+  }
   const unchanged = existing === checked.text;
   if (existing !== undefined && !unchanged && !input.overwrite) {
     throw new ToolError({
@@ -331,7 +412,13 @@ async function doSave(deps: ServerDeps, input: SaveInput): Promise<SaveResult> {
       ],
     });
   }
-  if (!unchanged) await writeAtomic(file, checked.text);
+  if (!unchanged) {
+    try {
+      await writeAtomic(file, checked.text);
+    } catch (err) {
+      throw fsRefused(input.path, err);
+    }
+  }
   if (checked.trial) deps.registry.swap(checked.trial);
   deps.logger.info('save_scenario', {
     kind: input.kind,
@@ -350,10 +437,11 @@ async function doSave(deps: ServerDeps, input: SaveInput): Promise<SaveResult> {
     warnings: checked.warnings,
   };
 
-  if (input.validate_on && checked.scenarioId) {
+  if (input.validate_on && checked.scenarioId && checked.loadedHash) {
     const params = input.validate_on.params ?? {};
     const hash = createHash('sha256')
-      .update(input.validate_on.target + checked.text + JSON.stringify(params))
+      // The loaded hash covers the fragments too, so a fragment change gives a new run.
+      .update(input.validate_on.target + checked.loadedHash + JSON.stringify(sortKeys(params)))
       .digest('hex')
       .slice(0, 16);
     let started: Awaited<ReturnType<ServerDeps['manager']['start']>>;
@@ -362,7 +450,7 @@ async function doSave(deps: ServerDeps, input: SaveInput): Promise<SaveResult> {
         target: input.validate_on.target,
         scenario_id: checked.scenarioId,
         params,
-        idempotency_key: `save-${checked.scenarioId}-${hash}`,
+        idempotency_key: `save-${checked.scenarioId.slice(0, 60)}-${hash}`,
       });
     } catch (err) {
       throw savedButNotStarted(err, input.path);

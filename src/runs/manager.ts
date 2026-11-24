@@ -628,6 +628,7 @@ export class RunManager {
   }
 }
 
-function sortKeys(obj: Record<string, unknown>): Record<string, unknown> {
+/** Same key order for the same params. save_scenario uses it for its validation key too. */
+export function sortKeys(obj: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(obj).sort(([a], [b]) => a.localeCompare(b)));
 }

@@ -426,3 +426,60 @@ describe('fix round 1', () => {
     expect(check(t).find((x) => x.rule === 'no-literal-personal-data')?.path).toBe('steps.0.then.0.value');
   });
 });
+
+describe('secret keywords match the secret patterns', () => {
+  const fragWith = (name: string, d: string) =>
+    checkHouseRules({
+      kind: 'fragment',
+      raw: Fragment.parse({
+        schema_version: 1,
+        kind: 'fragment',
+        id: 'f',
+        description: 'd',
+        args: { [name]: { description: 'A value.', default: d } },
+        steps: [{ id: 's', title: 'S', goto: '/' }],
+      }),
+    });
+
+  it('refuses a literal default of a token param', () => {
+    const issues = check(
+      scenario({ params: '  token: { type: string, default: abc123literal, description: Shop key. }' }),
+    );
+    expect(issues).toContainEqual(
+      expect.objectContaining({ rule: 'no-literal-personal-data', path: 'params.token.default' }),
+    );
+  });
+
+  it('allows a template default of a token param', () => {
+    const issues = check(
+      scenario({
+        params: '  token: { type: string, default: "{{secrets.shop_token}}", description: Shop key. }',
+      }),
+    );
+    expect(rules(issues)).not.toContain('no-literal-personal-data');
+  });
+
+  it.each(['api_key', 'apikey', 'secret', 'pwd', 'passwd', 'parola'])(
+    'refuses a literal default of a fragment arg named %s',
+    (name) => {
+      expect(rules(fragWith(name, 'abc123literal'))).toContain('no-literal-personal-data');
+    },
+  );
+
+  it('allows a template default of an api_key fragment arg', () => {
+    expect(rules(fragWith('api_key', '{{secrets.api_key}}'))).toEqual([]);
+  });
+
+  it('refuses a literal "with" value for a token arg', () => {
+    const issues = check(
+      scenario({ steps: '  - { id: inc, title: I, include: f.yaml, with: { token: abc123literal } }' }),
+      {
+        'f.yaml':
+          'schema_version: 1\nkind: fragment\nid: f\ndescription: d\nargs:\n  token: { description: t }\nsteps:\n  - { id: s, title: S, goto: "/{{args.token}}" }\n',
+      },
+    );
+    expect(issues).toContainEqual(
+      expect.objectContaining({ rule: 'no-literal-personal-data', path: 'steps.0.with.token' }),
+    );
+  });
+});

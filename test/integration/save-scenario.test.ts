@@ -287,6 +287,199 @@ steps:
     });
   });
 
+  describe('fix round 2', () => {
+    const tokenParam = (def: string) =>
+      VALID.replace(
+        'params:\n',
+        `params:\n  token:\n    type: string\n    description: Shop token.\n    default: ${def}\n`,
+      );
+    const apiKeyFragment = (def: string) => `kind: fragment
+id: shop-api
+description: Opens the shop with an API key.
+args:
+  api_key:
+    description: Shop API key.
+    default: ${def}
+steps:
+  - id: open_shop
+    title: Open the shop
+    goto: "/shop/{{args.api_key}}"
+`;
+
+    it('refuses a token param with a literal default', async () => {
+      await setup();
+      const res = await call('save_scenario', {
+        kind: 'scenario',
+        path: 'guest/new-one.yaml',
+        yaml: tokenParam('abc123literal'),
+      });
+      expect(res.structuredContent.error.code).toBe('SECRET_IN_ARGUMENTS');
+      expect(JSON.stringify(res)).not.toContain('abc123literal');
+      expect(existsSync(scenarioFile('guest/new-one.yaml'))).toBe(false);
+    });
+
+    it('allows a token param with a template default', async () => {
+      await setup();
+      const res = await call('save_scenario', {
+        kind: 'scenario',
+        path: 'guest/new-one.yaml',
+        yaml: tokenParam('"{{secrets.shop_token}}"'),
+      });
+      expect(res.structuredContent).toMatchObject({ written: true });
+    });
+
+    it('refuses an api_key fragment arg with a literal default', async () => {
+      await setup();
+      const res = await call('save_scenario', {
+        kind: 'fragment',
+        path: 'guest/shop-api.yaml',
+        yaml: apiKeyFragment('abc123literal'),
+      });
+      expect(res.structuredContent.error.code).toBe('SECRET_IN_ARGUMENTS');
+      expect(existsSync(scenarioFile('guest/shop-api.yaml'))).toBe(false);
+    });
+
+    it('allows an api_key fragment arg with a template default', async () => {
+      await setup();
+      const res = await call('save_scenario', {
+        kind: 'fragment',
+        path: 'guest/shop-api.yaml',
+        yaml: apiKeyFragment('"{{secrets.shop_api_key}}"'),
+      });
+      expect(res.structuredContent).toMatchObject({ written: true });
+    });
+
+    it('a changed fragment gives a new validation run for the same scenario', async () => {
+      await setup();
+      const fragment = (title: string) => `kind: fragment
+id: open-home
+description: Opens the home page.
+steps:
+  - id: open_home
+    title: ${title}
+    goto: /
+`;
+      const yaml = VALID.replace(
+        'steps:\n',
+        'steps:\n  - id: home\n    title: Open home\n    include: open-home.yaml\n',
+      );
+      await call('save_scenario', {
+        kind: 'fragment',
+        path: 'guest/open-home.yaml',
+        yaml: fragment('Open the home page'),
+      });
+      const save = () =>
+        call('save_scenario', {
+          kind: 'scenario',
+          path: 'guest/new-one.yaml',
+          yaml,
+          validate_on: { target: 'demo-local' },
+        });
+      const first = await save();
+      expect(first.structuredContent.validation.reused_existing_run).toBe(false);
+      await call('save_scenario', {
+        kind: 'fragment',
+        path: 'guest/open-home.yaml',
+        yaml: fragment('Open the start page'),
+        overwrite: true,
+      });
+      const second = await save();
+      expect(second.structuredContent).toMatchObject({
+        unchanged: true,
+        validation: { reused_existing_run: false },
+      });
+      expect(second.structuredContent.validation.run_id).not.toBe(first.structuredContent.validation.run_id);
+    });
+
+    it('the same params in another key order give the same run', async () => {
+      await setup();
+      const yaml = VALID.replace(
+        'params:\n',
+        'params:\n  note:\n    type: string\n    default: none\n    description: A free note.\n',
+      );
+      const save = (params: Record<string, string>) =>
+        call('save_scenario', {
+          kind: 'scenario',
+          path: 'guest/new-one.yaml',
+          yaml,
+          validate_on: { target: 'demo-local', params },
+        });
+      const first = await save({ product_path: '/products/a', note: 'b' });
+      const second = await save({ note: 'b', product_path: '/products/a' });
+      expect(second.isError).toBeFalsy();
+      expect(second.structuredContent.validation).toMatchObject({
+        run_id: first.structuredContent.validation.run_id,
+        reused_existing_run: true,
+      });
+    });
+
+    it('two parallel saves of two files both land', async () => {
+      await setup();
+      const [a, b] = await Promise.all([
+        call('save_scenario', {
+          kind: 'scenario',
+          path: 'guest/one.yaml',
+          yaml: VALID.replace('id: new-one', 'id: one'),
+        }),
+        call('save_scenario', {
+          kind: 'scenario',
+          path: 'guest/two.yaml',
+          yaml: VALID.replace('id: new-one', 'id: two'),
+        }),
+      ]);
+      expect(a.isError).toBeFalsy();
+      expect(b.isError).toBeFalsy();
+      const list = await call('list_scenarios', {});
+      const ids = list.structuredContent.scenarios.map((s: { id: string }) => s.id);
+      expect(ids).toEqual(expect.arrayContaining(['one', 'two']));
+    });
+
+    it('an unchanged save with overwrite reports unchanged', async () => {
+      await setup();
+      await call('save_scenario', { kind: 'scenario', path: 'guest/new-one.yaml', yaml: VALID });
+      const res = await call('save_scenario', {
+        kind: 'scenario',
+        path: 'guest/new-one.yaml',
+        yaml: VALID,
+        overwrite: true,
+      });
+      expect(res.structuredContent).toMatchObject({ unchanged: true, written: false });
+    });
+
+    it('does not show an absolute path when the target is a folder', async () => {
+      await setup();
+      await mkdir(scenarioFile('guest/folder.yaml'), { recursive: true });
+      const res = await call('save_scenario', {
+        kind: 'scenario',
+        path: 'guest/folder.yaml',
+        yaml: VALID,
+        overwrite: true,
+      });
+      expect(res.isError).toBe(true);
+      expect(res.structuredContent.error.code).toBe('PATH_REFUSED');
+      expect(JSON.stringify(res)).not.toContain(dir);
+      expect(JSON.stringify(res)).not.toContain(os.tmpdir());
+    });
+
+    it('does not echo an email from a schema error', async () => {
+      await setup();
+      const res = await call('save_scenario', {
+        kind: 'scenario',
+        path: 'guest/new-one.yaml',
+        yaml: `${VALID}someone@shopmail.com: 1\n`,
+      });
+      expect(res.structuredContent.error.code).toBe('SCENARIO_INVALID');
+      expect(JSON.stringify(res)).not.toContain('someone@shopmail.com');
+      const res2 = await call('save_scenario', {
+        kind: 'scenario',
+        path: 'guest/new-one.yaml',
+        yaml: VALID.replace('  product_path:\n', '  someone@shopmail.com:\n'),
+      });
+      expect(res2.structuredContent.error.code).toBe('SCENARIO_INVALID');
+      expect(JSON.stringify(res2)).not.toContain('someone@shopmail.com');
+    });
+  });
+
   it('returns warnings and no validation run without validate_on', async () => {
     await setup();
     const yaml = VALID.replace(

@@ -1,7 +1,13 @@
+/**
+ * Words that name a secret. The house rules use the same list for param, arg, and "with" names,
+ * so a name that the secret pattern refuses is also a name that must not hold a literal.
+ */
+export const SECRET_KEYWORDS = /password|passwd|pwd|secret|api[_-]?key|token|şifre|sifre|parola/i;
+
 const SECRET_PATTERNS: readonly RegExp[] = [
   /\b(sk|rk)_live_[A-Za-z0-9]{8,}/,
   /\bBearer\s+[A-Za-z0-9._~+/-]{10,}/i,
-  /\b(password|passwd|pwd|secret|api[_-]?key|token)\s*[=:]\s*\S+/i,
+  new RegExp(`\\b(${SECRET_KEYWORDS.source})\\s*[=:]\\s*\\S+`, 'i'),
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
 ];
 

@@ -59,7 +59,7 @@ export const SaveScenarioOutput = z.object({
       status: RunStatus,
       reused_existing_run: z
         .boolean()
-        .describe('True when the same file, target, and params already had a validation run.'),
+        .describe('True when the same file, fragments, target, and params already had a validation run.'),
     })
     .nullable()
     .describe('The validation run. null without validate_on.'),
@@ -68,9 +68,9 @@ export const SaveScenarioOutput = z.object({
 
 export const SAVE_SCENARIO_DESCRIPTION = [
   'Writes one scenario, fragment, or test data YAML file that you wrote, after the server checks it. The path is relative to the authoring folder of the server config (test data: the test data folder).',
-  'The server adds the schema line and schema_version, validates the schema, and loads all scenario folders with the new file as a trial. It refuses card numbers, secrets, literal emails, phones, and passwords, and weak outcome checks. A refusal is SCENARIO_INVALID with every issue in details.issues, and nothing is written.',
+  'The server adds the schema line and schema_version, validates the schema, and loads all scenario folders with the new file as a trial. It refuses literal emails, phones, and passwords, and weak outcome checks. A rule failure is SCENARIO_INVALID with every issue in details.issues. Other refusals: REAL_CARD_DATA_REFUSED (a card number), SECRET_IN_ARGUMENTS (a secret), PATH_REFUSED, SCENARIO_EXISTS, AUTHORING_DISABLED. A refusal writes nothing.',
   'Saving the same content again is safe and returns unchanged: true. To change a file, set overwrite: true.',
-  'validate_on starts a run of the saved scenario on a test target. Then call get_run_result with the run_id. The same file, target, and params give the same run.',
+  'validate_on starts a run of the saved scenario on a test target. Then call get_run_result with the run_id. The same file, fragments, target, and params give the same run.',
 ].join(' ');
 
 export function registerSaveScenario(server: McpServer, deps: ServerDeps): void {
@@ -81,7 +81,8 @@ export function registerSaveScenario(server: McpServer, deps: ServerDeps): void 
       description: SAVE_SCENARIO_DESCRIPTION,
       inputSchema: SaveScenarioInput,
       outputSchema: SaveScenarioOutput,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      // validate_on starts a browser run against a test target, so the tool reaches outside the server.
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     },
     async (args) => {
       try {

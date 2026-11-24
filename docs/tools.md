@@ -590,7 +590,8 @@ server.registerTool(
         .nullable(),
       next: NextAction,
     }),
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    // openWorldHint: validate_on starts a browser run against a test target.
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   },
   handler,
 );
@@ -600,11 +601,11 @@ The server does these steps in this order. A refusal writes nothing.
 
 1. No `authoring` block in the config: `AUTHORING_DISABLED`. `kind: "test_data"` without `authoring.test_data_dir_writable: true`: `AUTHORING_DISABLED`. `validate_on` with a kind other than `scenario`: `INVALID_PARAMS`.
 2. The path resolves inside `authoring.dir` (scenario, fragment) or `test_data_dir` (test data). A path with `..`, an absolute path, a wrong name, or a symlink that leaves the folder: `PATH_REFUSED`.
-3. A card-like number anywhere in the text, also a registry test card number: `REAL_CARD_DATA_REFUSED`. Secret-like text: `SECRET_IN_ARGUMENTS`. A key whose whole value is one template, for example `password: "{{secrets.member_password}}"`, and a key that opens a nested map are not secret values.
-4. Automatic fixes (schema line, `schema_version: 1`), YAML parse, zod schema, trial load of all scenario folders with the new text, and the house rules. Test data gets no fixes and uses the test data rules. Any error: `SCENARIO_INVALID` with every issue in `details.issues`.
+3. A card-like number anywhere in the text, also a registry test card number: `REAL_CARD_DATA_REFUSED`. Secret-like text: `SECRET_IN_ARGUMENTS`. A key whose whole value is one template, for example `password: "{{secrets.member_password}}"`, is not a secret value. A key that opens a nested map is not a secret value either, unless its block has a literal `default:`.
+4. Automatic fixes (schema line, `schema_version: 1`), YAML parse, zod schema, trial load of all scenario folders with the new text, and the house rules. Test data gets no fixes and uses the test data rules. Any error: `SCENARIO_INVALID` with every issue in `details.issues`. An issue never shows a YAML key with other characters than letters, digits, `_`, and `-`. Such a key shows as `<key>`, because it can be an email or another value.
 5. The file exists with the same text after the fixes: success with `unchanged: true` and `written: false`. Other text and `overwrite: false`: `SCENARIO_EXISTS`.
-6. Atomic write (temp file in the same folder, then rename). The server swaps in the trial registry, so `list_scenarios` and `run_scenario` see the file at once.
-7. `validate_on` starts a run. The server makes the idempotency key: `save-<scenario_id>-<first 16 hex of sha256(target + file text + JSON params)>`. The same file, target, and params give the same run. A changed file or another target gives a new run. When the run does not start, the error message says that the file was saved, and `details` has `saved: true`.
+6. Atomic write (temp file in the same folder, then rename). A read or write error, for example a folder with the file name, gives `PATH_REFUSED` with the relative path and the error code, never the absolute path. The server swaps in the trial registry, so `list_scenarios` and `run_scenario` see the file at once.
+7. `validate_on` starts a run. The server makes the idempotency key: `save-<first 60 characters of scenario_id>-<first 16 hex of sha256(target + scenario hash + params JSON with sorted keys)>`. The scenario hash comes from the trial load and covers the scenario text and all its fragment texts. The same file, fragments, target, and params give the same run, also with the params in another key order. A changed file, a changed fragment, or another target gives a new run. When the run does not start, the error message says that the file was saved, and `details` has `saved: true`.
 
 Example: save and validate.
 
@@ -672,7 +673,7 @@ Errors:
 | Code | When |
 |---|---|
 | `AUTHORING_DISABLED` | No `authoring` block, or test data writes are off. |
-| `PATH_REFUSED` | The path is not relative, does not match the name rule, or leaves the folder. |
+| `PATH_REFUSED` | The path is not relative, does not match the name rule, or leaves the folder. The server cannot read or write the file. |
 | `REAL_CARD_DATA_REFUSED` | The text has a card-like number. |
 | `SECRET_IN_ARGUMENTS` | The text has secret-like text. |
 | `SCENARIO_INVALID` | Schema, house rule, or trial load issues. See `details.issues`. |
