@@ -85,6 +85,9 @@ const RELEVANT_KINDS: WordKind[] = [
   'success',
   'decline',
 ];
+// Login form labels. Unicode lookarounds keep "şifre" and "giriş" whole words.
+const AUTH_WORDS =
+  /(?<![\p{L}\p{N}])(password|sifre|şifre|parola|email|e-posta|eposta|login|giris|giriş|sign in|log in|anmelden|connexion|iniciar sesión|accedi|inloggen)(?![\p{L}\p{N}])/u;
 const OTP_WORDS =
   /(?<![a-z])(otp|one time (code|pass\w*)|sms code|send code|verify code|verification code|doğrulama kodu)(?![a-z])/;
 const KV_LINE = /(?:^|[\s{,])["']?([\w.-]+)["']?\s*:\s*(["'`])((?:\\.|(?!\2).)*)\2/g;
@@ -219,7 +222,8 @@ export async function scanSource(dirs: string[], opts: ScanOptions): Promise<Cod
 
   function relevantString(key: string, text: string): boolean {
     const k = words(key);
-    if (KEY_WORDS.test(k)) return true;
+    if (KEY_WORDS.test(k) || AUTH_WORDS.test(k.toLocaleLowerCase('tr-TR'))) return true;
+    if (AUTH_WORDS.test(text.toLocaleLowerCase('tr-TR'))) return true;
     for (const t of [k, text]) {
       if (matchesKind('pay', t, opts.words)) return true;
       if (RELEVANT_KINDS.some((kind) => matchesKind(kind, t, opts.words))) return true;

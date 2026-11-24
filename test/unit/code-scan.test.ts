@@ -84,7 +84,7 @@ describe('scanSource', () => {
         'export default {\n  checkout: "Proceed to checkout",\n  footer: "Contact",\n  password: "Password: abc",\n};\n',
       );
       w('locales/de.json', '{ "checkout": { "password": "hunter22" } }');
-      w('locales/fr.ts', 'export default {\n  loginPassword: "Şifre",\n};\n');
+      w('locales/fr.ts', 'export default {\n  password: "Şifre",\n};\n');
       w('src/b.tsx', '<i data-qa="kept-id" token="y" />\n');
       fs.writeFileSync(path.join(dir, 'bin.tsx'), Buffer.from([65, 0, 66]));
       fs.writeFileSync(path.join(dir, 'big.tsx'), 'x'.repeat(600 * 1024));
@@ -111,7 +111,7 @@ describe('scanSource', () => {
       expect(r.ui_strings.map((s) => s.key)).toContain('checkout');
       expect(r.ui_strings.map((s) => s.key)).not.toContain('footer');
       expect(r.test_ids.map((t) => t.value)).toContain('kept-id');
-      expect(r.ui_strings).toContainEqual(expect.objectContaining({ key: 'loginPassword', text: 'Şifre' }));
+      expect(r.ui_strings).toContainEqual(expect.objectContaining({ key: 'password', text: 'Şifre' }));
     });
   });
 });
