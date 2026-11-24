@@ -1,8 +1,8 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { type Browser, type BrowserContext, chromium, errors, type Page, selectors } from 'playwright';
+import { type Browser, type BrowserContext, errors, type Page } from 'playwright';
 import { containsUnregisteredCardNumber } from '../safety/cards.js';
-import { hostOf, isUrlAllowed } from '../safety/hosts.js';
+import { hostOf } from '../safety/hosts.js';
 import { type Redactor, redactQuery } from '../safety/secrets.js';
 import { readJsonPath, renderCaptured, TemplateError } from '../scenarios/template.js';
 import type { FailureCategory, Verdict } from '../schemas/common.js';
@@ -17,6 +17,7 @@ import type {
   StepResult,
 } from '../schemas/run.js';
 import type { Action, Capture, Expectation, OutcomeCheck, Scenario, Step } from '../schemas/scenario.js';
+import { openGuardedContext } from './browser.js';
 import { classify } from './classify.js';
 import { describeLocator, scopeFor, toLocator } from './locator.js';
 import {
@@ -513,26 +514,24 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   }
 
   const main = async () => {
-    selectors.setTestIdAttribute(target.test_id_attribute);
-    browser = await chromium.launch({ headless: input.config.headless });
-    context = await browser.newContext({
-      baseURL: target.base_url,
-      viewport: { width: 1280, height: 900 },
-      ...(target.locale ? { locale: target.locale } : {}),
+    const guarded = await openGuardedContext({
+      config: input.config,
+      target,
       ...(input.httpCredentials ? { httpCredentials: input.httpCredentials } : {}),
+      onBlocked: (url, isMainFrameNavigation) => {
+        blockedUrls.add(url);
+        blocked.push({ url: redactQuery(url), step_id: currentStepId });
+        if (isMainFrameNavigation && page) blockedNavigation = redactQuery(url);
+      },
     });
+    // After a run timeout the cleanup has run already, so this browser must close here.
+    if (runTimedOut) {
+      await guarded.close();
+      return;
+    }
+    browser = guarded.browser;
+    context = guarded.context;
     if (options.trace) await context.tracing.start({ screenshots: true, snapshots: true });
-
-    await context.route('**/*', async (route) => {
-      const req = route.request();
-      const url = req.url();
-      if (isUrlAllowed(url, target, input.config)) return route.continue();
-      blockedUrls.add(url);
-      blocked.push({ url: redactQuery(url), step_id: currentStepId });
-      if (req.isNavigationRequest() && page && req.frame() === page.mainFrame())
-        blockedNavigation = redactQuery(url);
-      return route.abort('blockedbyclient');
-    });
 
     page = await context.newPage();
     page.on('console', (msg) => {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Small demo store for checkout-test-mcp. No dependencies.
-// It has one product, a guest checkout, and a mock card provider with a 3D Secure challenge.
+// It has a product listing with one product, a guest checkout, and a mock card provider with a 3D Secure challenge.
 // The mock provider decides by the last 4 digits of the card, the same way Stripe test cards behave.
 // It also has a phone check with an SMS code. Like many test environments, send-code returns the code
 // in its response, so a scenario can read it with "capture".
@@ -36,8 +36,9 @@ iframe{border:1px solid #ccc;width:100%;max-width:380px}
 </style></head>
 <body>
 <header><a href="/products/${PRODUCT.slug}">Demo Store</a>
-<nav><a href="/checkout">Checkout</a> (<span data-testid="cart-count">${cartCount(session)}</span>)</nav></header>
+<nav><a href="/products">Products</a> <a href="/checkout">Checkout</a> (<span data-testid="cart-count">${cartCount(session)}</span>)</nav></header>
 <main>${body}</main>
+<footer><a href="/account/verify-phone">Verify phone</a></footer>
 <script>${script}</script>
 </body></html>`;
 }
@@ -64,6 +65,14 @@ document.getElementById('add').addEventListener('click', async () => {
   const j = await r.json();
   document.querySelector('[data-testid=cart-count]').textContent = j.count;
 });`,
+  );
+
+const listingPage = (s) =>
+  layout(
+    'Products',
+    s,
+    `<h1>Products</h1>
+<ul><li><a href="/products/${PRODUCT.slug}">${PRODUCT.name}</a> ${tl(PRODUCT.price)}</li></ul>`,
   );
 
 const checkoutStart = (s) =>
@@ -240,6 +249,7 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
     const m = req.method ?? 'GET';
 
     if (m === 'GET' && p === '/') return html(res, productPage(s));
+    if (m === 'GET' && p === '/products') return html(res, listingPage(s));
     if (m === 'GET' && p === `/products/${PRODUCT.slug}`) return html(res, productPage(s));
     if (m === 'GET' && p === `/api/products/${PRODUCT.slug}`) {
       return json(res, 200, { ...PRODUCT, price_text: tl(PRODUCT.price) });

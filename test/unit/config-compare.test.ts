@@ -82,6 +82,32 @@ describe('config', () => {
       expect(c.targets.t?.inspect?.source_dirs).toEqual([path.join(dir, 'src-x')]);
     });
 
+    it('refuses authoring.dir in a sibling folder that shares a scenario dir prefix', () => {
+      expect(() =>
+        parseConfig({ ...base, scenario_dirs: ['./scenarios'], authoring: { dir: './scenarios-x' } }, dir),
+      ).toThrow(/authoring.dir must be inside one of scenario_dirs/);
+    });
+
+    it.each([
+      ['start_paths', '//other.test/x'],
+      ['start_paths', '/\\other.test/x'],
+      ['product_paths', '//other.test/x'],
+      ['product_paths', '/\\other.test/x'],
+      ['product_paths', 'products/x'],
+    ])('refuses inspect.%s entry %j, which can leave the target host', (key, value) => {
+      expect(() =>
+        parseConfig({ ...base, targets: { t: { ...target, inspect: { [key]: [value] } } } }, dir),
+      ).toThrow(ConfigError);
+    });
+
+    it('accepts inspect paths with a query', () => {
+      const c = parseConfig(
+        { ...base, targets: { t: { ...target, inspect: { start_paths: ['/', '/search?q=mug'] } } } },
+        dir,
+      );
+      expect(c.targets.t?.inspect?.start_paths).toEqual(['/', '/search?q=mug']);
+    });
+
     it('refuses inspect.max_pages above 100', () => {
       expect(() =>
         parseConfig({ ...base, targets: { t: { ...target, inspect: { max_pages: 101 } } } }, dir),

@@ -9,13 +9,18 @@ const HostPattern = z
     'Use a host name like "staging.shop.test" or "*.shop.test", without scheme or port.',
   );
 
+/** A path on the target host. "//host/x" and "/\\x" would leave the host, so they are refused. */
+const SitePath = z
+  .string()
+  .regex(/^\/(?![/\\])/, 'Use a path on the target host that starts with one "/", like "/products".');
+
 /** Settings for inspect_target. Every field has a default, so an empty block is valid. */
 export const InspectConfig = z
   .object({
     /** Read-only source folders for the code scan. Relative to the config folder. */
     source_dirs: z.array(z.string()).default([]),
-    start_paths: z.array(z.string().startsWith('/')).min(1).default(['/']),
-    product_paths: z.array(z.string().startsWith('/')).default([]),
+    start_paths: z.array(SitePath).min(1).default(['/']),
+    product_paths: z.array(SitePath).default([]),
     max_pages: z.number().int().min(1).max(100).default(25),
     /** The probe may click add-to-cart and the checkout button. It never clicks a pay button. */
     probe_checkout: z.boolean().default(false),
