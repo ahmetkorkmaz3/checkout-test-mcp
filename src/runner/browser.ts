@@ -1,10 +1,14 @@
 import { type Browser, type BrowserContext, chromium, type Frame, type Route, selectors } from 'playwright';
-import { isUrlAllowed } from '../safety/hosts.js';
+import { isUrlAllowed, matchesAny } from '../safety/hosts.js';
 import type { ResolvedConfig, TargetConfig } from '../schemas/config.js';
 
 export interface GuardedContextInput {
   config: Pick<ResolvedConfig, 'production_hosts' | 'headless'>;
   target: TargetConfig;
+  /**
+   * HTTP basic auth for the hosts in `target.allowed_hosts` only. The guard adds the header itself, so the
+   * credentials never go to a third-party host, also when that host asks for them.
+   */
   httpCredentials?: { username: string; password: string };
   /**
    * Called for each request the guard aborts. The URL can hold a query, so redact it before you store it.
@@ -20,6 +24,8 @@ export type BlockedListener = (url: string, frame: Frame | null, isNavigation: b
  * to another host. No document or executable content can.
  */
 const PASSIVE_TYPES = new Set(['image', 'media', 'font', 'stylesheet']);
+/** A long-lived stream. The guard fetch reads the full body, so it would hold a stream until its timeout. */
+const STREAM_TYPES = new Set(['eventsource']);
 
 const blockedListeners = new WeakMap<BrowserContext, Set<BlockedListener>>();
 
@@ -59,14 +65,22 @@ export async function openGuardedContext(input: GuardedContextInput): Promise<Gu
       baseURL: target.base_url,
       viewport: { width: 1280, height: 900 },
       ...(target.locale ? { locale: target.locale } : {}),
-      ...(input.httpCredentials ? { httpCredentials: input.httpCredentials } : {}),
     });
+    // Not the httpCredentials option of the context: Chromium and route.fetch then answer a basic auth
+    // challenge from any host, also from a third-party host.
+    const authorization = input.httpCredentials ? basicAuthHeader(input.httpCredentials) : null;
     await context.route('**/*', async (route) => {
       const req = route.request();
       const url = req.url();
       if (!isUrlAllowed(url, target, config)) return blockRequest(route, url, notify);
-      if (PASSIVE_TYPES.has(req.resourceType())) return route.continue();
-      await fetchWithRedirectCheck(route, (next) => isUrlAllowed(next, target, config), notify);
+      const headers = authorization
+        ? withAuthorization(req.headers(), url, target, authorization)
+        : undefined;
+      const type = req.resourceType();
+      if (PASSIVE_TYPES.has(type) || STREAM_TYPES.has(type)) {
+        return route.continue(headers ? { headers } : undefined);
+      }
+      await fetchWithRedirectCheck(route, headers, (next) => isUrlAllowed(next, target, config), notify);
     });
     blockedListeners.set(context, listeners);
     return {
@@ -78,6 +92,31 @@ export async function openGuardedContext(input: GuardedContextInput): Promise<Gu
     await browser.close().catch(() => {});
     throw err;
   }
+}
+
+function basicAuthHeader(creds: { username: string; password: string }): string {
+  return `Basic ${Buffer.from(`${creds.username}:${creds.password}`).toString('base64')}`;
+}
+
+/**
+ * The request headers with the basic auth header, for a host in `allowed_hosts` only. Returns undefined
+ * for any other host, and when the page set its own Authorization header, such as a bearer token.
+ */
+function withAuthorization(
+  headers: Record<string, string>,
+  url: string,
+  target: TargetConfig,
+  authorization: string,
+): Record<string, string> | undefined {
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return undefined;
+  }
+  if (!matchesAny(host, target.allowed_hosts)) return undefined;
+  if (Object.keys(headers).some((k) => k.toLowerCase() === 'authorization')) return undefined;
+  return { ...headers, authorization };
 }
 
 function frameOf(route: Route): Frame | null {
@@ -105,12 +144,13 @@ async function blockRequest(route: Route, url: string, notify: BlockedListener):
  */
 async function fetchWithRedirectCheck(
   route: Route,
+  headers: Record<string, string> | undefined,
   isAllowed: (url: string) => boolean,
   notify: BlockedListener,
 ): Promise<void> {
   let response: Awaited<ReturnType<Route['fetch']>>;
   try {
-    response = await route.fetch({ maxRedirects: 0 });
+    response = await route.fetch({ maxRedirects: 0, ...(headers ? { headers } : {}) });
   } catch (err) {
     // Fail closed: a request that the guard could not send never goes to the browser network stack.
     await route.abort(abortCodeFor(err)).catch(() => {});

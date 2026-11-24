@@ -28,6 +28,7 @@ let store: {
   close(): Promise<void>;
   stats: { orders: number };
   issuedOtps: string[];
+  authRequests: { host: string; path: string; authorization: boolean }[];
 };
 let client: Client;
 
@@ -144,6 +145,30 @@ steps:
       - text: { test_id: login-state, equals: Signed in }
 `;
 
+const BASIC_AUTH_SCENARIO = `
+schema_version: 1
+id: basic-auth-check
+title: Opens a page behind HTTP basic auth
+summary: Runner test. The guard sends the target credentials to the target host.
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open
+    title: Open the staging page
+    goto: /staging-only
+    expect:
+      - text: { test_id: auth-state, equals: Authorized }
+  - id: load
+    title: Load the data
+    click: { role: button, name: Load data }
+    expect:
+      - text: { test_id: data-state, equals: Data loaded }
+`;
+
+// Fixed test values for the demo store. They are not secrets.
+const BASIC_USER = 'demo';
+const BASIC_PASS = 'demo-test-pass';
+
 const NO_MATCH_SCENARIO = `
 schema_version: 1
 id: capture-regex-no-match
@@ -167,13 +192,22 @@ steps:
 
 beforeAll(async () => {
   dir = await mkdtemp(path.join(os.tmpdir(), 'ctm-e2e-'));
-  store = await startDemoStore({ port: 0 });
+  store = await startDemoStore({ port: 0, basicAuth: { username: BASIC_USER, password: BASIC_PASS } });
   const config = parseConfig(
     {
       runs_dir: path.join(dir, 'runs'),
       scenario_dirs: [path.join(ROOT, 'scenarios/demo-store')],
       test_data_dir: path.join(ROOT, 'test-data'),
-      targets: { 'demo-local': { profile: 'demo-store', base_url: store.url, allowed_hosts: ['localhost'] } },
+      targets: {
+        'demo-local': { profile: 'demo-store', base_url: store.url, allowed_hosts: ['localhost'] },
+        'demo-auth': {
+          profile: 'demo-store',
+          base_url: store.url,
+          allowed_hosts: ['localhost'],
+          secrets: { basic_user: 'CTM_E2E_BASIC_USER', basic_pass: 'CTM_E2E_BASIC_PASS' },
+          http_credentials: { username_secret: 'basic_user', password_secret: 'basic_pass' },
+        },
+      },
     },
     dir,
   );
@@ -187,10 +221,17 @@ beforeAll(async () => {
     parseScenario(REDIRECT_IN_SCENARIO, 'inline-redirect-in.yaml'),
     parseScenario(REDIRECT_SUB_SCENARIO, 'inline-redirect-sub.yaml'),
     parseScenario(COOKIE_SCENARIO, 'inline-redirect-cookie.yaml'),
+    parseScenario(BASIC_AUTH_SCENARIO, 'inline-basic-auth.yaml'),
   ]);
   const runStore = new RunStore(config.runs_dir);
   await runStore.init();
-  const manager = new RunManager({ config, registry, store: runStore, logger: silentLogger });
+  const manager = new RunManager({
+    config,
+    registry,
+    store: runStore,
+    logger: silentLogger,
+    env: { ...process.env, CTM_E2E_BASIC_USER: BASIC_USER, CTM_E2E_BASIC_PASS: BASIC_PASS },
+  });
   const server = createServer({
     config,
     registry,
@@ -437,6 +478,64 @@ describe('redirects through the host guard', () => {
         { url: 'https://pay.example.net/card', frame: true, navigation: true },
         { url: 'https://example.com/api', frame: true, navigation: false },
       ]);
+    } finally {
+      await guarded.close();
+    }
+  });
+});
+
+describe('basic auth through the host guard', () => {
+  it('runs a scenario on a page behind basic auth with the target http_credentials', async () => {
+    const res = await runToEnd({
+      target: 'demo-auth',
+      scenario_id: 'basic-auth-check',
+      idempotency_key: 'e2e-basic-auth-01',
+    });
+    const out = res.structuredContent;
+    expect(out.verdict, JSON.stringify(out.failure)).toBe('passed');
+    expect(JSON.stringify(out)).not.toContain(BASIC_PASS);
+  });
+
+  it('sends the credentials to the target host and never to a third-party host', async () => {
+    const config = parseConfig(
+      {
+        targets: {
+          t: {
+            profile: 'demo-store',
+            base_url: store.url,
+            allowed_hosts: ['localhost'],
+            third_party_hosts: ['127.0.0.1'],
+          },
+        },
+      },
+      dir,
+    );
+    const target = config.targets.t;
+    if (!target) throw new Error('test config has no target');
+    const guarded = await openGuardedContext({
+      config,
+      target,
+      httpCredentials: { username: BASIC_USER, password: BASIC_PASS },
+      onBlocked: () => {},
+    });
+    const first = store.authRequests.length;
+    try {
+      const page = await guarded.context.newPage();
+      const res = await page.goto('/staging-only');
+      expect(res?.status()).toBe(200);
+      await page.getByRole('button', { name: 'Load data' }).click();
+      await expect.poll(() => page.getByTestId('data-state').textContent()).toBe('Data loaded');
+      const seen = () => store.authRequests.slice(first);
+      await expect
+        .poll(() => seen().some((r) => r.host.startsWith('127.0.0.1') && r.path === '/third-party/api'))
+        .toBe(true);
+      const own = seen().filter((r) => r.host.startsWith('localhost'));
+      expect(own.map((r) => r.path)).toEqual(expect.arrayContaining(['/staging-only', '/staging-only/api']));
+      expect(seen().filter((r) => r.host.startsWith('127.0.0.1') && r.authorization)).toEqual([]);
+      expect(own.every((r) => r.authorization)).toBe(true);
+      // The guard sets the request headers for the auth header. Cookies must still go with the request.
+      await page.goto('/login-cookie');
+      expect(await page.getByTestId('login-state').textContent()).toBe('Signed in');
     } finally {
       await guarded.close();
     }

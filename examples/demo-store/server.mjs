@@ -10,6 +10,8 @@
 // page has an iframe that redirects to a payment host outside the allowlist).
 // Redirect routes for the host guard tests: /go/out, /go/in, /frame/out, /api/redirect-out, /login-cookie.
 // No test follows a redirect to an outside host. The guard must block it before the browser sends it.
+// /staging-only needs HTTP basic auth with the fixed test user from startDemoStore({ basicAuth }).
+// /third-party/* answers 401 with a basic auth challenge and records if a request had an Authorization header.
 
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -277,6 +279,26 @@ const sessionPage = (s, signedIn) =>
     `<h1>Session</h1><p data-testid="login-state">${signedIn ? 'Signed in' : 'Signed out'}</p>`,
   );
 
+// A page behind basic auth. It loads data from its own host and from a "third-party" host (127.0.0.1).
+const stagingPage = (s, thirdParty) =>
+  layout(
+    'Staging',
+    s,
+    `<h1>Staging</h1><p data-testid="auth-state">Authorized</p>
+<button id="load">Load data</button>
+<p id="state" data-testid="data-state">Not loaded</p>`,
+    `document.getElementById('load').addEventListener('click', async () => {
+  const state = document.getElementById('state');
+  fetch('${thirdParty}/third-party/api', { mode: 'no-cors' }).catch(() => {});
+  try {
+    const r = await fetch('/staging-only/api');
+    state.textContent = r.ok ? 'Data loaded' : 'Data denied';
+  } catch {
+    state.textContent = 'Data denied';
+  }
+});`,
+  );
+
 const successPage = (s, orderId) =>
   layout(
     'Order placed',
@@ -284,13 +306,20 @@ const successPage = (s, orderId) =>
     `<h1>Thank you for your order</h1><p>Order number: <strong data-testid="order-number">${esc(orderId)}</strong></p>`,
   );
 
-export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = {}) {
+export function startDemoStore({
+  port = 4173,
+  host = '127.0.0.1',
+  bugs = [],
+  basicAuth = { username: 'demo', password: 'demo-test-pass' },
+} = {}) {
   const sessions = new Map();
   const payments = new Map();
   let activeBugs = new Set(bugs);
   const stats = { orders: 0, payments: 0, return_rejects: 0, cookieAccepted: 0, contacts: 0 };
   // Codes that send-code returned. Tests use them to check that results never show a code.
   const issuedOtps = [];
+  // One entry for each request to a basic auth route: the host and if the request had an Authorization header.
+  const authRequests = [];
 
   function session(req, res) {
     const sid = /(?:^|;\s*)sid=([A-Za-z0-9_-]+)/.exec(req.headers.cookie ?? '')?.[1];
@@ -346,6 +375,21 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
     const loginRequired = activeBugs.has('login-wall');
     s.redirectFrame = activeBugs.has('redirect-frame');
 
+    if (
+      m === 'GET' &&
+      (p === '/staging-only' || p === '/staging-only/api' || p.startsWith('/third-party/'))
+    ) {
+      const header = req.headers.authorization;
+      authRequests.push({ host: req.headers.host ?? '', path: p, authorization: header !== undefined });
+      const expected = `Basic ${Buffer.from(`${basicAuth.username}:${basicAuth.password}`).toString('base64')}`;
+      if (p.startsWith('/third-party/') || header !== expected) {
+        res.writeHead(401, { 'www-authenticate': 'Basic realm="staging"', 'content-type': 'text/plain' });
+        return res.end('Unauthorized');
+      }
+      if (p === '/staging-only/api') return json(res, 200, { ok: true });
+      const thirdParty = `http://127.0.0.1:${(req.headers.host ?? '').split(':')[1] ?? ''}`;
+      return html(res, stagingPage(s, thirdParty));
+    }
     if (m === 'GET' && p === '/go/out') return redirect(res, 'https://example.com/landing');
     if (m === 'GET' && p === '/go/in') return redirect(res, `/products/${PRODUCT.slug}`);
     if (m === 'GET' && p === '/frame/out') return redirect(res, 'https://pay.example.net/card');
@@ -487,6 +531,7 @@ export function startDemoStore({ port = 4173, host = '127.0.0.1', bugs = [] } = 
         port: actualPort,
         stats,
         issuedOtps,
+        authRequests,
         setBugs: (list) => {
           activeBugs = new Set(list);
         },
