@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   containsCardNumber,
   containsUnregisteredCardNumber,
@@ -12,9 +15,11 @@ import {
   isLocalHost,
   isUrlAllowed,
 } from '../../src/safety/hosts.js';
+import { redactText } from '../../src/safety/redact-text.js';
 import { looksLikeSecret, Redactor, redactQuery } from '../../src/safety/secrets.js';
 import { providerForPackage, TEST_CARDS } from '../../src/safety/test-cards.js';
 import type { TargetConfig } from '../../src/schemas/config.js';
+import { resolveInside, YAML_PATH } from '../../src/util/paths.js';
 
 const target = (over: Partial<TargetConfig> = {}): TargetConfig => ({
   description: '',
@@ -155,5 +160,96 @@ describe('secrets', () => {
   it('redacts query string values', () => {
     expect(redactQuery('https://a.test/p?token=abc&x=1')).toBe('https://a.test/p?token=REDACTED&x=REDACTED');
     expect(redactQuery('https://a.test/p')).toBe('https://a.test/p');
+  });
+});
+
+describe('resolveInside', () => {
+  let root: string;
+  let outside: string;
+  beforeEach(() => {
+    root = mkdtempSync(path.join(os.tmpdir(), 'ctm-root-'));
+    outside = mkdtempSync(path.join(os.tmpdir(), 'ctm-out-'));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it.each(['../x.yaml', '/etc/x.yaml', 'a/../../x.yaml', 'a\\b.yaml', 'Upper.yaml', 'x.yml.txt'])(
+    'refuses %s',
+    (rel) => {
+      expect(() => resolveInside(root, rel, { pattern: YAML_PATH })).toThrow(
+        expect.objectContaining({ code: 'PATH_REFUSED' }),
+      );
+    },
+  );
+
+  it('refuses a symlinked folder that leaves the root', () => {
+    symlinkSync(outside, path.join(root, 'out'));
+    expect(() => resolveInside(root, 'out/x.yaml', { pattern: YAML_PATH })).toThrow(
+      expect.objectContaining({ code: 'PATH_REFUSED' }),
+    );
+  });
+
+  it('refuses a symlinked folder when the target file does not exist yet in a deeper folder', () => {
+    symlinkSync(outside, path.join(root, 'out'));
+    expect(() => resolveInside(root, 'out/new/x.yaml', { pattern: YAML_PATH })).toThrow(
+      expect.objectContaining({ code: 'PATH_REFUSED' }),
+    );
+  });
+
+  it('returns the absolute path for a new file in a new folder', () => {
+    expect(resolveInside(root, 'shop/new-one.yaml', { pattern: YAML_PATH })).toBe(
+      path.join(root, 'shop/new-one.yaml'),
+    );
+  });
+
+  it('accepts an existing folder inside the root', () => {
+    mkdirSync(path.join(root, 'shop'));
+    expect(resolveInside(root, 'shop/a.yaml', { pattern: YAML_PATH })).toBe(path.join(root, 'shop/a.yaml'));
+  });
+
+  it('accepts a root that is itself a symlink', () => {
+    const link = path.join(outside, 'link');
+    symlinkSync(realpathSync(root), link);
+    expect(resolveInside(link, 'shop/a.yaml', { pattern: YAML_PATH })).toBe(path.join(link, 'shop/a.yaml'));
+  });
+
+  it('gives the error a next action', () => {
+    try {
+      resolveInside(root, '../x.yaml', { pattern: YAML_PATH });
+      expect.unreachable();
+    } catch (err) {
+      expect((err as { nextActions: unknown[] }).nextActions.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('redactText', () => {
+  it('redacts personal data and tokens but keeps product text', () => {
+    expect(redactText('Mail ayse@shop.com, tel 0555 000 00 00, Tabak 19 cm')).toBe(
+      'Mail <email>, tel <phone>, Tabak 19 cm',
+    );
+    expect(redactText('card 4242 4242 4242 4242')).toBe('card <card>');
+  });
+  it('redacts card numbers with dashes and not as a phone', () => {
+    expect(redactText('4242-4242-4242-4242')).toBe('<card>');
+    expect(redactText('4242424242424242')).toBe('<card>');
+  });
+  it('redacts phones with plus and brackets', () => {
+    expect(redactText('+90 (555) 000 00 00')).toBe('<phone>');
+    expect(redactText('+905550000000')).toBe('<phone>');
+  });
+  it('redacts JWT, base64, and hex tokens', () => {
+    expect(redactText('t eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefSIG end')).toBe('t <token> end');
+    expect(redactText('k 0123456789abcdef0123456789abcdef')).toBe('k <token>');
+    expect(redactText('k QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0MTIzNDU2Nzg=')).toBe('k <token>');
+  });
+  it('keeps ordinary short numbers and text', () => {
+    const text = 'Tabak 19 cm, 200 TL, posta kodu 34000, 2026-11-24';
+    expect(redactText(text)).toBe(text);
+  });
+  it('does not redact a 16-digit number that fails Luhn as a card', () => {
+    expect(redactText('1234 5678 9012 3456')).toBe('1234 5678 9012 3456');
   });
 });
