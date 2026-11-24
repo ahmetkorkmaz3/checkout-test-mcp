@@ -124,6 +124,37 @@ describe('guard proxy', () => {
     expect(parseAuthority('a.test/x:80')).toBeNull();
   });
 
+  it('adds one close listener to a kept-alive upstream socket, also after 30 requests', async () => {
+    const warnings: Error[] = [];
+    const onWarning = (w: Error) => warnings.push(w);
+    process.on('warning', onWarning);
+    const sockets = new Set<import('node:net').Socket>();
+    const keep = createServer((req, res) => {
+      sockets.add(req.socket);
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('ok');
+    });
+    keep.keepAliveTimeout = 10_000;
+    await new Promise<void>((r) => keep.listen(0, '127.0.0.1', () => r()));
+    const addr = keep.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    try {
+      for (let i = 0; i < 30; i++) {
+        const res = await viaProxy(`http://localhost:${port}/n${i}`);
+        expect(res.status).toBe(200);
+      }
+      // Warnings come on the next tick.
+      await new Promise((r) => setImmediate(r));
+      // One upstream socket served all requests, so the agent reused it.
+      expect(sockets.size).toBe(1);
+      expect(warnings.filter((w) => w.name === 'MaxListenersExceededWarning')).toEqual([]);
+    } finally {
+      process.off('warning', onWarning);
+      keep.closeAllConnections();
+      await new Promise<void>((r) => keep.close(() => r()));
+    }
+  });
+
   it('closes an open upstream stream within 1 s of close()', async () => {
     let upstreamClosed = false;
     const stream = createServer((req, res) => {

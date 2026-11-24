@@ -60,6 +60,8 @@ export async function startGuardProxy(input: GuardProxyInput): Promise<GuardProx
   const agent = new Agent({ keepAlive: true });
   const sockets = new Set<Duplex>();
   const track = (s: Duplex) => {
+    // The keep-alive agent hands out the same socket again. One close listener for each socket is enough.
+    if (sockets.has(s)) return;
     sockets.add(s);
     s.once('close', () => sockets.delete(s));
   };

@@ -444,6 +444,8 @@ server.registerTool(
 );
 ```
 
+`blocked_requests` lists each blocked URL once for each step. For an https request or a WebSocket that the guard proxy blocked, the URL is `https://<host>:<port>/` (no port for 443), because a tunnel has no path.
+
 `content` for a finished, failed run: one text block with the summary and the JSON, plus one image block with the failing-step screenshot.
 
 Example `failure` for the 3DS scenario when the challenge did not appear:
