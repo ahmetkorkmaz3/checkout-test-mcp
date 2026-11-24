@@ -1,7 +1,10 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { toToolErrorResult } from '../errors/tool-error.js';
+import { isProductionTarget } from '../safety/hosts.js';
+import { PRODUCTION_WARNING } from '../safety/production.js';
 import { TEST_CARDS } from '../safety/test-cards.js';
+import { LIVE_CARD_PREFIX } from '../scenarios/params.js';
 import { CardBehaviour, ExpectedOutcome, ParamValue } from '../schemas/common.js';
 import type { ServerDeps } from '../server.js';
 import { jsonResult } from './result.js';
@@ -14,7 +17,24 @@ export const ListScenariosInput = z.object({
 
 export const ListScenariosOutput = z.object({
   targets: z.array(
-    z.object({ name: z.string(), description: z.string(), profile: z.string(), base_url: z.string() }),
+    z.object({
+      name: z.string(),
+      description: z.string(),
+      profile: z.string(),
+      base_url: z.string(),
+      environment: z
+        .enum(['test', 'production'])
+        .describe('"production" is a live site. Each new run there needs the yes of the user.'),
+      warning: z
+        .string()
+        .optional()
+        .describe('Only for a production target: the side effects of a run. Show it to the user.'),
+      live_cards: z
+        .array(z.object({ id: z.string(), behaviour: CardBehaviour, description: z.string() }))
+        .describe(
+          'Only on a production target: live card ids for a test_card param. The number comes from env vars and never shows.',
+        ),
+    }),
   ),
   scenarios: z.array(
     z.object({
@@ -54,9 +74,10 @@ export const ListScenariosOutput = z.object({
 type Output = z.infer<typeof ListScenariosOutput>;
 
 export const LIST_SCENARIOS_DESCRIPTION = [
-  'Lists the checkout and payment test scenarios this server can run, the targets (test environments) they can run against, and the test cards you can use.',
+  'Lists the checkout and payment test scenarios this server can run, the targets (test or production environments) they can run against, and the test cards you can use.',
   'Call this first, before run_scenario, to get valid values for scenario_id, target, and params.',
   'Each scenario lists its params with type, default, and description. Params of type "test_card" take an id from the test_cards list, never a card number.',
+  'On a production target, a "test_card" param also takes a "live/<name>" id from targets[].live_cards of that target. A production target has a warning: show it to the user before a run.',
   'This tool is read-only and fast.',
 ].join(' ');
 
@@ -89,6 +110,16 @@ export function registerListScenarios(server: McpServer, deps: ServerDeps): void
             description: t.description,
             profile: t.profile,
             base_url: t.base_url,
+            environment: isProductionTarget(t) ? 'production' : 'test',
+            ...(isProductionTarget(t) ? { warning: PRODUCTION_WARNING } : {}),
+            // Names, behaviour, and description only. The env values stay in the run manager.
+            live_cards: isProductionTarget(t)
+              ? Object.entries(t.live_cards).map(([name, c]) => ({
+                  id: `${LIVE_CARD_PREFIX}${name}`,
+                  behaviour: c.behaviour,
+                  description: c.description,
+                }))
+              : [],
           })),
           scenarios: scenarios.map((s) => ({
             id: s.id,

@@ -55,11 +55,12 @@ export const InspectTargetOutput = InspectionReport.extend({
 });
 
 export const INSPECT_TARGET_DESCRIPTION = [
-  'Inspects a configured test target and suggests checkout test scenarios with the evidence for each.',
+  'Inspects a configured target and suggests checkout test scenarios with the evidence for each.',
   'It reads the site pages and API calls through the host guard, and it reads the shop source code when the target config has inspect.source_dirs.',
   'Only when the target config has inspect.probe_checkout: true, a checkout probe goes up to the payment step with fictional test data. It never pays and never sends a phone number for a code.',
   'Side effects of the probe on the test site: a cart item, a guest account with an example.test email, an address, and possibly an unpaid order draft. The report lists them in side_effects.',
   'The call starts a background job and waits up to wait_s seconds. While status is not "finished", call inspect_target again with the same target, idempotency_key, and scope. The same key never starts a second inspection, also after a restart.',
+  'On a production target, warnings[0] is the production warning. Show it to the user. The probe there acts on the live site.',
   'Read warnings and suggested_scenarios[].missing to know what to ask the user. Then write the baseline scenarios and save each with save_scenario.',
   'When a warning says that the result is cut, call inspect_target again with the same target, key, and scope, plus section and offset, to read the cut list in pages. section and offset only read: they never start an inspection.',
 ].join(' ');

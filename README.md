@@ -12,9 +12,37 @@ Status: v0.1. Stdio transport. Scenarios in YAML. Playwright (Chromium).
 
 - The agent sends a **target name**, never a URL. Targets come from the config file.
 - Every browser request goes through a host allowlist. A request to another host is blocked. A navigation to another host stops the run with verdict `blocked`.
-- A host must look like a test environment (`localhost`, `*.test`, or a label such as `staging`, `qa`, `sandbox`). Hosts in `production_hosts` are always refused.
+- A host must look like a test environment (`localhost`, `*.test`, or a label such as `staging`, `qa`, `sandbox`). A test target refuses hosts in `production_hosts`.
+- A production target needs `environment: production`. Each tool shows a warning for it, and each new run needs `confirm_production: true` after the user says yes. See [Production targets](#production-targets).
 - Card values come only from a built-in registry of payment providers' published test cards. A card number in a tool argument or a scenario file is refused.
 - Secrets come from environment variables named in the config. Secret-like tool arguments are refused. Logs and results are redacted.
+
+## Production targets
+
+You can run the scenarios on the live site. A run there makes a real order and a real payment, changes stock, starts shipping, and sends email or SMS to real addresses. The server does not cancel or refund the order.
+
+```yaml
+production_hosts: [www.shop.example]
+
+targets:
+  shop-live:
+    environment: production
+    profile: my-store
+    base_url: https://www.shop.example
+    allowed_hosts: [www.shop.example]
+    live_cards:
+      company-visa:
+        number_env: SHOP_LIVE_CARD_NUMBER
+        expiry_env: SHOP_LIVE_CARD_EXPIRY
+        cvc_env: SHOP_LIVE_CARD_CVC
+        behaviour: success
+```
+
+1. Set the three env vars for the MCP server process. Never put a card number in the config.
+2. Pass `card: live/company-visa` as a param of `run_scenario`.
+3. The agent asks you before each run. It sends `confirm_production: true` only after you say yes.
+
+Details: [docs/design.md, section 12](docs/design.md#12-production-targets).
 
 ## Quick start
 

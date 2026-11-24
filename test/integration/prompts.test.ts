@@ -19,6 +19,7 @@ import {
 } from '../../src/prompts/setup-checkout-tests.js';
 import { RunManager } from '../../src/runs/manager.js';
 import { RunStore } from '../../src/runs/store.js';
+import { PRODUCTION_WARNING } from '../../src/safety/production.js';
 import { ScenarioRegistry } from '../../src/scenarios/registry.js';
 import { createServer } from '../../src/server.js';
 
@@ -35,6 +36,8 @@ interface SetupOptions {
   records?: InspectionRecord[];
   /** Files for a temporary authoring folder. Without it, the authoring folder is scenarios/demo-store. */
   authoringFiles?: Record<string, string>;
+  /** Makes demo-local a production target. It stays on localhost. */
+  production?: boolean;
 }
 
 async function setup(opts: SetupOptions = {}) {
@@ -59,6 +62,7 @@ async function setup(opts: SetupOptions = {}) {
           third_party_hosts: ['sandbox-pay.example.test'],
           secrets: { member_email: 'DEMO_MEMBER_EMAIL', member_password: 'DEMO_MEMBER_PASSWORD' },
           ...(opts.probe === undefined ? {} : { inspect: { probe_checkout: opts.probe } }),
+          ...(opts.production ? { environment: 'production' } : {}),
         },
       },
       ...(opts.authoring === false
@@ -424,5 +428,27 @@ steps:
     expect(step3).toContain('inspect.probe_checkout: true');
     expect(step3).toContain('unpaid order draft');
     expect(step3).toMatch(/Ask the user once for all of it, in one message/);
+  });
+  it('tells the agent to ask before each run on a production target', async () => {
+    const c = await setup({ probe: true, production: true });
+    for (const text of [
+      await promptText(c, 'setup_checkout_tests', { target: 'demo-local' }),
+      await promptText(c, 'create_scenario', { target: 'demo-local', request: 'a card pays the order' }),
+    ]) {
+      expect(text).toContain('Environment: production.');
+      expect(text).toContain(PRODUCTION_WARNING);
+      expect(text).toContain('confirm_production: true');
+      expect(text).toMatch(/Never set `confirm_production` without the yes of the user in this conversation/);
+      expect(text).toMatch(/before each `run_scenario`/);
+      expect(text).toContain('live/<name>');
+    }
+  });
+
+  it('has no production text on a test target', async () => {
+    const c = await setup({ probe: true });
+    const text = await promptText(c, 'setup_checkout_tests', { target: 'demo-local' });
+    expect(text).toContain('Environment: test.');
+    expect(text).not.toContain(PRODUCTION_WARNING);
+    expect(text).not.toContain('confirm_production');
   });
 });

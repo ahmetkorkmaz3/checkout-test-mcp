@@ -28,7 +28,7 @@ export function createServer(deps: ServerDeps): McpServer {
     { name: 'checkout-test-mcp', version: VERSION },
     {
       instructions: [
-        'Runs end-to-end checkout and payment test scenarios against configured test environments only.',
+        'Runs end-to-end checkout and payment test scenarios against configured targets only. A production target needs the yes of the user before each run.',
         'Order of calls: list_scenarios, then run_scenario (with an idempotency_key), then get_run_result with wait_s 20 until status is "finished". Use compare_runs for before/after checks.',
         'A failed checkout is a normal result with verdict "failed", not a tool error.',
         'To add a scenario, write the YAML and call save_scenario with validate_on, then get_run_result.',

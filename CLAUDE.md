@@ -11,7 +11,7 @@ Status: v0.1 implemented (2026-11-22). Read `docs/design.md` and `docs/tools.md`
 
 ## Principles (in priority order)
 
-1. **Safety first.** Only hosts on the config allowlist. Only published test cards from `src/safety/test-cards.ts`. Refuse production hosts and anything that looks like real card data. Secrets come from env vars only. They never appear in tool arguments, logs, results, or test snapshots.
+1. **Safety first.** Only hosts on the config allowlist. Only published test cards from `src/safety/test-cards.ts`. A test target refuses production hosts. A production target needs `environment: production`, shows a warning, and needs a confirmation for each run. Live cards come only from env vars. Refuse anything else that looks like real card data. Secrets come from env vars only. They never appear in tool arguments, logs, results, or test snapshots.
 2. **Tool descriptions and schemas are product design.** Write them so a model picks the right tool and fills params correctly on the first try. Treat a change to them like a UI change: review the `tools/list` snapshot diff.
 3. **Structured errors.** Every `ToolError` has `code`, `message`, `likely_cause`, `retryable`, and at least one `next_actions` item. A failed checkout is a result (`verdict: "failed"`), not a tool error.
 4. **Never block a tool call for minutes.** Long work is `run_scenario` plus `get_run_result`, or `inspect_target`, one tool that starts the job and long polls it (same key, same job). Long poll is 20 s maximum.

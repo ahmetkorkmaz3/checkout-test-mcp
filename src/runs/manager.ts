@@ -9,6 +9,7 @@ import { classify } from '../runner/classify.js';
 import { type ExecuteInput, type ExecuteOutput, executeRun } from '../runner/executor.js';
 import { containsCardNumber, luhnValid } from '../safety/cards.js';
 import { isProductionTarget } from '../safety/hosts.js';
+import { PRODUCTION_WARNING } from '../safety/production.js';
 import { looksLikeSecret, Redactor } from '../safety/secrets.js';
 import { conditionsPass } from '../scenarios/expand.js';
 import { LIVE_CARD_PREFIX, type RunCard, resolveParams } from '../scenarios/params.js';
@@ -29,6 +30,8 @@ export interface StartRunInput {
   params: Record<string, ParamValue>;
   idempotency_key: string;
   options?: Partial<RunOptions>;
+  /** The user said yes to this run on a production target. It is not part of the request hash. */
+  confirm_production?: boolean;
 }
 
 export interface RunManagerDeps {
@@ -186,6 +189,9 @@ export class RunManager {
     const early = this.checkExisting(input.idempotency_key, requestHash);
     if (early) return { record: early, reused: true };
 
+    // Before prepare: a refused run reads no live card env and writes nothing.
+    this.checkProductionConfirmation(input);
+
     const prepared = await this.prepare(input, options, requestHash);
 
     // A parallel call with the same key can finish prepare() first.
@@ -250,6 +256,35 @@ export class RunManager {
       });
     }
     return this.get(existing.run_id);
+  }
+
+  /** An unknown target goes on to prepare, which gives UNKNOWN_TARGET. */
+  private checkProductionConfirmation(input: StartRunInput): void {
+    const target = Object.hasOwn(this.deps.config.targets, input.target)
+      ? this.deps.config.targets[input.target]
+      : undefined;
+    if (!target || !isProductionTarget(target) || input.confirm_production === true) return;
+    throw new ToolError({
+      code: 'PRODUCTION_CONFIRMATION_REQUIRED',
+      message: `Target "${input.target}" is a production target. No run started. ${PRODUCTION_WARNING}`,
+      likelyCause:
+        'A new run on a production target needs confirm_production: true. Set it only after the user says yes to this run.',
+      retryable: false,
+      nextActions: [
+        {
+          kind: 'ask_human',
+          description: `Show the user the warning and ask: may I run "${input.scenario_id}" on the production target "${input.target}" now?`,
+        },
+        {
+          kind: 'change_argument',
+          description:
+            'Only after the user says yes: call run_scenario again with the same arguments and confirm_production: true.',
+          tool: 'run_scenario',
+          arguments: { confirm_production: true },
+        },
+      ],
+      details: { target: input.target, environment: 'production' },
+    });
   }
 
   private checkArgumentSafety(input: StartRunInput): void {

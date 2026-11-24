@@ -6,6 +6,7 @@ import {
   sliceForResult,
   trimForResult,
 } from '../../src/inspect/report.js';
+import { PRODUCTION_WARNING } from '../../src/safety/production.js';
 
 function report(extra: Partial<InspectionReport> = {}): InspectionReport {
   return {
@@ -159,5 +160,37 @@ describe('sliceForResult', () => {
     expect(out.report.warnings.join(' ')).toMatch(/item 0 of "pages" is larger than the cap/);
     // The stored report keeps the full item.
     expect(r.site?.pages[0]?.elements).toHaveLength(400);
+  });
+  it('keeps the production warning first in a slice and counts it in the size', () => {
+    const pages = Array.from({ length: 60 }, (_, i) => ({
+      path_pattern: `/p${i}`,
+      url_path: `/p${i}`,
+      kind: 'other' as const,
+      kind_reasons: [],
+      title: 'x'.repeat(1000),
+      headings: [],
+      landmarks: [],
+      elements: [],
+      forms: [],
+      selects: [],
+      iframes: [],
+      dialogs: [],
+    }));
+    const r = report({
+      warnings: [PRODUCTION_WARNING, 'Another warning.'],
+      site: { pages, api_calls: [], blocked_hosts: [] },
+    });
+    const out = sliceForResult(r, 'pages', 0, wrap);
+    expect(out.report.warnings[0]).toBe(PRODUCTION_WARNING);
+    expect(out.report.warnings).not.toContain('Another warning.');
+    expect(out.slice.next_offset).not.toBeNull();
+    expect(JSON.stringify(wrap(out.report, out.slice)).length).toBeLessThanOrEqual(RESULT_CHAR_LIMIT);
+    const next = sliceForResult(r, 'pages', out.slice.next_offset ?? 0, wrap);
+    expect(next.report.warnings[0]).toBe(PRODUCTION_WARNING);
+  });
+
+  it('has no production warning in a slice of a test target report', () => {
+    const out = sliceForResult(report({ warnings: ['Another warning.'] }), 'pages', 0, wrap);
+    expect(out.report.warnings).not.toContain(PRODUCTION_WARNING);
   });
 });

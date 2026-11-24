@@ -2,7 +2,7 @@
   {
     "name": "list_scenarios",
     "title": "List checkout test scenarios",
-    "description": "Lists the checkout and payment test scenarios this server can run, the targets (test environments) they can run against, and the test cards you can use. Call this first, before run_scenario, to get valid values for scenario_id, target, and params. Each scenario lists its params with type, default, and description. Params of type \"test_card\" take an id from the test_cards list, never a card number. This tool is read-only and fast.",
+    "description": "Lists the checkout and payment test scenarios this server can run, the targets (test or production environments) they can run against, and the test cards you can use. Call this first, before run_scenario, to get valid values for scenario_id, target, and params. Each scenario lists its params with type, default, and description. Params of type \"test_card\" take an id from the test_cards list, never a card number. On a production target, a \"test_card\" param also takes a \"live/<name>\" id from targets[].live_cards of that target. A production target has a warning: show it to the user before a run. This tool is read-only and fast.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -40,13 +40,59 @@
               },
               "base_url": {
                 "type": "string"
+              },
+              "environment": {
+                "type": "string",
+                "enum": [
+                  "test",
+                  "production"
+                ],
+                "description": "\"production\" is a live site. Each new run there needs the yes of the user."
+              },
+              "warning": {
+                "description": "Only for a production target: the side effects of a run. Show it to the user.",
+                "type": "string"
+              },
+              "live_cards": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "behaviour": {
+                      "type": "string",
+                      "enum": [
+                        "success",
+                        "challenge_required",
+                        "frictionless_3ds",
+                        "declined_generic",
+                        "declined_insufficient_funds",
+                        "declined_expired"
+                      ]
+                    },
+                    "description": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "behaviour",
+                    "description"
+                  ],
+                  "additionalProperties": false
+                },
+                "description": "Only on a production target: live card ids for a test_card param. The number comes from env vars and never shows."
               }
             },
             "required": [
               "name",
               "description",
               "profile",
-              "base_url"
+              "base_url",
+              "environment",
+              "live_cards"
             ],
             "additionalProperties": false
           }
@@ -223,7 +269,7 @@
   {
     "name": "run_scenario",
     "title": "Start a checkout test run",
-    "description": "Starts one checkout test scenario against a configured test environment and returns a run_id at once. The run continues in the background, usually for 30 to 180 seconds. Then call get_run_result with the run_id to get progress and the final verdict. Do not call run_scenario again to check progress. idempotency_key is required: use the same key when you retry this call after a timeout or transport error, and the server returns the first run instead of starting a second checkout. Use a new key only when you want a new run, for example \"pr-4812-3ds-fail-after-deploy\". target and scenario_id must come from list_scenarios. Only test environments from the server config are accepted, never URLs. Card params take test card ids, never card numbers.",
+    "description": "Starts one checkout test scenario against a configured target and returns a run_id at once. The run continues in the background, usually for 30 to 180 seconds. Then call get_run_result with the run_id to get progress and the final verdict. Do not call run_scenario again to check progress. idempotency_key is required: use the same key when you retry this call after a timeout or transport error, and the server returns the first run instead of starting a second checkout. Use a new key only when you want a new run, for example \"pr-4812-3ds-fail-after-deploy\". target and scenario_id must come from list_scenarios. Only targets from the server config are accepted, never URLs. Card params take test card ids, never card numbers. A production target (environment \"production\" in list_scenarios) can make a real order and a real payment. Show its warning to the user and ask before each new run. Only after the user says yes, set confirm_production: true. Without it, the server starts no run and returns PRODUCTION_CONFIRMATION_REQUIRED.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -287,6 +333,11 @@
               "type": "boolean"
             }
           }
+        },
+        "confirm_production": {
+          "default": false,
+          "description": "Only for a production target: true after the user says yes to this run in this conversation. Never set it without that yes. It has no effect on a test target.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -320,6 +371,18 @@
           "type": "string"
         },
         "target": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string",
+          "enum": [
+            "test",
+            "production"
+          ],
+          "description": "The environment of the target."
+        },
+        "warning": {
+          "description": "Only for a production target: the side effects of the run. Show it to the user.",
           "type": "string"
         },
         "resolved_params": {
@@ -388,6 +451,7 @@
         "reused_existing_run",
         "scenario_id",
         "target",
+        "environment",
         "resolved_params",
         "estimated_duration_s",
         "next"
@@ -1388,7 +1452,7 @@
   {
     "name": "inspect_target",
     "title": "Inspect a test target",
-    "description": "Inspects a configured test target and suggests checkout test scenarios with the evidence for each. It reads the site pages and API calls through the host guard, and it reads the shop source code when the target config has inspect.source_dirs. Only when the target config has inspect.probe_checkout: true, a checkout probe goes up to the payment step with fictional test data. It never pays and never sends a phone number for a code. Side effects of the probe on the test site: a cart item, a guest account with an example.test email, an address, and possibly an unpaid order draft. The report lists them in side_effects. The call starts a background job and waits up to wait_s seconds. While status is not \"finished\", call inspect_target again with the same target, idempotency_key, and scope. The same key never starts a second inspection, also after a restart. Read warnings and suggested_scenarios[].missing to know what to ask the user. Then write the baseline scenarios and save each with save_scenario. When a warning says that the result is cut, call inspect_target again with the same target, key, and scope, plus section and offset, to read the cut list in pages. section and offset only read: they never start an inspection.",
+    "description": "Inspects a configured target and suggests checkout test scenarios with the evidence for each. It reads the site pages and API calls through the host guard, and it reads the shop source code when the target config has inspect.source_dirs. Only when the target config has inspect.probe_checkout: true, a checkout probe goes up to the payment step with fictional test data. It never pays and never sends a phone number for a code. Side effects of the probe on the test site: a cart item, a guest account with an example.test email, an address, and possibly an unpaid order draft. The report lists them in side_effects. The call starts a background job and waits up to wait_s seconds. While status is not \"finished\", call inspect_target again with the same target, idempotency_key, and scope. The same key never starts a second inspection, also after a restart. On a production target, warnings[0] is the production warning. Show it to the user. The probe there acts on the live site. Read warnings and suggested_scenarios[].missing to know what to ask the user. Then write the baseline scenarios and save each with save_scenario. When a warning says that the result is cut, call inspect_target again with the same target, key, and scope, plus section and offset, to read the cut list in pages. section and offset only read: they never start an inspection.",
     "inputSchema": {
       "type": "object",
       "properties": {

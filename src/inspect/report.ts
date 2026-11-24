@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PRODUCTION_WARNING } from '../safety/production.js';
 import { ExpectedOutcome } from '../schemas/common.js';
 import type { CodeReport } from './code-scan.js';
 import type { SiteReport } from './crawl.js';
@@ -381,6 +382,8 @@ export function sliceForResult(
     suggested_scenarios: [],
     side_effects: [],
     warnings: [
+      // A slice of a production report keeps the production warning first. It counts in the size.
+      ...(report.warnings[0] === PRODUCTION_WARNING ? [PRODUCTION_WARNING] : []),
       `This result holds only the section "${section}" of the report. Call inspect_target without section to get the other parts.`,
     ],
   };

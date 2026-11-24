@@ -73,7 +73,8 @@ export const ToolErrorCode = z.enum([
   'SCENARIO_NOT_COMPATIBLE', // scenario profile does not match target profile
   'INVALID_PARAMS', // scenario-level param validation (types are checked by the SDK)
   'HOST_NOT_ALLOWED',
-  'PRODUCTION_HOST_REFUSED',
+  'PRODUCTION_HOST_REFUSED', // a test target has a host in production_hosts
+  'PRODUCTION_CONFIRMATION_REQUIRED', // run_scenario: a new run on a production target without confirm_production: true
   'REAL_CARD_DATA_REFUSED',
   'SECRET_IN_ARGUMENTS',
   'MISSING_ENV_SECRET',
@@ -159,9 +160,10 @@ server.registerTool(
   {
     title: 'List checkout test scenarios',
     description: [
-      'Lists the checkout and payment test scenarios this server can run, the targets (test environments) they can run against, and the test cards you can use.',
+      'Lists the checkout and payment test scenarios this server can run, the targets (test or production environments) they can run against, and the test cards you can use.',
       'Call this first, before run_scenario, to get valid values for scenario_id, target, and params.',
       'Each scenario lists its params with type, default, and description. Params of type "test_card" take an id from the test_cards list, never a card number.',
+      'On a production target, a "test_card" param also takes a "live/<name>" id from targets[].live_cards of that target. A production target has a warning: show it to the user before a run.',
       'This tool is read-only and fast.',
     ].join(' '),
     inputSchema: z.object({
@@ -182,6 +184,12 @@ server.registerTool(
           description: z.string(),
           profile: z.string(),
           base_url: z.string(),
+          environment: z.enum(['test', 'production']),
+          warning: z.string().optional(), // production targets only: PRODUCTION_WARNING
+          live_cards: z.array(
+            // production targets only. Empty for a test target. Never a number, an expiry, or a CVC.
+            z.object({ id: z.string() /* "live/<name>" */, behaviour: CardBehaviour, description: z.string() }),
+          ),
         }),
       ),
       scenarios: z.array(
@@ -232,6 +240,12 @@ server.registerTool(
 );
 ```
 
+Each target has `environment`. A production target also has `warning` and its `live_cards`. The warning is one text from `src/safety/production.ts`:
+
+> Production target. A run here can make a real order and a real payment, change stock, start shipping, and send email or SMS to real addresses. Ask the user before each run.
+
+A live card shows only its id, behaviour, and description. The number, expiry, and CVC stay in the env vars of the server process.
+
 ## 4. `run_scenario`
 
 ```ts
@@ -240,10 +254,11 @@ server.registerTool(
   {
     title: 'Start a checkout test run',
     description: [
-      'Starts one checkout test scenario against a configured test environment and returns a run_id at once. The run continues in the background, usually for 30 to 180 seconds.',
+      'Starts one checkout test scenario against a configured target and returns a run_id at once. The run continues in the background, usually for 30 to 180 seconds.',
       'Then call get_run_result with the run_id to get progress and the final verdict. Do not call run_scenario again to check progress.',
       'idempotency_key is required: use the same key when you retry this call after a timeout or transport error, and the server returns the first run instead of starting a second checkout. Use a new key only when you want a new run, for example "pr-4812-3ds-fail-after-deploy".',
-      'target and scenario_id must come from list_scenarios. Only test environments from the server config are accepted, never URLs. Card params take test card ids, never card numbers.',
+      'target and scenario_id must come from list_scenarios. Only targets from the server config are accepted, never URLs. Card params take test card ids, never card numbers.',
+      'A production target (environment "production" in list_scenarios) can make a real order and a real payment. Show its warning to the user and ask before each new run. Only after the user says yes, set confirm_production: true. Without it, the server starts no run and returns PRODUCTION_CONFIRMATION_REQUIRED.',
     ].join(' '),
     inputSchema: z.object({
       target: z
@@ -284,6 +299,12 @@ server.registerTool(
             .describe('Record a Playwright trace file for a human to open later. Makes the run slower.'),
         })
         .default({}),
+      confirm_production: z
+        .boolean()
+        .default(false)
+        .describe(
+          'Only for a production target: true after the user says yes to this run in this conversation. Never set it without that yes. It has no effect on a test target.',
+        ),
     }),
     outputSchema: z.object({
       run_id: RunId,
@@ -293,13 +314,15 @@ server.registerTool(
         .describe('True when this idempotency_key already had a run. No new checkout started.'),
       scenario_id: z.string(),
       target: z.string(),
+      environment: z.enum(['test', 'production']),
+      warning: z.string().optional(), // production targets only: PRODUCTION_WARNING
       resolved_params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
       estimated_duration_s: z.number().int(),
       next: NextAction.describe('Normally: call get_run_result with wait_s 20.'),
     }),
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false, // creates orders on a test environment only
+      destructiveHint: false, // a production run needs confirm_production: true for each new run
       idempotentHint: true, // with the same idempotency_key
       openWorldHint: true,
     },
@@ -317,6 +340,7 @@ Example output:
   "reused_existing_run": false,
   "scenario_id": "card-3ds-challenge-fail",
   "target": "demo-local",
+  "environment": "test",
   "resolved_params": {
     "product_path": "/products/ceramic-mug",
     "quantity": 1,
@@ -331,6 +355,59 @@ Example output:
   }
 }
 ```
+
+### Production targets
+
+A target with `environment: production` can use hosts from `production_hosts`. A run there is real: an order, a payment, stock, shipping, and email or SMS. The server checks these rules in `RunManager.start`, in this order:
+
+1. The argument checks (`REAL_CARD_DATA_REFUSED`, `SECRET_IN_ARGUMENTS`).
+2. The idempotency key. A key that already has a run returns that run with `reused_existing_run: true`. This needs no `confirm_production`. `confirm_production` is not part of the request hash, so `true` and `false` give the same run for the same key.
+3. A new run on a production target without `confirm_production: true`: `PRODUCTION_CONFIRMATION_REQUIRED`. The server writes no run record and reads no live card env var. An unknown target goes on to step 4 and gives `UNKNOWN_TARGET`.
+4. `prepare`: the target, the scenario, the params, the live cards, and the secrets.
+
+On a test target, `confirm_production` has no effect. The output has `environment` for every target, and `warning` only for a production target.
+
+Example: a new run on a production target without the flag.
+
+```json
+{
+  "error": {
+    "code": "PRODUCTION_CONFIRMATION_REQUIRED",
+    "message": "Target \"shop-live\" is a production target. No run started. Production target. A run here can make a real order and a real payment, change stock, start shipping, and send email or SMS to real addresses. Ask the user before each run.",
+    "likely_cause": "A new run on a production target needs confirm_production: true. Set it only after the user says yes to this run.",
+    "retryable": false,
+    "next_actions": [
+      {
+        "kind": "ask_human",
+        "description": "Show the user the warning and ask: may I run \"card-success\" on the production target \"shop-live\" now?"
+      },
+      {
+        "kind": "change_argument",
+        "description": "Only after the user says yes: call run_scenario again with the same arguments and confirm_production: true.",
+        "tool": "run_scenario",
+        "arguments": { "confirm_production": true }
+      }
+    ],
+    "details": { "target": "shop-live", "environment": "production" }
+  }
+}
+```
+
+`retryable` is false, because the same call without the yes of the user never works.
+
+Live cards. A production target can declare `live_cards`. A `test_card` param takes the id `live/<name>`. The server reads the number, expiry, and CVC from the env vars of that entry when the run starts, and only for the live cards that the params name. The `behaviour` constraint of the param applies to live cards too. The executor card guard accepts the live numbers of this run and no other number that is not in the registry. The redactor removes the live number and the expiry, also in formatted forms such as a number in groups of four or an expiry such as `12/34`. It removes the CVC in failure texts.
+
+Errors on a production target:
+
+| Code | When |
+|---|---|
+| `PRODUCTION_CONFIRMATION_REQUIRED` | A new run without `confirm_production: true`. |
+| `MISSING_ENV_SECRET` | An env var of a live card is not set. `details.missing` names the card id and the env var, for example `live/company-visa (env LIVE_VISA_CVC)`. |
+| `MISSING_ENV_SECRET` | The number env var does not hold 13 to 19 digits with a valid Luhn check. `details.invalid` names the card id and the env var. The message never holds the value. |
+| `INVALID_PARAMS` | An unknown live card name, or a live card with the wrong behaviour for the param. |
+| `INVALID_PARAMS` | `options.trace: true`. A trace holds DOM snapshots with typed values. |
+
+On a test target, a `live/<name>` id gives `INVALID_PARAMS`.
 
 ## 5. `get_run_result`
 
@@ -609,7 +686,7 @@ The server does these steps in this order. A refusal writes nothing.
 4. Automatic fixes (schema line, `schema_version: 1`), YAML parse, zod schema, trial load of all scenario folders with the new text, and the house rules. Test data gets no fixes and uses the test data rules. Any error: `SCENARIO_INVALID` with every issue in `details.issues`. An issue never shows a YAML key with other characters than letters, digits, `_`, and `-`. Such a key shows as `<key>`, because it can be an email or another value.
 5. The file exists with the same text after the fixes: success with `unchanged: true` and `written: false`. Other text and `overwrite: false`: `SCENARIO_EXISTS`.
 6. Atomic write (temp file in the same folder, then rename). A read or write error, for example a folder with the file name, gives `PATH_REFUSED` with the relative path and the error code, never the absolute path. The server swaps in the trial registry, so `list_scenarios` and `run_scenario` see the file at once.
-7. `validate_on` starts a run. The server makes the idempotency key: `save-<first 60 characters of scenario_id>-<first 16 hex of sha256(target + scenario hash + params JSON with sorted keys)>`. The scenario hash comes from the trial load and covers the scenario text and all its fragment texts. The same file, fragments, target, and params give the same run, also with the params in another key order. A changed file, a changed fragment, or another target gives a new run. When the run does not start, the error message says that the file was saved, and `details` has `saved: true`.
+7. `validate_on` starts a run. The server makes the idempotency key: `save-<first 60 characters of scenario_id>-<first 16 hex of sha256(target + scenario hash + params JSON with sorted keys)>`. The scenario hash comes from the trial load and covers the scenario text and all its fragment texts. The same file, fragments, target, and params give the same run, also with the params in another key order. A changed file, a changed fragment, or another target gives a new run. When the run does not start, the error message says that the file was saved, and `details` has `saved: true`. On a production target the validation run never starts: `save_scenario` has no `confirm_production`, so it returns `PRODUCTION_CONFIRMATION_REQUIRED`. The agent then asks the user and calls `run_scenario` with `confirm_production: true`.
 
 Example: save and validate.
 
@@ -764,13 +841,15 @@ URL paths in the report (`site.pages[].url_path`, `checkout_probe.steps[].url_pa
 
 The server does these steps in this order:
 
-1. Unknown target: `UNKNOWN_TARGET`. A target host in `production_hosts`: `PRODUCTION_HOST_REFUSED` (the config load refuses it too). A host without a test label: `HOST_NOT_ALLOWED`. `scope: "code"` without `inspect.source_dirs`: `INVALID_PARAMS`.
+1. Unknown target: `UNKNOWN_TARGET`. A test target with a host in `production_hosts`: `PRODUCTION_HOST_REFUSED` (the config load refuses it too). A test target host without a test label: `HOST_NOT_ALLOWED`. A production target skips these two host checks. `scope: "code"` without `inspect.source_dirs`: `INVALID_PARAMS`.
 2. The key has an inspection with the same target and scope: the server returns it with `reused_existing_inspection: true`. Other arguments: `IDEMPOTENCY_CONFLICT`. `wait_s` is not part of the comparison.
 3. `http_credentials` secrets that are not set: `MISSING_ENV_SECRET`.
 4. The job waits in the queue. One inspection runs at a time, and it needs a browser slot that it shares with the runs (`max_parallel_runs`).
 5. Site phase (`scope` "site" or "both"): the crawl. Then the checkout probe, only with `inspect.probe_checkout: true`. Without the flag, `checkout_probe` is null and a warning names the flag and the side effects.
 6. Code phase (`scope` "code" or "both"): the scan of `inspect.source_dirs`. With `scope: "both"` and no source folders, the scan does not run and a warning says so.
 7. Suggestions from the rules in the spec, section 7.4. Then `status: "finished"`.
+
+On a production target, the inspection needs no `confirm_production`, because the probe never pays. `warnings[0]` is the production warning from the start of the job. A result with `section` keeps it first too, and it counts in the 40 000 character limit. The probe can still make a guest account, an address, and an unpaid order draft on the live site.
 
 A phase that crashes does not give a tool error. The job keeps the parts that are done, finishes, and adds a warning that starts with `INSPECTION_FAILED`. The warning has the phase, the error class, and a short message without URLs or absolute paths.
 
@@ -885,8 +964,8 @@ Errors:
 | Code | When |
 |---|---|
 | `UNKNOWN_TARGET` | The target is not in the config. |
-| `PRODUCTION_HOST_REFUSED` | A target host is in `production_hosts`. |
-| `HOST_NOT_ALLOWED` | A target host has no test label. |
+| `PRODUCTION_HOST_REFUSED` | A test target host is in `production_hosts`. |
+| `HOST_NOT_ALLOWED` | A test target host has no test label. |
 | `INVALID_PARAMS` | `scope: "code"` without `inspect.source_dirs`, or `section` with a key that has no inspection. |
 | `IDEMPOTENCY_CONFLICT` | The key has an inspection with another target or scope. |
 | `MISSING_ENV_SECRET` | An `http_credentials` secret is not set. |
@@ -897,6 +976,8 @@ Errors:
 The server has two MCP prompts. A client shows them as commands, for example `/setup_checkout_tests` in Claude Code. A prompt returns one user message with the procedure. The texts are product text, like the tool descriptions. The source is `src/prompts/`.
 
 Both prompts start with the config facts and the fragments that no tool shows. The fragment list comes from the files in `authoring.dir` when the prompt runs: path, id, description, and args with descriptions and defaults (at most 50 fragments). The config facts are: whether the checkout probe is on, the source folders, the authoring folder, test data writes, the secret names with their env var names (never the values), and the third-party hosts. So the agent asks the user only for what the config and the report cannot answer. For a target that is not in the config, a prompt returns only a text that lists the targets and tells the agent to stop.
+
+The config facts also name the environment of the target. For a production target, both prompts add a "Production target" block after the facts. It has the production warning and these rules: show the warning before each `run_scenario` call, ask the user for a yes for that one run, and set `confirm_production: true` only after that yes in this conversation. It also says that `save_scenario` with `validate_on` cannot start a production run, that a `test_card` param takes a `live/<name>` id, and that the probe acts on the live site.
 
 Both prompts also say that the server reads the config once: a change to `authoring`, `inspect`, `third_party_hosts`, or `secrets` needs a server restart. The agent waits for the restart before it runs card scenarios. A `blocked` verdict that names a host is a config fix, not one of the 3 tries. When a result is cut, the agent reads the lists with `section` and `offset`.
 

@@ -143,7 +143,7 @@ authoring: # optional. Without it, save_scenario refuses with AUTHORING_DISABLED
   dir: ./scenarios/local # must be inside one of scenario_dirs
   test_data_dir_writable: false # true lets save_scenario write test data files
 
-production_hosts: # always refused, even if listed above
+production_hosts: # refused for test targets, even if listed above. See section 12.
   - example-shop.com
   - www.example-shop.com
 ```
@@ -284,7 +284,7 @@ The server refuses before it starts a browser. The browser layer enforces the sa
    - One host label starts with `staging`, `stage`, `stg`, `test`, `qa`, `dev`, `sandbox`, `preview`, or `uat`.
    - The target sets `allow_unlabeled_host: true`, and `production_hosts` in the config is not empty.
 
-   A host in `production_hosts` is always refused. This check runs at config load and again for each run.
+   A host in `production_hosts` is always refused for a test target. This check runs at config load and again for each run. A production target skips this check. See section 12.
 3. **Card guard.** Card values come only from `src/safety/test-cards.ts`. Each entry has the provider, the published source URL, and the behaviour. Before each `fill`, the runner checks the value. A Luhn-valid 13 to 19 digit number that is not in the registry stops the run with verdict `blocked`. The same check runs on all tool arguments.
 4. **Secrets.** Secrets come from env vars named in the config. Tool arguments that look like secrets (`sk_live_`, `Bearer `, `password=`, a value equal to a known secret) are refused with `SECRET_IN_ARGUMENTS`. The logger and result writer redact all registered secret and card values. Screenshots use Playwright `mask` on password, card, and one-time code fields. A value read by `capture` is registered for redaction as soon as the runner reads it.
 5. **Stdout is the protocol.** All logs go to stderr. A `console.log` in `src/` is a lint error.
@@ -395,3 +395,57 @@ Known limits:
 - The test id attribute is global in Playwright (`selectors.setTestIdAttribute`). Two targets with different `test_id_attribute` values that run at the same time can use the wrong attribute. With the default `max_parallel_runs: 1`, this does not occur.
 - The server does not reload a symlinked subfolder of `authoring.dir` at startup. Save scenarios into real folders.
 - The guard covers requests of the browser. The server code sends no request of its own with `context.request` or Node. Do not add one without a guard.
+
+## 12. Production targets
+
+Added on 2026-11-24. Spec: [production targets design](superpowers/specs/2026-11-24-production-targets-design.md).
+
+A user can run the scenarios on the live site. The server warns about the side effects. It does not refuse the run. It asks for a confirmation for each new run.
+
+### Config
+
+```yaml
+production_hosts: [www.shop.example]
+
+targets:
+  shop-live:
+    description: The live shop. Each run makes a real order.
+    environment: production # default: test
+    profile: my-store
+    base_url: https://www.shop.example
+    allowed_hosts: [www.shop.example]
+    live_cards: # only on a production target
+      company-visa:
+        number_env: SHOP_LIVE_CARD_NUMBER
+        expiry_env: SHOP_LIVE_CARD_EXPIRY
+        cvc_env: SHOP_LIVE_CARD_CVC
+        behaviour: success
+        description: Company card for live checks.
+```
+
+### Rules
+
+1. `environment` is `test` or `production`. The default is `test`.
+2. A production target may use hosts from `production_hosts`. It skips the test label rule. The host guard still allows only `allowed_hosts` and `third_party_hosts`. A test target keeps every check. A test target with a host in `production_hosts` stays a config error, and `inspect_target` gives `PRODUCTION_HOST_REFUSED` for it.
+3. `live_cards` is allowed only on a production target. Each entry names three env vars, a behaviour, and a description. The card number never goes into YAML, a tool argument, a log, a result, or a snapshot.
+4. A `test_card` param takes the id `live/<name>` at run time. The run manager reads the env vars when the run starts, and only for the live cards that the params name. A missing env var or a number that is not a valid card number gives `MISSING_ENV_SECRET`. The message never holds the value. A live id on a test target, or an unknown live name, gives `INVALID_PARAMS`. Scenario defaults stay test card ids.
+5. The executor card guard accepts the live numbers of this run and no other number that is not in the registry. The redactor removes the live number and expiry, also in formatted forms, and the CVC in failure texts.
+6. `options.trace: true` on a production target gives `INVALID_PARAMS`. A trace holds DOM snapshots with typed values.
+7. `run_scenario` needs `confirm_production: true` for each new run on a production target. Without it, the server returns `PRODUCTION_CONFIRMATION_REQUIRED` (`retryable: false`) with an `ask_human` action and a `change_argument` action. The check runs after the idempotency check and before `prepare`, so a refused call writes nothing and reads no live card env var. A key that already has a run returns that run without the flag. The flag is not part of the request hash. On a test target the flag has no effect.
+8. `save_scenario` has no `confirm_production`. Its validation run on a production target gives `PRODUCTION_CONFIRMATION_REQUIRED`. The file is saved. The agent asks the user and calls `run_scenario`.
+
+### Warning
+
+One constant, `PRODUCTION_WARNING` in `src/safety/production.ts`, holds the warning text:
+
+> Production target. A run here can make a real order and a real payment, change stock, start shipping, and send email or SMS to real addresses. Ask the user before each run.
+
+- `list_scenarios.targets[]` has `environment`, `live_cards` (id, behaviour, description), and `warning` for a production target.
+- `run_scenario` output has `environment`, and `warning` for a production target.
+- `inspect_target` puts the warning first in `warnings`. A result with `section` keeps it first. The inspection needs no confirmation, because the probe never pays. The probe can still make a guest account, an address, and an unpaid order draft on the live site.
+- The `setup_checkout_tests` and `create_scenario` prompts add a "Production target" block. It tells the agent to show the warning and ask the user before each `run_scenario` call. The agent never sets `confirm_production` without the yes of the user in this conversation.
+
+### Not in scope
+
+- No automatic cancel or refund of live orders. The user handles them.
+- The probe of `inspect_target` still never clicks a pay button.

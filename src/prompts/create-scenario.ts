@@ -9,6 +9,7 @@ import {
   fragmentsText,
   HOUSE_RULES_TEXT,
   hasTarget,
+  productionText,
   SECRETS_TEXT,
   unknownTargetText,
   WRITING_RULES_TEXT,
@@ -98,6 +99,7 @@ export async function createScenarioText(deps: ServerDeps, target: string, reque
     fillTarget(
       [
         configFacts(deps, target),
+        ...productionText(deps, target),
         await fragmentsText(deps),
         'Steps:',
         ...steps,

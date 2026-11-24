@@ -112,7 +112,13 @@ function errorText(err: unknown): string {
 
 async function startError(m: RunManager, params: Record<string, string>, key: string): Promise<ToolError> {
   try {
-    await m.start({ target: 'live', scenario_id: 'pay', params, idempotency_key: key });
+    await m.start({
+      target: 'live',
+      confirm_production: true,
+      scenario_id: 'pay',
+      params,
+      idempotency_key: key,
+    });
   } catch (err) {
     return err as ToolError;
   }
@@ -137,6 +143,7 @@ describe('live cards in a run', () => {
     const m = await manager({ ...LIVE_ENV });
     const { record } = await m.start({
       target: 'live',
+      confirm_production: true,
       scenario_id: 'pay',
       params: { card: 'live/company-visa' },
       idempotency_key: 'live-ok-01',
@@ -154,7 +161,13 @@ describe('live cards in a run', () => {
 
   it('passes no allowed numbers for a run with a test card', async () => {
     const m = await manager({});
-    await m.start({ target: 'live', scenario_id: 'pay', params: {}, idempotency_key: 'live-test-card-01' });
+    await m.start({
+      target: 'live',
+      confirm_production: true,
+      scenario_id: 'pay',
+      params: {},
+      idempotency_key: 'live-test-card-01',
+    });
     await vi.waitFor(() => expect(executions).toHaveLength(1));
     expect(executions[0]?.allowedCardNumbers.size).toBe(0);
     await m.idle();
@@ -189,6 +202,7 @@ describe('live cards in a run', () => {
     const m = await manager(env);
     await m.start({
       target: 'live',
+      confirm_production: true,
       scenario_id: 'pay',
       params: { card: 'live/company-visa' },
       idempotency_key: 'live-unused-01',
@@ -212,6 +226,7 @@ describe('live cards in a run', () => {
       try {
         await m.start({
           target: 'live',
+          confirm_production: true,
           scenario_id: 'pay',
           params,
           idempotency_key: key,
@@ -232,6 +247,7 @@ describe('live cards in a run', () => {
     const m = await manager({ ...LIVE_ENV });
     await m.start({
       target: 'live',
+      confirm_production: true,
       scenario_id: 'pay',
       params: { card: 'live/company-visa' },
       idempotency_key: 'live-format-01',
@@ -247,7 +263,13 @@ describe('live cards in a run', () => {
 
   it('redacts formatted forms of a test card of the run too', async () => {
     const m = await manager({});
-    await m.start({ target: 'live', scenario_id: 'pay', params: {}, idempotency_key: 'live-format-02' });
+    await m.start({
+      target: 'live',
+      confirm_production: true,
+      scenario_id: 'pay',
+      params: {},
+      idempotency_key: 'live-format-02',
+    });
     await vi.waitFor(() => expect(executions).toHaveLength(1));
     const r = (executions[0] as ExecuteInput).redactor;
     expect(r.redact('4242-4242-4242-4242 12/2034')).toBe('[REDACTED] [REDACTED]');
@@ -265,6 +287,7 @@ describe('live cards in a run', () => {
     const m = await manager({ ...LIVE_ENV }, { execute: crash, logger });
     await m.start({
       target: 'live',
+      confirm_production: true,
       scenario_id: 'pay',
       params: { card: 'live/company-visa' },
       idempotency_key: 'live-crash-01',

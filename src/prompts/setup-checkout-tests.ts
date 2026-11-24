@@ -2,6 +2,8 @@ import path from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { listFragments, MAX_LISTED_FRAGMENTS } from '../authoring/fragments.js';
+import { isProductionTarget } from '../safety/hosts.js';
+import { PRODUCTION_WARNING } from '../safety/production.js';
 import type { ServerDeps } from '../server.js';
 
 /*
@@ -153,6 +155,22 @@ export const HOUSE_RULES_TEXT = [
   '- `test-data-card` (error, test data): no card-like number.',
 ].join('\n');
 
+export const PRODUCTION_TEXT = [
+  'Production target:',
+  `- "{target}" is a production target. ${PRODUCTION_WARNING}`,
+  '- Show this warning to the user before each `run_scenario` call. Name the scenario and the params, and ask for a yes for that one run.',
+  '- Only after the user says yes, call `run_scenario` with `confirm_production: true`. One yes is good for one run. Never set `confirm_production` without the yes of the user in this conversation.',
+  '- `save_scenario` with `validate_on` cannot start a run on a production target. It saves the file and returns PRODUCTION_CONFIRMATION_REQUIRED. Then ask the user and call `run_scenario` with the scenario id.',
+  '- A `test_card` param takes a live card id, "live/<name>", from `targets[].live_cards` of `list_scenarios`. The number comes from env vars. Never ask the user for a card number.',
+  '- The checkout probe of `inspect_target` never pays. On a production target it can still make a guest account, an address, and an unpaid order draft on the live site. Tell the user before you inspect.',
+].join('\n');
+
+/** The production text for a production target. Empty for a test target. */
+export function productionText(deps: ServerDeps, target: string): string[] {
+  const t = hasTarget(deps, target) ? deps.config.targets[target] : undefined;
+  return t && isProductionTarget(t) ? [PRODUCTION_TEXT] : [];
+}
+
 /** Text for an unknown target. The prompt then holds only this. */
 export function unknownTargetText(deps: ServerDeps, target: string): string {
   const names = Object.keys(deps.config.targets);
@@ -177,6 +195,7 @@ export function configFacts(deps: ServerDeps, target: string): string {
   return [
     'Config facts (from the server, not from a tool):',
     `- Target "${target}": profile "${t.profile}".`,
+    `- Environment: ${isProductionTarget(t) ? 'production. See "Production target" below' : 'test'}.`,
     `- Checkout probe: ${t.inspect?.probe_checkout === true ? 'on' : 'off'}.`,
     `- Code scan: ${sourceDirs > 0 ? `${sourceDirs} source folder(s)` : 'no source folders. The report has no code facts'}.`,
     authoringDir
@@ -226,6 +245,7 @@ export async function setupCheckoutTestsText(deps: ServerDeps, target: string): 
     [
       SETUP_INTRO,
       configFacts(deps, target),
+      ...productionText(deps, target),
       await fragmentsText(deps),
       'Steps:',
       ...SETUP_CHECKOUT_TESTS_STEPS,

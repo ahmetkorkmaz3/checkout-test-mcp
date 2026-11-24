@@ -6,7 +6,8 @@ import { ToolError } from '../errors/tool-error.js';
 import type { Logger } from '../logger.js';
 import { type GuardedContext, type GuardedContextInput, openGuardedContext } from '../runner/browser.js';
 import { BrowserSlots } from '../runs/browser-slots.js';
-import { checkTargetHost, hostOf, isUrlAllowed } from '../safety/hosts.js';
+import { checkTargetHost, hostOf, isProductionTarget, isUrlAllowed } from '../safety/hosts.js';
+import { PRODUCTION_WARNING } from '../safety/production.js';
 import { redactText } from '../safety/redact-text.js';
 import { InspectConfig, type ResolvedConfig, type TargetConfig } from '../schemas/config.js';
 import { closest } from '../util/closest.js';
@@ -204,7 +205,8 @@ export class InspectionManager {
       checkout_probe: null,
       code: null,
       suggested_scenarios: [],
-      warnings: [],
+      // First, so the agent reads it while the job runs too. The job adds its warnings after it.
+      warnings: isProductionTarget(target) ? [PRODUCTION_WARNING] : [],
       side_effects: [],
       report_path: this.reportPath(id),
       idempotency_key: input.idempotency_key,
