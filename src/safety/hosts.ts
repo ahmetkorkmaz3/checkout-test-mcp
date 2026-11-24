@@ -30,6 +30,10 @@ export function matchesAny(host: string, patterns: readonly string[]): boolean {
   return patterns.some((p) => hostMatches(host, p));
 }
 
+export function isProductionTarget(target: TargetConfig): boolean {
+  return target.environment === 'production';
+}
+
 export type HostCheck = { ok: true } | { ok: false; reason: 'production' | 'unlabeled' };
 
 /**
@@ -41,6 +45,8 @@ export function checkTargetHost(
   target: TargetConfig,
   config: Pick<ResolvedConfig, 'production_hosts'>,
 ): HostCheck {
+  // A production target opts in to production hosts. The allowlist still applies.
+  if (isProductionTarget(target)) return { ok: true };
   const pattern = host.startsWith('*.') ? host.slice(2) : host;
   if (matchesAny(pattern, config.production_hosts)) return { ok: false, reason: 'production' };
   if (isLocalHost(pattern) || hasTestLabel(pattern)) return { ok: true };
@@ -69,7 +75,7 @@ export function isUrlAllowed(
   return isHostAllowed(parsed.hostname, target, config);
 }
 
-/** Host rule of the guard: a host in allowed_hosts or third_party_hosts, and never a production host. */
+/** Host rule of the guard: a host in allowed_hosts or third_party_hosts, and never a production host unless the target is a production target. */
 export function isHostAllowed(
   hostname: string,
   target: TargetConfig,
@@ -77,6 +83,6 @@ export function isHostAllowed(
 ): boolean {
   const host = normalizeHost(hostname);
   if (host === '') return false;
-  if (matchesAny(host, config.production_hosts)) return false;
+  if (!isProductionTarget(target) && matchesAny(host, config.production_hosts)) return false;
   return matchesAny(host, target.allowed_hosts) || matchesAny(host, target.third_party_hosts);
 }

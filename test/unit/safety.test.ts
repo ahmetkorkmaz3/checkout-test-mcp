@@ -15,6 +15,7 @@ import {
   hostMatches,
   isHostAllowed,
   isLocalHost,
+  isProductionTarget,
   isUrlAllowed,
 } from '../../src/safety/hosts.js';
 import { redactPath, redactText } from '../../src/safety/redact-text.js';
@@ -25,6 +26,8 @@ import { resolveInside, YAML_PATH } from '../../src/util/paths.js';
 
 const target = (over: Partial<TargetConfig> = {}): TargetConfig => ({
   description: '',
+  environment: 'test',
+  live_cards: {},
   profile: 'p',
   base_url: 'https://staging.shop.test',
   allowed_hosts: ['staging.shop.test'],
@@ -152,6 +155,39 @@ describe('host checks', () => {
     expect(isHostAllowed('www.google-analytics.com', target(), cfg)).toBe(false);
     expect(isHostAllowed('', target(), cfg)).toBe(false);
     expect(isHostAllowed('www.shop.com', target({ allowed_hosts: ['www.shop.com'] }), cfg)).toBe(false);
+  });
+});
+
+describe('production targets', () => {
+  const prodTarget = target({
+    environment: 'production',
+    base_url: 'https://www.shop.example',
+    allowed_hosts: ['www.shop.example'],
+    third_party_hosts: [],
+  });
+  const cfg = { production_hosts: ['www.shop.example', 'api.other.example'] };
+
+  it('detects a production target', () => {
+    expect(isProductionTarget(prodTarget)).toBe(true);
+    expect(isProductionTarget(target())).toBe(false);
+  });
+
+  it('allows a production host in the target lists', () => {
+    expect(isHostAllowed('www.shop.example', prodTarget, cfg)).toBe(true);
+  });
+
+  it('refuses a production host outside the target lists', () => {
+    expect(isHostAllowed('api.other.example', prodTarget, cfg)).toBe(false);
+  });
+
+  it('keeps refusing a production host for a test target', () => {
+    expect(isHostAllowed('www.shop.example', target({ allowed_hosts: ['www.shop.example'] }), cfg)).toBe(
+      false,
+    );
+  });
+
+  it('passes the host check for a production target', () => {
+    expect(checkTargetHost('www.shop.example', prodTarget, cfg)).toEqual({ ok: true });
   });
 });
 

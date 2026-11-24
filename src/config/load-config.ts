@@ -54,6 +54,9 @@ function validateTargets(cfg: ResolvedConfig): void {
     if (!matchesAny(baseHost, target.allowed_hosts)) {
       problems.push(`Target "${name}": base_url host "${baseHost}" is not in allowed_hosts.`);
     }
+    if (target.environment !== 'production' && Object.keys(target.live_cards).length > 0) {
+      problems.push(`Target "${name}": live_cards needs environment: production.`);
+    }
     if (target.allow_unlabeled_host && cfg.production_hosts.length === 0) {
       problems.push(`Target "${name}": allow_unlabeled_host needs a non-empty production_hosts list.`);
     }
@@ -68,7 +71,10 @@ function validateTargets(cfg: ResolvedConfig): void {
       }
     }
     for (const host of target.third_party_hosts) {
-      if (matchesAny(host.replace(/^\*\./, ''), cfg.production_hosts)) {
+      if (
+        target.environment !== 'production' &&
+        matchesAny(host.replace(/^\*\./, ''), cfg.production_hosts)
+      ) {
         problems.push(`Target "${name}": third-party host "${host}" is in production_hosts.`);
       }
     }

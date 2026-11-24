@@ -24,6 +24,48 @@ describe('config', () => {
     expect(() => parseConfig(raw, '/tmp')).toThrow(ConfigError);
   });
 
+  describe('production targets', () => {
+    const prod = (over: Record<string, unknown> = {}) => ({
+      profile: 'p',
+      environment: 'production',
+      base_url: 'https://www.shop.example',
+      allowed_hosts: ['www.shop.example'],
+      ...over,
+    });
+
+    it('accepts a production target with hosts in production_hosts', () => {
+      const cfg = parseConfig({ production_hosts: ['www.shop.example'], targets: { live: prod() } }, '/tmp');
+      expect(cfg.targets.live?.environment).toBe('production');
+      expect(cfg.targets.live?.live_cards).toEqual({});
+    });
+
+    it('accepts a production target with an unlabeled host and empty production_hosts', () => {
+      expect(() => parseConfig({ targets: { live: prod() } }, '/tmp')).not.toThrow();
+    });
+
+    it('refuses a test target with a host in production_hosts', () => {
+      const raw = {
+        production_hosts: ['www.shop.example'],
+        targets: { t: prod({ environment: 'test' }) },
+      };
+      expect(() => parseConfig(raw, '/tmp')).toThrow(/is in production_hosts/);
+    });
+
+    it('refuses live_cards on a test target', () => {
+      const card = {
+        number_env: 'LIVE_NUMBER',
+        expiry_env: 'LIVE_EXPIRY',
+        cvc_env: 'LIVE_CVC',
+        behaviour: 'success',
+        description: 'My own card.',
+      };
+      const raw = { targets: { local: { ...base.targets.local, live_cards: { mine: card } } } };
+      expect(() => parseConfig(raw, '/tmp')).toThrow(
+        /Target "local": live_cards needs environment: production/,
+      );
+    });
+  });
+
   it('refuses allow_unlabeled_host without production_hosts', () => {
     const raw = {
       targets: {

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { WordKind } from '../inspect/words.js';
+import { CardBehaviour } from './common.js';
 
 const HostPattern = z
   .string()
@@ -40,9 +41,25 @@ export const AuthoringConfig = z
   .strict();
 export type AuthoringConfig = z.infer<typeof AuthoringConfig>;
 
+/** A live card the user owns. Only env var names live here. The values come from the environment. */
+export const LiveCardConfig = z
+  .object({
+    number_env: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
+    expiry_env: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
+    cvc_env: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
+    behaviour: CardBehaviour,
+    description: z.string(),
+  })
+  .strict();
+export type LiveCardConfig = z.infer<typeof LiveCardConfig>;
+
 export const TargetConfig = z
   .object({
     description: z.string().default(''),
+    /** A production target may use hosts that are in production_hosts. */
+    environment: z.enum(['test', 'production']).default('test'),
+    /** Live card name -> env var names. Needs environment: production. */
+    live_cards: z.record(z.string().regex(/^[a-z0-9][a-z0-9-]*$/), LiveCardConfig).default({}),
     profile: z.string().min(1),
     base_url: z.url(),
     allowed_hosts: z.array(HostPattern).min(1),
