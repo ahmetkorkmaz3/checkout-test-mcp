@@ -196,6 +196,20 @@ describe('pay wins', () => {
   ])('pay matches %s', (t) => expect(matchesKind('pay', t)).toBe(true));
 });
 
+describe('exact-only checkout labels', () => {
+  it.each(['Checkout', ' CHECKOUT ', 'Kasse', 'Ödeme', 'Check out', 'ÖDEME'])('checkout matches %s', (t) =>
+    expect(matchesKind('checkout', t)).toBe(true),
+  );
+  it.each(['Complete checkout', 'Checkout with PayPal', 'Express checkout', 'Ödeme yap'])(
+    'checkout does not match %s',
+    (t) => expect(matchesKind('checkout', t)).toBe(false),
+  );
+  it('Continue to payment is checkout and not pay', () => {
+    expect(matchesKind('checkout', 'Continue to payment')).toBe(true);
+    expect(matchesKind('pay', 'Continue to payment')).toBe(false);
+  });
+});
+
 describe('input folding', () => {
   it('matches a curly apostrophe', () => {
     expect(matchesKind('pay', 'Effettua l\u2019ordine')).toBe(true);

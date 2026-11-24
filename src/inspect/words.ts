@@ -333,6 +333,14 @@ export const WORD_LISTS: Record<WordKind, readonly string[]> = {
   ],
 };
 
+/**
+ * Labels that count only when they are the whole label, so "Complete checkout" does not match.
+ * They stay out of WORD_LISTS, because a bare word is too weak as a phrase.
+ */
+export const EXACT_ONLY: Partial<Record<WordKind, readonly string[]>> = {
+  checkout: ['checkout', 'check out', 'kasse', 'kassa', 'caisse', 'cassa', 'caja', 'ödeme'],
+};
+
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
@@ -357,7 +365,10 @@ export function wordsFor(kind: WordKind, extra: Partial<Record<WordKind, string[
   const phrases = [...WORD_LISTS[kind], ...(extra[kind] ?? [])].filter((p) => p.trim() !== '');
   // Longest first, so the alternation prefers the most specific phrase.
   const parts = [...new Set(phrases)].sort((a, b) => b.length - a.length).map(phrasePattern);
-  return new RegExp(`(?<![\\p{L}\\p{N}])(?:${parts.join('|')})(?![\\p{L}\\p{N}])`, 'iu');
+  const phrase = `(?<![\\p{L}\\p{N}])(?:${parts.join('|')})(?![\\p{L}\\p{N}])`;
+  const exact = (EXACT_ONLY[kind] ?? []).map(phrasePattern);
+  const body = exact.length > 0 ? `${phrase}|^\\s*(?:${exact.join('|')})\\s*$` : phrase;
+  return new RegExp(`(?:${body})`, 'iu');
 }
 
 const defaults = new Map<WordKind, RegExp>();
