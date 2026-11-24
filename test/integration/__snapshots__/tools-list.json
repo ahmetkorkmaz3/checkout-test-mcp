@@ -1388,7 +1388,7 @@
   {
     "name": "inspect_target",
     "title": "Inspect a test target",
-    "description": "Inspects a configured test target and suggests checkout test scenarios with the evidence for each. It reads the site pages and API calls through the host guard, and it reads the shop source code when the target config has inspect.source_dirs. Only when the target config has inspect.probe_checkout: true, a checkout probe goes up to the payment step with fictional test data. It never pays and never sends a phone number for a code. Side effects of the probe on the test site: a cart item, a guest account with an example.test email, an address, and possibly an unpaid order draft. The report lists them in side_effects. The call starts a background job and waits up to wait_s seconds. While status is not \"finished\", call inspect_target again with the same target, idempotency_key, and scope. The same key never starts a second inspection, also after a restart. Read warnings and suggested_scenarios[].missing to know what to ask the user. Then write the baseline scenarios and save each with save_scenario.",
+    "description": "Inspects a configured test target and suggests checkout test scenarios with the evidence for each. It reads the site pages and API calls through the host guard, and it reads the shop source code when the target config has inspect.source_dirs. Only when the target config has inspect.probe_checkout: true, a checkout probe goes up to the payment step with fictional test data. It never pays and never sends a phone number for a code. Side effects of the probe on the test site: a cart item, a guest account with an example.test email, an address, and possibly an unpaid order draft. The report lists them in side_effects. The call starts a background job and waits up to wait_s seconds. While status is not \"finished\", call inspect_target again with the same target, idempotency_key, and scope. The same key never starts a second inspection, also after a restart. Read warnings and suggested_scenarios[].missing to know what to ask the user. Then write the baseline scenarios and save each with save_scenario. When a warning says that the result is cut, call inspect_target again with the same target, key, and scope, plus section and offset, to read the cut list in pages. section and offset only read: they never start an inspection.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1418,6 +1418,25 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 20
+        },
+        "section": {
+          "description": "Only to read a list that the result cut: \"pages\", \"api_calls\", \"ui_strings\", \"test_ids\", \"routes\", or \"probe_steps\". Needs a key that already has an inspection. The result then holds only that list.",
+          "type": "string",
+          "enum": [
+            "pages",
+            "api_calls",
+            "ui_strings",
+            "test_ids",
+            "routes",
+            "probe_steps"
+          ]
+        },
+        "offset": {
+          "default": 0,
+          "description": "With section: the first item to return. Start with 0, then send next_offset.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         }
       },
       "required": [
@@ -1811,6 +1830,54 @@
                             "type": "string"
                           }
                         },
+                        "card_frames": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "host": {
+                                "type": "string"
+                              },
+                              "title": {
+                                "type": "string"
+                              },
+                              "name": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "host",
+                              "title"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "description": "Card iframes, read from the iframe element on the payment page. A frame on a blocked host is listed too. Fill it with within: { frame: { css: \"iframe[title='<title>']\" } }."
+                        },
+                        "card_fields": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "label": {
+                                "type": "string"
+                              },
+                              "placeholder": {
+                                "type": "string"
+                              },
+                              "autocomplete": {
+                                "type": "string"
+                              },
+                              "in_frame": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "in_frame"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "description": "Card inputs by label, placeholder, and autocomplete. Never values. Fields in a frame on a blocked host are unknown."
+                        },
                         "test_card_select": {
                           "anyOf": [
                             {
@@ -1854,6 +1921,8 @@
                         "methods",
                         "card_form",
                         "card_iframe_hosts",
+                        "card_frames",
+                        "card_fields",
                         "test_card_select",
                         "agreement_checkbox",
                         "pay_button"
@@ -2203,6 +2272,73 @@
           "type": "boolean",
           "description": "True when this idempotency_key already had an inspection. No new inspection started."
         },
+        "slice": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "section": {
+                  "type": "string",
+                  "enum": [
+                    "pages",
+                    "api_calls",
+                    "ui_strings",
+                    "test_ids",
+                    "routes",
+                    "probe_steps"
+                  ]
+                },
+                "offset": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                "total": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991,
+                  "description": "Number of items in the section of the full report."
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  }
+                },
+                "next_offset": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Send this as offset to read the next items. null when no items are left."
+                }
+              },
+              "required": [
+                "section",
+                "offset",
+                "total",
+                "items",
+                "next_offset"
+              ],
+              "additionalProperties": false,
+              "description": "One page of a list from the full stored report. Only with section."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null without section. With section: one page of that list. site, checkout_probe, and code are then null."
+        },
         "next": {
           "type": "object",
           "properties": {
@@ -2258,6 +2394,7 @@
         "side_effects",
         "report_path",
         "reused_existing_inspection",
+        "slice",
         "next"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema",

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { type Browser, type BrowserContext, errors, type Page } from 'playwright';
+import { type Browser, type BrowserContext, errors, type Locator, type Page } from 'playwright';
 import { containsUnregisteredCardNumber } from '../safety/cards.js';
 import { hostOf } from '../safety/hosts.js';
 import { type Redactor, redactQuery } from '../safety/secrets.js';
@@ -72,6 +72,17 @@ const UNREACHABLE =
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const SENSITIVE_INPUTS =
+  'input[type=password i], input[autocomplete^="cc-" i], input[autocomplete="one-time-code" i]';
+
+/**
+ * Screenshot masks for password, card, and one-time code inputs in every frame of the page.
+ * A card iframe that no step addresses, or a nested frame, is masked too.
+ */
+export function sensitiveMask(page: Page): Locator[] {
+  return page.frames().map((f) => f.locator(SENSITIVE_INPUTS));
+}
+
 export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   const { scenario, target, options, redactor } = input;
   const mult = options.timeout_multiplier;
@@ -102,23 +113,12 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   let page: Page | undefined;
   let failure: Failure | null = null;
 
-  const frameCss = new Set<string>();
-  for (const s of input.steps) {
-    for (const w of [s.within, ...(s.then ?? []).map((t) => t.within)])
-      if (w?.frame.css) frameCss.add(w.frame.css);
-  }
-
   async function screenshot(stepId: string, n: number): Promise<string | undefined> {
     const p = page;
     if (!p || p.isClosed()) return undefined;
     const file = path.join(input.runDir, `${String(n).padStart(2, '0')}-${stepId}.png`);
-    const sensitive = 'input[type=password], input[autocomplete^="cc-"], input[autocomplete="one-time-code"]';
-    const mask = [
-      p.locator(sensitive),
-      ...[...frameCss].map((css) => p.frameLocator(css).locator(sensitive)),
-    ];
     try {
-      await p.screenshot({ path: file, mask, timeout: 10_000 });
+      await p.screenshot({ path: file, mask: sensitiveMask(p), timeout: 10_000 });
       screenshots.push({ step_id: stepId, path: file, uri: pathToFileURL(file).toString() });
       return file;
     } catch {

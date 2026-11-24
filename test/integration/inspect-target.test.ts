@@ -76,6 +76,8 @@ const PROBE: ProbeResult = {
     methods: ['Card'],
     card_form: true,
     card_iframe_hosts: [],
+    card_frames: [],
+    card_fields: [],
     test_card_select: { label: 'Test card', options: ['Visa success', 'Card declined'] },
     agreement_checkbox: 'I accept the terms',
     pay_button: 'Pay now',
@@ -287,7 +289,7 @@ describe('inspect_target', () => {
     expect(JSON.parse(res.content[0].text)).toEqual(r);
     expect(r.site.pages).toHaveLength(25);
     expect(r.site.pages[0].elements).toEqual([]);
-    const warning = r.warnings.find((w: string) => w.includes('see report_path'));
+    const warning = r.warnings.find((w: string) => w.includes('then next_offset'));
     expect(warning).toMatch(/site\.pages\[\]\.elements/);
     expect(warning).not.toContain(r.report_path);
     const onDisk = JSON.parse(await readFile(r.report_path, 'utf8'));
@@ -305,9 +307,82 @@ describe('inspect_target', () => {
     await setup({ crawl: async () => many });
     const res = await call({ target: 'shop-local', idempotency_key: 'inspect-shop-06' });
     expect(res.content[0].text.length).toBeLessThanOrEqual(RESULT_CHAR_LIMIT);
-    const warning = res.structuredContent.warnings.find((w: string) => w.includes('see report_path'));
+    const warning = res.structuredContent.warnings.find((w: string) => w.includes('then next_offset'));
     expect(warning).toMatch(/site\.pages after the first \d+ of 300/);
     expect(warning).not.toMatch(/Cut: \./);
+  });
+
+  it('pages through a cut list with section and offset, without a new inspection', async () => {
+    const many: SiteReport = {
+      ...SITE,
+      pages: Array.from({ length: 300 }, (_, i) => ({
+        ...page('other', `/page-${i}`),
+        headings: Array.from({ length: 5 }, (_, j) => `Heading ${j} of a long page number ${i}`),
+      })),
+    };
+    let crawls = 0;
+    await setup({
+      crawl: async () => {
+        crawls++;
+        return many;
+      },
+    });
+    const key = { target: 'shop-local', idempotency_key: 'inspect-shop-paging' };
+    const first = await call(key);
+    expect(first.structuredContent.slice).toBeNull();
+    const seen: string[] = [];
+    let offset: number | null = 0;
+    let calls = 0;
+    while (offset !== null) {
+      const res = await call({ ...key, section: 'pages', offset });
+      calls++;
+      expect(res.isError, JSON.stringify(res.structuredContent)).toBeFalsy();
+      expect(res.content[0].text.length).toBeLessThanOrEqual(RESULT_CHAR_LIMIT);
+      const out = res.structuredContent;
+      expect(out.reused_existing_inspection).toBe(true);
+      expect(out.site).toBeNull();
+      expect(out.slice.section).toBe('pages');
+      expect(out.slice.offset).toBe(offset);
+      expect(out.slice.total).toBe(300);
+      expect(out.slice.items.length).toBeGreaterThan(0);
+      seen.push(...out.slice.items.map((p: { url_path: string }) => p.url_path));
+      if (out.slice.next_offset !== null) {
+        expect(out.next.arguments).toMatchObject({ section: 'pages', offset: out.slice.next_offset });
+      }
+      offset = out.slice.next_offset;
+    }
+    expect(calls).toBeGreaterThan(1);
+    expect(seen).toEqual(many.pages.map((p) => p.url_path));
+    expect(crawls).toBe(1);
+    // probe_steps is a section too.
+    const steps = (await call({ ...key, section: 'probe_steps' })).structuredContent.slice;
+    expect(steps).toMatchObject({ total: PROBE.steps.length, next_offset: null });
+  });
+
+  it('refuses section for a key without an inspection, and starts nothing', async () => {
+    const { inspections } = await setup();
+    const res = await call({ target: 'shop-local', idempotency_key: 'inspect-shop-none', section: 'pages' });
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent.error.code).toBe('INVALID_PARAMS');
+    expect(await inspections.hasKey('inspect-shop-none')).toBe(false);
+  });
+
+  it('warns that the card fields are unknown when the card frame host is blocked', async () => {
+    await setup({
+      probe: async () => ({
+        ...PROBE,
+        payment: PROBE.payment
+          ? { ...PROBE.payment, card_frames: [{ host: 'cards.provider.test', title: 'Card form' }] }
+          : null,
+      }),
+    });
+    const r = (await call({ target: 'shop-local', idempotency_key: 'inspect-shop-cardhost' }))
+      .structuredContent;
+    expect(r.warnings).toContainEqual(
+      expect.stringMatching(
+        /card fields are unknown.*cards\.provider\.test.*targets\.shop-local\.third_party_hosts/,
+      ),
+    );
   });
 
   it('gives the same inspection after a restart without the key index', async () => {

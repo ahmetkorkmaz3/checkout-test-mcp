@@ -4,12 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { chromium } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 // @ts-expect-error plain JS example without types
 import { startDemoStore } from '../../examples/demo-store/server.mjs';
 import { parseConfig } from '../../src/config/load-config.js';
 import { InspectionManager } from '../../src/inspect/manager.js';
 import { silentLogger } from '../../src/logger.js';
+import { sensitiveMask } from '../../src/runner/executor.js';
 import { RunManager } from '../../src/runs/manager.js';
 import { RunStore } from '../../src/runs/store.js';
 import { parseScenario, ScenarioRegistry } from '../../src/scenarios/registry.js';
@@ -277,5 +279,27 @@ describe('demo store', () => {
     expect(out.blocked_requests).toContainEqual(
       expect.objectContaining({ url: expect.stringContaining('example.com/help'), step_id: 'open_help' }),
     );
+  });
+});
+
+describe('screenshot mask', () => {
+  it('covers card, one-time code, and password inputs in every frame, also in frames that no step names', async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      await page.setContent(
+        `<input type="password"><input name="q"><iframe srcdoc="<input autocomplete=cc-number><input name=note><iframe srcdoc='<input autocomplete=one-time-code><input autocomplete=CC-CSC>'></iframe>"></iframe>`,
+      );
+      await expect.poll(() => page.frames().length).toBe(3);
+      const count = async () => {
+        let n = 0;
+        for (const l of sensitiveMask(page)) n += await l.count();
+        return n;
+      };
+      await expect.poll(count).toBe(4);
+      await page.screenshot({ mask: sensitiveMask(page), timeout: 10_000 });
+    } finally {
+      await browser.close();
+    }
   });
 });

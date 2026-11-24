@@ -70,7 +70,7 @@ describe('trimForResult', () => {
     expect(JSON.stringify(out).length).toBeLessThanOrEqual(RESULT_CHAR_LIMIT);
     const w = out.warnings.at(-1) ?? '';
     expect(w).not.toMatch(/Cut: \./);
-    expect(w).toMatch(/see report_path/);
+    expect(w).toMatch(/with offset 0, then next_offset/);
     expect(w).not.toContain('/tmp/runs');
     expect(w).toContain(`site.pages after the first ${out.site?.pages.length} of 400`);
   });

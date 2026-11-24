@@ -111,6 +111,8 @@ The server has an MCP prompt that sets up the checkout tests of a new shop with 
 2. Set the secrets as environment variables before you start the server. Never paste a password into the chat. The agent tells you the names when one is missing.
 3. Run the prompt `setup_checkout_tests` with the target name. In Claude Code: `/setup_checkout_tests my-staging` (the client can show it with a server prefix).
 
+The server reads the config once. After a config change, restart the server. The agent waits for the restart before it runs card scenarios.
+
 The first setup inspects the target, writes the fragments, and writes and runs the baseline scenarios: guest card, declined card, terms required, and member card, when the report has the evidence. It tries each scenario at most 3 times. It ends with a table of each scenario, what it proves, its verdict, and its run id. Then it lists the offers (for example OTP login, gift card), the missing inputs, and the files. Commit the files yourself.
 
 For one more scenario later, run the prompt `create_scenario` with the target and a request, for example "a declined card shows an error". See [docs/tools.md](docs/tools.md#9-prompts).

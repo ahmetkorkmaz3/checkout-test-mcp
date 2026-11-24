@@ -124,6 +124,12 @@ describe('checkout probe', () => {
     expect(r.payment?.pay_button).toMatch(/^Pay/);
     expect(r.payment?.card_form).toBe(true);
     expect(r.payment?.card_iframe_hosts).toEqual(['localhost']);
+    expect(r.payment?.card_frames).toEqual([{ host: 'localhost', title: 'Secure card payment input' }]);
+    expect(r.payment?.card_fields).toEqual([
+      { placeholder: 'Card number', autocomplete: 'cc-number', in_frame: true },
+      { placeholder: 'MM / YY', autocomplete: 'cc-exp', in_frame: true },
+      { placeholder: 'CVC', autocomplete: 'cc-csc', in_frame: true },
+    ]);
     expect(demo.stats.orders).toBe(before);
     expect(demo.stats.payments).toBe(payments);
     expect(demo.issuedOtps.length).toBe(otps);
@@ -670,6 +676,9 @@ describe('checkout probe safety rules', () => {
     expect(r.reached).toBe('payment');
     expect(r.stopped_reason).toBe('payment_step_reached');
     expect(r.payment?.pay_button).toBe('Siparişi Onayla');
+    // The frame element is on the parent page, so the probe lists the blocked frame. Its fields are unknown.
+    expect(r.payment?.card_frames).toEqual([{ host: 'pay.example.com', title: 'Kart' }]);
+    expect(r.payment?.card_fields).toEqual([]);
     expect(hits.filter((h) => h.startsWith('POST /clicked/'))).toEqual([]);
   });
 
@@ -777,9 +786,9 @@ describe('inspection job on the demo store', () => {
 });
 
 /**
- * The setup loop without a model: a small template fills a scenario from the report only,
- * so the report must carry enough facts for a guest card scenario that passes.
- * The card form fields come from the fragment that the authoring folder already has.
+ * The setup loop without a model: a small template fills a scenario from the report only.
+ * It shows that the report has enough facts for the guest card scenario on the demo store.
+ * It does not prove this for every shop: the success checks come from common words, not from the report.
  */
 function guestCardScenario(
   report: InspectionReport,
@@ -822,6 +831,20 @@ function guestCardScenario(
     }
     return [];
   });
+  // Card fields by autocomplete, in the card frame from the report.
+  const frame = payment.card_frames[0];
+  const cardValue: Record<string, string> = {
+    'cc-number': '{{card.number}}',
+    'cc-exp': '{{card.expiry}}',
+    'cc-csc': '{{card.cvc}}',
+  };
+  const cardFields = payment.card_fields.flatMap((f) => {
+    const value = f.autocomplete ? cardValue[f.autocomplete] : undefined;
+    if (!value || !f.placeholder) return [];
+    return [`      - field: { placeholder: ${f.placeholder} }\n        value: "${value}"`];
+  });
+  if (!frame || cardFields.length !== 3) throw new Error('no card frame or card fields in the report');
+  const cardStep = `    within:\n      frame: { css: "iframe[title='${frame.title}']" }\n    fill_form:\n${cardFields.join('\n')}`;
   const checkout = quoted('go to checkout: ');
   const guest = quoted('continue as guest: ');
   const payWord = payment.pay_button.split(/\s+/)[0] ?? 'Pay';
@@ -859,7 +882,7 @@ ${fields.join('\n')}
       - click: { role: button, name: ${quoted('save and continue: ')}, exact: true }
   - id: card
     title: Fill the card form
-    include: ../fragments/fill-card.yaml
+${cardStep}
   - id: accept_terms
     title: Accept the terms
     check: { label: ${payment.agreement_checkbox} }
@@ -948,9 +971,9 @@ describe('setup loop without a model', () => {
       validate_on: { target: 'demo-local' },
     });
     expect(saved.scenario_id).toBe('demo-local-guest-card');
-    // Only the reused card fragment has a warning: its iframe has a css locator.
+    // A card frame needs a css locator. The warning is expected.
     expect(saved.warnings.map((w: { path: string; rule: string }) => `${w.path} ${w.rule}`)).toEqual([
-      'steps.4.include prefer-semantic-locator',
+      'steps.4.within.frame.css prefer-semantic-locator',
     ]);
     const runId = saved.validation?.run_id as string;
     expect(runId).toMatch(/^run_/);

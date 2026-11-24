@@ -6,7 +6,7 @@ import { ToolError } from '../errors/tool-error.js';
 import type { Logger } from '../logger.js';
 import { type GuardedContext, type GuardedContextInput, openGuardedContext } from '../runner/browser.js';
 import { BrowserSlots } from '../runs/browser-slots.js';
-import { checkTargetHost, hostOf } from '../safety/hosts.js';
+import { checkTargetHost, hostOf, isUrlAllowed } from '../safety/hosts.js';
 import { redactText } from '../safety/redact-text.js';
 import { InspectConfig, type ResolvedConfig, type TargetConfig } from '../schemas/config.js';
 import { closest } from '../util/closest.js';
@@ -235,8 +235,15 @@ export class InspectionManager {
     return this.toReport(r);
   }
 
+  /** True when the key already belongs to an inspection, also after a restart. */
+  async hasKey(key: string): Promise<boolean> {
+    await this.init();
+    return this.keys.has(key);
+  }
+
   /**
    * The newest finished inspection of a target that read the site and that the server did not interrupt.
+   * An inspection whose probe reached the payment step wins over a newer one whose probe did not.
    * The create_scenario prompt gives its key to the agent, so a second call reads it again and starts no probe.
    */
   async latestFinished(
@@ -247,7 +254,14 @@ export class InspectionManager {
     for (const r of this.records.values()) {
       if (r.target !== target || r.scope === 'code' || r.status !== 'finished' || r.interrupted) continue;
       if (!r.finished_at) continue;
-      if (!best || (best.finished_at ?? '') < r.finished_at) best = r;
+      if (!best) {
+        best = r;
+        continue;
+      }
+      // A report that reached the payment step has the most facts. It wins over a newer one without.
+      const paid = (x: InspectionRecord) => (x.checkout_probe?.reached === 'payment' ? 1 : 0);
+      if (paid(r) > paid(best) || (paid(r) === paid(best) && (best.finished_at ?? '') < r.finished_at))
+        best = r;
     }
     return best ? { idempotency_key: best.idempotency_key, scope: best.scope } : undefined;
   }
@@ -634,6 +648,17 @@ export class InspectionManager {
     if (scope === 'both' && inspect.source_dirs.length === 0) {
       out.push(
         `The code scan did not run, because targets.${name}.inspect.source_dirs is empty. Add the shop source folders to read routes, UI strings, and payment packages.`,
+      );
+    }
+    const target = this.deps.config.targets[name];
+    const blockedCardHosts = new Set(
+      (probe?.payment?.card_frames ?? [])
+        .map((f) => f.host)
+        .filter((h) => target && !isUrlAllowed(`https://${h}/`, target, this.deps.config)),
+    );
+    for (const host of blockedCardHosts) {
+      out.push(
+        `The card fields are unknown, because the guard blocked the card frame host ${host}. Ask the user to add ${host} to targets.${name}.third_party_hosts, restart the server, and inspect again.`,
       );
     }
     if (site && site.blocked_hosts.length > 0) {

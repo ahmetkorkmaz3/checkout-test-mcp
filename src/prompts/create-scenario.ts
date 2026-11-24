@@ -2,11 +2,15 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ServerDeps } from '../server.js';
 import {
+  CONFIG_CHANGES_TEXT,
   configFacts,
   FORMAT_TEXT,
   fillTarget,
+  fragmentsText,
   HOUSE_RULES_TEXT,
+  hasTarget,
   SECRETS_TEXT,
+  unknownTargetText,
   WRITING_RULES_TEXT,
 } from './setup-checkout-tests.js';
 
@@ -31,10 +35,12 @@ export const CREATE_SCENARIO_STEPS: readonly string[] = [
   '2. Get the facts about the site from an inspection.',
   [
     '3. Find what the scenario needs that the request and the report cannot answer, for example a test account, a gift card test number, or a payment host for `third_party_hosts`.',
-    'Ask the user once for all of it. Follow the "Secrets" rules below. The user edits the config. Never edit the config yourself.',
+    'When the request needs the checkout pages, the report has no payment step, and the checkout probe is off, add the probe to the same question. Tell the user the side effects on the test site: a guest account with an example.test email, an address, an unpaid order draft, and a cart item. To allow it, the user sets `inspect.probe_checkout: true` under the target.',
+    'Ask the user once for all of it, in one message. Follow the "Secrets" rules below. The user edits the config. Never edit the config yourself.',
+    'After a config change, wait for the server restart (see "Config changes"). Inspect again with a new key when the change affects the site facts.',
   ].join(' '),
   [
-    '4. Reuse the fragments in the authoring folder for the parts that they cover, such as add to cart, the address form, and pay.',
+    '4. Reuse the fragments in the list above for the parts that they cover, such as add to cart, the address form, and pay.',
     'Write a new fragment only for steps that no fragment has, and save it with `save_scenario` and kind "fragment" first.',
     'Take every button name, label, and option text from the report.',
   ].join(' '),
@@ -44,15 +50,19 @@ export const CREATE_SCENARIO_STEPS: readonly string[] = [
     'Then call `get_run_result` with `validation.run_id` and wait_s 20 until `status` is "finished".',
     'When the verdict is not "passed", read the failing step, the category, the likely causes, and the screenshot. Fix the YAML and save again with `overwrite: true`.',
     'You have 3 tries. One try is one save with a validation run. A save that `SCENARIO_INVALID` refuses is not a try: fix every issue in `details.issues` at once.',
+    'A "blocked" verdict that names a host is a config fix, not a try. Ask the user to add the host, wait for the restart, and run again.',
     'After 3 failed tries, stop and tell the user that the scenario needs a human, with the last failure.',
   ].join(' '),
   [
     '6. End with one table for the user:',
     '| Scenario | What it proves | Verdict | Run id |',
     '|---|---|---|---|',
-    'Then list the missing inputs and the paths that you saved. The user commits the files.',
+    'Then list the missing inputs, the test orders that the validation runs placed, and the paths that you saved. The user commits the files.',
   ].join('\n'),
 ];
+
+const PAGING =
+  'When a warning says that the result is cut, call `inspect_target` again with the same target, key, and scope, plus `section` (for example "pages") and `offset` 0. Then send `slice.next_offset` as the offset until it is null.';
 
 function inspectionStep(
   target: string,
@@ -62,19 +72,22 @@ function inspectionStep(
     return [
       `Call \`inspect_target\` with target "${target}", idempotency_key "${latest.idempotency_key}", and scope "${latest.scope}".`,
       'This is the latest finished inspection of the target. The call returns its report at once and starts no new inspection.',
-      'Read `checkout_probe`, `site.pages`, `site.api_calls`, `suggested_scenarios`, and `warnings`. When the result says that it is cut, read the full report at `report_path`.',
+      'Read `checkout_probe`, `site.pages`, `site.api_calls`, `suggested_scenarios`, and `warnings`.',
+      PAGING,
     ].join(' ');
   }
   return [
     `No finished inspection exists for "${target}".`,
-    'When the checkout probe is off and the request needs the checkout pages, first ask the user once to allow the probe. Tell the user the side effects on the test site: a guest account with an example.test email, an address, an unpaid order draft, and a cart item. The user sets `inspect.probe_checkout: true` under the target.',
     `Call \`inspect_target\` with target "${target}", scope "both", and a new idempotency_key, for example "scenario-${target}-<today as YYYYMMDD>".`,
     'While `status` is not "finished", call it again with the same target, key, and scope, and wait_s 20. Never use a new key to see the progress.',
+    'When the checkout probe is off, this inspection reads the site only. Step 3 asks about the probe.',
+    PAGING,
   ].join(' ');
 }
 
 export async function createScenarioText(deps: ServerDeps, target: string, request: string): Promise<string> {
-  const latest = deps.config.targets[target] ? await deps.inspections.latestFinished(target) : undefined;
+  if (!hasTarget(deps, target)) return unknownTargetText(deps, target);
+  const latest = await deps.inspections.latestFinished(target);
   const steps = CREATE_SCENARIO_STEPS.map((s) =>
     s.startsWith('2. ') ? `${s} ${inspectionStep(target, latest)}` : s,
   );
@@ -85,8 +98,10 @@ export async function createScenarioText(deps: ServerDeps, target: string, reque
     fillTarget(
       [
         configFacts(deps, target),
+        await fragmentsText(deps),
         'Steps:',
         ...steps,
+        CONFIG_CHANGES_TEXT,
         SECRETS_TEXT,
         FORMAT_TEXT,
         WRITING_RULES_TEXT,

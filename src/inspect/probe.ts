@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import type { BrowserContext, Locator, Page } from 'playwright';
+import type { BrowserContext, Frame, Locator, Page } from 'playwright';
 import { hostOf } from '../safety/hosts.js';
 import { redactText } from '../safety/redact-text.js';
 import type { InspectConfig, TargetConfig } from '../schemas/config.js';
@@ -14,6 +14,7 @@ import {
   guardedSelect,
   hasBlockedFrame,
   hasCardFields,
+  isPaymentFrame,
 } from './actions.js';
 import { accessibleName, type PageSnapshot, rejectCookieBanner } from './crawl.js';
 import { guessPageKind, type PageKind } from './page-kind.js';
@@ -26,10 +27,29 @@ export interface ProbeStep {
   result: 'done' | 'skipped';
 }
 
+/** An iframe on the payment page that holds card fields, or a payment frame that the guard blocked. */
+export interface CardFrame {
+  host: string;
+  title: string;
+  name?: string;
+}
+
+/** A card input. Labels only, never a value. */
+export interface CardField {
+  label?: string;
+  placeholder?: string;
+  autocomplete?: string;
+  in_frame: boolean;
+}
+
 export interface ProbePayment {
   methods: string[];
   card_form: boolean;
   card_iframe_hosts: string[];
+  /** Read from the iframe element on the parent page, so a frame on a blocked host is listed too. */
+  card_frames: CardFrame[];
+  /** Inline card fields, and fields in card frames on allowed hosts. */
+  card_fields: CardField[];
   test_card_select: { label: string; options: string[] } | null;
   agreement_checkbox: string | null;
   pay_button: string | null;
@@ -72,6 +92,8 @@ export const PROBE_LIMITS = {
   flowSteps: 8,
   fieldsPerForm: 40,
   candidates: 200,
+  cardFrames: 20,
+  cardFields: 20,
   options: 50,
   methods: 20,
   dialogs: 20,
@@ -924,6 +946,45 @@ class Probe {
     return buttons[0] ?? null;
   }
 
+  /**
+   * The card frames and the card field labels. A frame counts when it has card fields, or when the
+   * guard blocked its URL and it looks like a payment frame. Field values are never read.
+   */
+  private async readCardForm(): Promise<{ frames: CardFrame[]; fields: CardField[] }> {
+    const frames: CardFrame[] = [];
+    const fields = await readCardFields(this.page.mainFrame(), false);
+    const iframes = await this.page
+      .locator('iframe')
+      .elementHandles()
+      .catch(() => []);
+    for (const handle of iframes.slice(0, PROBE_LIMITS.cardFrames)) {
+      const attrs = await handle
+        .evaluate((el) => {
+          const f = el as HTMLIFrameElement;
+          return { src: f.src, title: f.getAttribute('title') ?? '', name: f.getAttribute('name') ?? '' };
+        })
+        .catch(() => null);
+      if (!attrs) continue;
+      let host = '';
+      try {
+        host = hostOf(attrs.src);
+      } catch {
+        continue;
+      }
+      const frame = await handle.contentFrame().catch(() => null);
+      const inFrame = frame ? await readCardFields(frame, true) : [];
+      const blockedPayment =
+        this.blockedFrames.has(attrs.src) &&
+        isPaymentFrame({ src: attrs.src, title: attrs.title, context: '' });
+      if (inFrame.length === 0 && !blockedPayment) continue;
+      const title = clean(attrs.title);
+      const name = clean(attrs.name);
+      frames.push({ host, title, ...(name ? { name } : {}) });
+      fields.push(...inFrame);
+    }
+    return { frames, fields: fields.slice(0, PROBE_LIMITS.cardFields) };
+  }
+
   private async readPayment(payButton: string | null): Promise<ProbePayment> {
     const page = this.page;
     const controls = await page
@@ -982,12 +1043,15 @@ class Probe {
       }
     }
 
+    const { frames: cardFrames, fields: cardFields } = await this.readCardForm();
     const testSelect = selects.find((s) => TEST_CARD.test(s.label.normalize('NFC')));
     const agreement = checkboxes.find((t) => matchesKind('terms', t, this.words));
     return {
       methods: methods.map((m) => clean(m.label)).filter(Boolean),
       card_form: await hasCardFields(page),
       card_iframe_hosts: [...hosts].filter(Boolean).sort(),
+      card_frames: cardFrames,
+      card_fields: cardFields,
       test_card_select: testSelect
         ? {
             label: clean(testSelect.label),
@@ -1046,4 +1110,43 @@ export async function probeCheckout(ctx: ProbeContext): Promise<ProbeResult> {
   const result = structuredClone(probe.result);
   ctx.onProgress(`Probe stopped: ${result.stopped_reason}.`);
   return result;
+}
+
+/** Card input labels in one frame. Values are never read. */
+async function readCardFields(frame: Frame, inFrame: boolean): Promise<CardField[]> {
+  const raw = await frame
+    .locator('input')
+    .evaluateAll(
+      (els, max) =>
+        els
+          .filter((el) => {
+            const i = el as HTMLInputElement;
+            const ac = (i.getAttribute('autocomplete') ?? '').toLowerCase();
+            if (ac.startsWith('cc-')) return true;
+            const hint = `${i.name} ${i.id} ${i.placeholder}`.toLowerCase();
+            return /card.?number|cardnumber|\bcvc\b|\bcvv\b|expir|kart numaras|son kullanma/.test(hint);
+          })
+          .slice(0, max)
+          .map((el) => {
+            const i = el as HTMLInputElement;
+            return {
+              label: i.labels?.[0]?.textContent ?? i.getAttribute('aria-label') ?? '',
+              placeholder: i.getAttribute('placeholder') ?? '',
+              autocomplete: i.getAttribute('autocomplete') ?? '',
+            };
+          }),
+      PROBE_LIMITS.cardFields,
+    )
+    .catch(() => [] as { label: string; placeholder: string; autocomplete: string }[]);
+  return raw.map((r) => {
+    const label = clean(r.label);
+    const placeholder = clean(r.placeholder);
+    const autocomplete = clean(r.autocomplete);
+    return {
+      ...(label ? { label } : {}),
+      ...(placeholder ? { placeholder } : {}),
+      ...(autocomplete ? { autocomplete } : {}),
+      in_frame: inFrame,
+    };
+  });
 }

@@ -32,7 +32,7 @@ export function createServer(deps: ServerDeps): McpServer {
         'Order of calls: list_scenarios, then run_scenario (with an idempotency_key), then get_run_result with wait_s 20 until status is "finished". Use compare_runs for before/after checks.',
         'A failed checkout is a normal result with verdict "failed", not a tool error.',
         'To add a scenario, write the YAML and call save_scenario with validate_on, then get_run_result.',
-        'To set up tests for a new target, use the setup_checkout_tests prompt, or call inspect_target first and read its suggested_scenarios.',
+        'To set up tests for a new target, ask the user to run the setup_checkout_tests prompt. Without prompts, call inspect_target first and read its suggested_scenarios.',
       ].join(' '),
     },
   );

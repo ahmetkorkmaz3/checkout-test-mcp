@@ -698,9 +698,21 @@ server.registerTool(
       idempotency_key: z.string().regex(/^[A-Za-z0-9._:-]{8,128}$/), // same regex as run_scenario
       scope: z.enum(['site', 'code', 'both']).default('both'),
       wait_s: z.number().int().min(0).max(20).default(20),
+      // Read arguments: one page of a list from the full stored report. Not part of the request hash.
+      section: z.enum(['pages', 'api_calls', 'ui_strings', 'test_ids', 'routes', 'probe_steps']).optional(),
+      offset: z.number().int().min(0).default(0),
     }),
     outputSchema: InspectionReport.extend({
       reused_existing_inspection: z.boolean(),
+      slice: z
+        .object({
+          section: ReportSection,
+          offset: z.number().int(),
+          total: z.number().int(),
+          items: z.array(z.record(z.string(), z.unknown())),
+          next_offset: z.number().int().nullable(), // null when no items are left
+        })
+        .nullable(), // null without section
       next: NextAction,
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -740,6 +752,8 @@ const Suggestion = z.object({
 });
 ```
 
+`ProbeResult.payment` also has `card_frames` (`{ host, title, name? }[]`) and `card_fields` (`{ label?, placeholder?, autocomplete?, in_frame }[]`). The probe reads a card frame from the iframe element on the parent page, so a frame on a blocked host is listed too. A frame counts when it has card fields, or when the guard blocked it and it looks like a payment frame. `card_fields` has the inline card inputs and the inputs of card frames on allowed hosts: labels, placeholders, and autocomplete values, never values. When a card frame host is blocked, a warning says that the card fields are unknown and names the host to add to `third_party_hosts`.
+
 `ProbeResult.stopped_reason` is one of `payment_step_reached`, `login_required`, `no_product`, `no_add_to_cart`, `no_checkout_button`, `form_not_understood`, `timeout`, `blocked_by_safety`, `verification_required`. `ProbeResult.dialogs` lists the dialogs that opened during the probe.
 
 The server does these steps in this order:
@@ -756,7 +770,9 @@ A phase that crashes does not give a tool error. The job keeps the parts that ar
 
 After a restart, an inspection that was `queued` or `running` becomes `finished` with `interrupted: true` and a warning. The server does not repeat it. Each record on disk has its idempotency key, so the server rebuilds a key that the index file does not have. A failed job never stops the jobs after it.
 
-The compact JSON of the whole output object (the report, `reused_existing_inspection`, and `next`) stays under 40 000 characters. The text block is that compact JSON, not a pretty-printed copy. To fit, the server cuts page `elements` first, then `code.ui_strings`, then `site.api_calls`. If that is not enough, it cuts `code.test_ids`, `code.routes`, `code.otp_hints`, and then pages from the end. It adds one warning that lists the cut parts and says "see report_path". The file at `report_path` has the full report.
+The compact JSON of the whole output object (the report, `reused_existing_inspection`, and `next`) stays under 40 000 characters. The text block is that compact JSON, not a pretty-printed copy. To fit, the server cuts page `elements` first, then `code.ui_strings`, then `site.api_calls`. If that is not enough, it cuts `code.test_ids`, `code.routes`, `code.otp_hints`, and then pages from the end. It adds one warning that lists the cut parts and tells the agent to read them with `section` and `offset`. The file at `report_path` also has the full report, but an agent with only the MCP tools cannot read it.
+
+To read a cut list, call `inspect_target` with the same target, key, and scope, plus `section` and `offset` (start with 0). The key must already have an inspection. Otherwise the tool refuses with `INVALID_PARAMS` and starts nothing. `section` and `offset` are read arguments: they are not part of the request hash, so they never give `IDEMPOTENCY_CONFLICT`. When the inspection is finished, the result has `slice` with as many items from `offset` as fit under the same 40 000 character limit (at least one), `total`, and `next_offset` (null at the end). In this result `site`, `checkout_probe`, and `code` are null, `suggested_scenarios` and `side_effects` are empty, and one warning says so. `next` holds the call for the next page. When the inspection is not finished, `slice` is null and the result is the usual progress.
 
 `next`: while the status is not `finished`, a `call_tool` of `inspect_target` with the same arguments. When it is finished, a `call_tool` of `save_scenario` if a baseline suggestion exists, else `ask_human` for the missing inputs.
 
@@ -789,6 +805,12 @@ Example: a finished inspection (trimmed).
       "methods": [],
       "card_form": true,
       "card_iframe_hosts": ["localhost"],
+      "card_frames": [{ "host": "localhost", "title": "Secure card payment input" }],
+      "card_fields": [
+        { "placeholder": "Card number", "autocomplete": "cc-number", "in_frame": true },
+        { "placeholder": "MM / YY", "autocomplete": "cc-exp", "in_frame": true },
+        { "placeholder": "CVC", "autocomplete": "cc-csc", "in_frame": true }
+      ],
       "test_card_select": null,
       "agreement_checkbox": "I accept the terms",
       "pay_button": "Pay now"
@@ -859,7 +881,7 @@ Errors:
 | `UNKNOWN_TARGET` | The target is not in the config. |
 | `PRODUCTION_HOST_REFUSED` | A target host is in `production_hosts`. |
 | `HOST_NOT_ALLOWED` | A target host has no test label. |
-| `INVALID_PARAMS` | `scope: "code"` without `inspect.source_dirs`. |
+| `INVALID_PARAMS` | `scope: "code"` without `inspect.source_dirs`, or `section` with a key that has no inspection. |
 | `IDEMPOTENCY_CONFLICT` | The key has an inspection with another target or scope. |
 | `MISSING_ENV_SECRET` | An `http_credentials` secret is not set. |
 | `INSPECTION_FAILED` | Not a tool error. A warning in the report when a phase stopped. |
@@ -868,7 +890,9 @@ Errors:
 
 The server has two MCP prompts. A client shows them as commands, for example `/setup_checkout_tests` in Claude Code. A prompt returns one user message with the procedure. The texts are product text, like the tool descriptions. The source is `src/prompts/`.
 
-Both prompts start with config facts that no tool shows: whether the checkout probe is on, the source folders, the authoring folder, test data writes, the secret names with their env var names (never the values), and the third-party hosts. So the agent asks the user only for what the config and the report cannot answer.
+Both prompts start with the config facts and the fragments that no tool shows. The fragment list comes from the files in `authoring.dir` when the prompt runs: path, id, description, and args with descriptions and defaults (at most 50 fragments). The config facts are: whether the checkout probe is on, the source folders, the authoring folder, test data writes, the secret names with their env var names (never the values), and the third-party hosts. So the agent asks the user only for what the config and the report cannot answer. For a target that is not in the config, a prompt returns only a text that lists the targets and tells the agent to stop.
+
+Both prompts also say that the server reads the config once: a change to `authoring`, `inspect`, `third_party_hosts`, or `secrets` needs a server restart. The agent waits for the restart before it runs card scenarios. A `blocked` verdict that names a host is a config fix, not one of the 3 tries. When a result is cut, the agent reads the lists with `section` and `offset`.
 
 ### 9.1 `setup_checkout_tests`
 
@@ -878,16 +902,17 @@ The first setup of a target. The agent does these steps in order:
 
 1. Calls `list_scenarios` and checks that the target exists.
 2. Asks the user once, in one message, for the config changes that the setup needs. When `inspect.probe_checkout` is not `true`, it asks to allow the probe and lists the side effects: a guest account with an `example.test` email, an address, an unpaid order draft, and a cart item. The user edits the config.
-3. Calls `inspect_target` with a new key (for example `setup-<target>-<YYYYMMDD>`) and polls with the same key until `finished`.
+3. Calls `inspect_target` with a new key (for example `setup-<target>-<YYYYMMDD>`) and polls with the same key until `finished`. When `reused_existing_inspection` is true and the config changed after that inspection, it adds a counter to the key.
 4. Shows `blocked_hosts`. A payment or 3D Secure host must go into `third_party_hosts`. Analytics and ad hosts stay blocked.
 5. Writes and saves the fragments first: add to cart, guest start, address, pay.
 6. Writes a customer test data file when `test_data_dir_writable` is on, with a reserved email domain and the site's own city and district options.
-7. Writes each suggestion with `baseline: true`, saves it with `validate_on`, polls `get_run_result`, reads the failure, fixes, and saves again. Maximum 3 tries for each scenario. After that, the scenario is "needs a human" with the last failure.
-8. Ends with a table (scenario, what it proves, verdict, run id), then lists: needs a human, offers (`baseline: false`), missing inputs, side effects, and the saved files.
+7. Writes each suggestion with `baseline: true`, saves it with `validate_on`, polls `get_run_result`, reads the failure when the verdict is not `passed`, fixes, and saves again. Maximum 3 tries for each scenario. After that, the scenario is "needs a human" with the last failure.
+8. Ends with a table (scenario, what it proves, verdict, run id), then lists: needs a human, offers (`baseline: false`), missing inputs, side effects (also the test orders of `order_placed` validation runs), and the saved files.
 
 The text also has the secret rules (the agent never asks for a password in the chat), a short scenario format, the house rules by id, and writing rules from earlier setups:
 
-- After a step opens a page, an expect `response` check before the first click, because a click before hydration does nothing.
+- After a step opens a page, an expect `response` check before the first click, because a click before hydration does nothing. The url is `"**"` plus the `path_pattern` of the call. Without a call for the page kind, a `wait_for` step with a `visible` check.
+- Card fields in a frame: `within: { frame: { css: "iframe[title='<title>']" } }` with the labels from `card_fields`. The `prefer-semantic-locator` warning is expected there.
 - `exact: true` role names for duplicated buttons.
 - `url: { regex: "^https?://[^/]+/path/?(\\?.*)?$" }` for paths, not a `**` glob.
 - `capture.body_regex` for a Next.js server action body, `json_path` for JSON.
@@ -899,9 +924,9 @@ The text also has the secret rules (the agent never asks for a password in the c
 
 Arguments: `target`, `request` (what the scenario must prove, in plain words, max 2000 characters).
 
-The same loop for one scenario. The agent checks that no scenario already does the request, reads the latest finished inspection of the target, asks the user once for what is missing, reuses the fragments in the authoring folder, saves the scenario with `validate_on`, and fixes it in at most 3 tries.
+The same loop for one scenario. The agent checks that no scenario already does the request, reads the latest finished inspection of the target, asks the user once for what is missing (also the probe, when the report has no payment step), reuses the fragments in the authoring folder, saves the scenario with `validate_on`, and fixes it in at most 3 tries.
 
-The prompt names the key of the latest finished inspection of the target that read the site and that the server did not interrupt. A call with that key returns the stored report and starts no probe. When the target has no such inspection, the prompt tells the agent to use a new key.
+The prompt names the key of the latest finished inspection of the target that read the site and that the server did not interrupt. An inspection whose probe reached the payment step wins over a newer one whose probe did not. A call with that key returns the stored report and starts no probe. When the target has no such inspection, the prompt tells the agent to use a new key.
 
 ## 10. Reasons behind the choices
 

@@ -41,6 +41,8 @@ function probeWith(payment: Partial<ProbePayment>, extra: Partial<ProbeResult> =
       methods: [],
       card_form: true,
       card_iframe_hosts: [],
+      card_frames: [],
+      card_fields: [],
       test_card_select: null,
       agreement_checkbox: null,
       pay_button: 'Pay now',

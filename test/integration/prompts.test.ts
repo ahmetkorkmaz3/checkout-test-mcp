@@ -10,6 +10,7 @@ import type { InspectionRecord } from '../../src/inspect/report.js';
 import { silentLogger } from '../../src/logger.js';
 import { CREATE_SCENARIO_STEPS } from '../../src/prompts/create-scenario.js';
 import {
+  CONFIG_CHANGES_TEXT,
   FORMAT_TEXT,
   HOUSE_RULES_TEXT,
   SETUP_CHECKOUT_TESTS_STEPS,
@@ -32,14 +33,24 @@ interface SetupOptions {
   authoring?: boolean;
   testData?: boolean;
   records?: InspectionRecord[];
+  /** Files for a temporary authoring folder. Without it, the authoring folder is scenarios/demo-store. */
+  authoringFiles?: Record<string, string>;
 }
 
 async function setup(opts: SetupOptions = {}) {
   dir = await mkdtemp(path.join(os.tmpdir(), 'ctm-prompts-'));
+  const localDir = path.join(dir, 'scenarios/local');
+  for (const [rel, text] of Object.entries(opts.authoringFiles ?? {})) {
+    await mkdir(path.dirname(path.join(localDir, rel)), { recursive: true });
+    await writeFile(path.join(localDir, rel), text, 'utf8');
+  }
   const config = parseConfig(
     {
       runs_dir: path.join(dir, 'runs'),
-      scenario_dirs: [path.join(ROOT, 'scenarios')],
+      scenario_dirs: [
+        path.join(ROOT, 'scenarios'),
+        ...(opts.authoringFiles ? [path.join(dir, 'scenarios')] : []),
+      ],
       targets: {
         'demo-local': {
           profile: 'demo-store',
@@ -54,7 +65,7 @@ async function setup(opts: SetupOptions = {}) {
         ? {}
         : {
             authoring: {
-              dir: path.join(ROOT, 'scenarios/demo-store'),
+              dir: opts.authoringFiles ? localDir : path.join(ROOT, 'scenarios/demo-store'),
               test_data_dir_writable: opts.testData === true,
             },
           }),
@@ -235,10 +246,103 @@ describe('prompts', () => {
     expect(on).toContain('Test data writes: on');
   });
 
-  it('says so when the target is not in the config', async () => {
-    const text = await promptText(await setup(), 'setup_checkout_tests', { target: 'no-such-shop' });
-    expect(text).toContain('The config has no target "no-such-shop"');
-    expect(text).toContain('demo-local');
+  it('returns only the stop text for an unknown target, also for an Object prototype name', async () => {
+    const c = await setup({ probe: true });
+    for (const target of ['no-such-shop', 'constructor', '__proto__', 'toString']) {
+      for (const [name, extra] of [
+        ['setup_checkout_tests', {}],
+        ['create_scenario', { request: 'Pay with a card.' }],
+      ] as const) {
+        const text = await promptText(c, name, { target, ...extra });
+        expect(text, `${name} ${target}`).toBe(
+          `The config has no target "${target}". The targets are: demo-local. Show the user these names and stop. The user adds a target to the config and restarts the server.`,
+        );
+      }
+    }
+  });
+
+  it('lists the fragments of the authoring folder with their args', async () => {
+    const c = await setup({
+      probe: true,
+      authoringFiles: {
+        'fragments/add-to-cart.yaml': `schema_version: 1
+kind: fragment
+id: local-add-to-cart
+description: >-
+  Opens a product page and adds
+  the product to the cart.
+args:
+  product_path:
+    description: Path of the product page.
+  quantity:
+    description: Number of units.
+    default: 1
+steps:
+  - id: open
+    title: Open the product
+    goto: "{{args.product_path}}"
+`,
+        'pay.yaml': `schema_version: 1
+kind: fragment
+id: local-pay
+description: Accepts the terms and pays.
+steps:
+  - id: pay
+    title: Pay
+    click: { role: button, name: Pay }
+`,
+      },
+    });
+    // The prompt reads the folder when it runs. A file that does not parse is left out.
+    await writeFile(
+      path.join(dir, 'scenarios/local/broken.yaml'),
+      'kind: fragment\nid: [not valid\n',
+      'utf8',
+    );
+    for (const [name, extra] of [
+      ['setup_checkout_tests', {}],
+      ['create_scenario', { request: 'Pay with a card.' }],
+    ] as const) {
+      const text = await promptText(c, name, { target: 'demo-local', ...extra });
+      expect(text).toContain(
+        '- fragments/add-to-cart.yaml (id local-add-to-cart): Opens a product page and adds the product to the cart. Args: product_path (Path of the product page.); quantity (Number of units. Default: 1.).',
+      );
+      expect(text).toContain('- pay.yaml (id local-pay): Accepts the terms and pays. No args.');
+      expect(text).not.toContain('broken.yaml');
+    }
+  });
+
+  it('says that the fragments are unknown without an authoring folder', async () => {
+    const text = await promptText(await setup({ probe: true, authoring: false }), 'setup_checkout_tests', {
+      target: 'demo-local',
+    });
+    expect(text).toContain('Fragments in the authoring folder: unknown');
+  });
+
+  it('tells the agent about restarts, cut results, blocked verdicts, and old reports', async () => {
+    const text = await promptText(await setup({ probe: true }), 'setup_checkout_tests', {
+      target: 'demo-local',
+    });
+    expect(text).toContain(CONFIG_CHANGES_TEXT);
+    expect(text).toMatch(/works only after the user restarts the server/);
+    expect(text).toMatch(/Wait until the user restarts the server before you run card scenarios/);
+    expect(text).toMatch(/A "blocked" verdict that names a host is a config fix, not a try/);
+    expect(text).toContain('`section`');
+    expect(text).toContain('`slice.next_offset`');
+    expect(text).not.toContain('report_path');
+    expect(text).toContain('`reused_existing_inspection`');
+    expect(text).toContain('setup-demo-local-<YYYYMMDD>-2');
+    expect(text).toMatch(/When the verdict is not "passed"/);
+    expect(text).toMatch(/test orders that the validation runs of `order_placed` scenarios placed/);
+    expect(WRITING_RULES_TEXT).toContain('"**" plus `path_pattern`');
+    expect(WRITING_RULES_TEXT).toMatch(/`wait_for` step with a `visible` check/);
+    expect(WRITING_RULES_TEXT).toContain(`within: { frame: { css: "iframe[title='<title>']" } }`);
+    expect(WRITING_RULES_TEXT).toContain('card_fields');
+  });
+
+  it('tells the agent in the server instructions to ask for the setup prompt', async () => {
+    const c = await setup();
+    expect(c.getInstructions()).toMatch(/ask the user to run the setup_checkout_tests prompt/i);
   });
 
   it('create_scenario reuses the latest finished inspection of the target', async () => {
@@ -250,6 +354,28 @@ describe('prompts', () => {
           inspection_id: 'insp_BBBBBBBBBBBBBBBB',
           idempotency_key: 'setup-demo-local-20261123',
           finished_at: '2026-11-23T10:05:00.000Z',
+          checkout_probe: {
+            reached: 'payment',
+            stopped_reason: 'payment_step_reached',
+            steps: [],
+            dialogs: [],
+            guest_option: true,
+            payment: null,
+            side_effects: [],
+          },
+        }),
+        // Newer, but its probe did not reach the payment step.
+        record({
+          inspection_id: 'insp_EEEEEEEEEEEEEEEE',
+          idempotency_key: 'setup-demo-local-20261123b',
+          finished_at: '2026-11-23T12:05:00.000Z',
+        }),
+        // Newer, but code only: it has no site facts.
+        record({
+          inspection_id: 'insp_FFFFFFFFFFFFFFFF',
+          idempotency_key: 'code-demo-local-20261124',
+          scope: 'code',
+          finished_at: '2026-11-24T12:05:00.000Z',
         }),
         // Newer, but interrupted: it has only part of the facts.
         record({
@@ -291,5 +417,12 @@ describe('prompts', () => {
     });
     expect(text).toContain('No finished inspection exists for "demo-local"');
     expect(text).toContain('scenario-demo-local-');
+    // One question: the probe question is part of step 3, not of the inspection step.
+    const step2 = text.slice(text.indexOf('2. Get the facts'), text.indexOf('3. Find what'));
+    const step3 = text.slice(text.indexOf('3. Find what'), text.indexOf('4. Reuse'));
+    expect(step2).not.toMatch(/ask the user/i);
+    expect(step3).toContain('inspect.probe_checkout: true');
+    expect(step3).toContain('unpaid order draft');
+    expect(step3).toMatch(/Ask the user once for all of it, in one message/);
   });
 });

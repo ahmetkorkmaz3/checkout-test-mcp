@@ -94,6 +94,23 @@ export const ProbeResultSchema = z.object({
       methods: z.array(z.string()),
       card_form: z.boolean(),
       card_iframe_hosts: z.array(z.string()),
+      card_frames: z
+        .array(z.object({ host: z.string(), title: z.string(), name: z.string().optional() }))
+        .describe(
+          'Card iframes, read from the iframe element on the payment page. A frame on a blocked host is listed too. Fill it with within: { frame: { css: "iframe[title=\'<title>\']" } }.',
+        ),
+      card_fields: z
+        .array(
+          z.object({
+            label: z.string().optional(),
+            placeholder: z.string().optional(),
+            autocomplete: z.string().optional(),
+            in_frame: z.boolean(),
+          }),
+        )
+        .describe(
+          'Card inputs by label, placeholder, and autocomplete. Never values. Fields in a frame on a blocked host are unknown.',
+        ),
       test_card_select: z.object({ label: z.string(), options: z.array(z.string()) }).nullable(),
       agreement_checkbox: z.string().nullable(),
       pay_button: z.string().nullable(),
@@ -254,7 +271,7 @@ export function trimForResult(
   const setWarning = (extra?: string): void => {
     const parts = extra ? [...cut, extra] : cut;
     r.warnings[warningAt] =
-      `The tool result is shorter than the report. Cut: ${parts.join(', ') || 'nothing'}. The full report is in the file at report_path (see report_path).`;
+      `The tool result is shorter than the report. Cut: ${parts.join(', ') || 'nothing'}. Read a cut list with inspect_target, the same arguments, and section (${REPORT_SECTIONS.join(', ')}) with offset 0, then next_offset. The full report is also in the file at report_path.`;
   };
   for (const [name, apply] of steps) {
     if (apply()) cut.push(name);
@@ -270,6 +287,87 @@ export function trimForResult(
     } while (r.site.pages.length > 0 && size(r) > RESULT_CHAR_LIMIT);
   }
   return r;
+}
+
+export const REPORT_SECTIONS = [
+  'pages',
+  'api_calls',
+  'ui_strings',
+  'test_ids',
+  'routes',
+  'probe_steps',
+] as const;
+export const ReportSection = z.enum(REPORT_SECTIONS);
+export type ReportSection = z.infer<typeof ReportSection>;
+
+export const ReportSlice = z
+  .object({
+    section: ReportSection,
+    offset: z.number().int(),
+    total: z.number().int().describe('Number of items in the section of the full report.'),
+    items: z.array(z.record(z.string(), z.unknown())),
+    next_offset: z
+      .number()
+      .int()
+      .nullable()
+      .describe('Send this as offset to read the next items. null when no items are left.'),
+  })
+  .describe('One page of a list from the full stored report. Only with section.');
+export type ReportSlice = z.infer<typeof ReportSlice>;
+
+function sectionItems(report: InspectionReport, section: ReportSection): Record<string, unknown>[] {
+  switch (section) {
+    case 'pages':
+      return report.site?.pages ?? [];
+    case 'api_calls':
+      return report.site?.api_calls ?? [];
+    case 'ui_strings':
+      return report.code?.ui_strings ?? [];
+    case 'test_ids':
+      return report.code?.test_ids ?? [];
+    case 'routes':
+      return report.code?.routes ?? [];
+    case 'probe_steps':
+      return report.checkout_probe?.steps ?? [];
+  }
+}
+
+/**
+ * One page of a list from the full report. The other report parts are left out, so the result
+ * holds as many items as fit under RESULT_CHAR_LIMIT. It always holds at least one item.
+ */
+export function sliceForResult(
+  report: InspectionReport,
+  section: ReportSection,
+  offset: number,
+  wrap: (r: InspectionReport, slice: ReportSlice) => object,
+): { report: InspectionReport; slice: ReportSlice } {
+  const all = sectionItems(report, section);
+  const head: InspectionReport = {
+    ...report,
+    site: null,
+    checkout_probe: null,
+    code: null,
+    suggested_scenarios: [],
+    side_effects: [],
+    warnings: [
+      `This result holds only the section "${section}" of the report. Call inspect_target without section to get the other parts.`,
+    ],
+  };
+  const slice: ReportSlice = { section, offset, total: all.length, items: [], next_offset: null };
+  for (let i = offset; i < all.length; i++) {
+    const item = all[i];
+    if (item === undefined) break;
+    slice.items.push(item);
+    // The next action holds next_offset, so set it before each size check.
+    slice.next_offset = i + 1 < all.length ? i + 1 : null;
+    if (slice.items.length > 1 && JSON.stringify(wrap(head, slice)).length > RESULT_CHAR_LIMIT) {
+      slice.items.pop();
+      slice.next_offset = i;
+      break;
+    }
+  }
+  return { report: head, slice };
 }
 
 /** True only when A and B are the same type. */

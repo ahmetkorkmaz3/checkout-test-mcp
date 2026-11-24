@@ -236,7 +236,7 @@ Later steps use the value as `{{captured.<name>}}`. Use it for a one-time code t
 - The runner reads the value after the actions and the `expect` list of the step. It waits up to the step timeout for the response.
 - Only responses that arrive during the step count. The response must come from an allowed host, because the host guard blocks all other requests.
 - The value must be a string or a number. The step fails with `unexpected_response` when the response does not arrive, the body is not JSON, the path is missing, or no body matches `body_regex`. It fails with `assertion_failed` when the value does not match `pattern`.
-- A captured value is a secret. Results, logs, and run files show `[REDACTED]` in its place. Values shorter than 4 characters are not redacted. Screenshots mask fields with `autocomplete="one-time-code"`.
+- A captured value is a secret. Results, logs, and run files show `[REDACTED]` in its place. Values shorter than 4 characters are not redacted. Screenshots mask password, card (`cc-*`), and `one-time-code` inputs in every frame of the page.
 - A value that looks like a card number outside the test card registry stops the run with verdict `blocked`.
 - `{{captured.<name>}}` works only in a step after the capture step, and in outcome checks. The server checks this when it loads the scenario.
 - When a `when` condition skips the capture step, a later step that uses the value stops the run before the browser starts (`INVALID_PARAMS`).
