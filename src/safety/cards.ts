@@ -56,6 +56,11 @@ export interface CardSearchOptions {
    * Use it for text that only gets redacted. Do not use it for guards: it flags ordinary long ids.
    */
   longRuns?: boolean;
+  /**
+   * Drop spans that overlap an earlier one. A redactor needs this to cut the text safely.
+   * A guard must not use it: a dropped span could be the one that is not a registered test card.
+   */
+  dedupe?: boolean;
 }
 
 // The pre-window rule: the first 13 to 19 digits of a run. Kept so the guards never catch less than before.
@@ -103,8 +108,8 @@ export function findCardSpans(text: string, opts: CardSearchOptions = {}): CardS
     const digits = m[0].replace(/[ -]/g, '');
     if (luhnValid(digits)) spans.push({ start: m.index, end: m.index + m[0].length, digits });
   }
-  // Sort, then drop spans that overlap an earlier one, so a redactor can cut the text safely.
   spans.sort((x, y) => x.start - y.start || y.end - x.end);
+  if (!opts.dedupe) return spans;
   const kept: CardSpan[] = [];
   for (const span of spans) {
     const last = kept[kept.length - 1];
@@ -129,7 +134,7 @@ function hasCardShape(starts: number[], from: number, to: number, n: number): bo
 
 /** Finds Luhn-valid 13 to 19 digit card numbers, also when other digits sit next to them. */
 export function findCardLikeNumbers(text: string): string[] {
-  return findCardSpans(text).map((span) => span.digits);
+  return [...new Set(findCardSpans(text).map((span) => span.digits))];
 }
 
 /** True when the text contains a card-like number that is not a registered test card. */

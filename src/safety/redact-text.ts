@@ -12,7 +12,7 @@ function looksLikeBase64Secret(s: string): boolean {
 }
 
 function redactCards(text: string): string {
-  const spans = findCardSpans(text, { longRuns: true });
+  const spans = findCardSpans(text, { longRuns: true, dedupe: true });
   let out = '';
   let at = 0;
   for (const span of spans) {

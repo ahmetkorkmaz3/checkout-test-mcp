@@ -250,6 +250,19 @@ describe('resolveInside', () => {
   });
 });
 
+describe('unregistered card guard with a registered card next to other digits', () => {
+  it.each(['81578 4242 4242 4242 4242 831484804511', '135643 4242 4242 4242 4242 03246822939421'])(
+    'blocks %s',
+    (text) => {
+      expect(containsUnregisteredCardNumber(text)).toBe(true);
+      expect(redactText(text)).not.toMatch(/4242 4242 4242 4242/);
+    },
+  );
+  it('allows a plain registered test card', () => {
+    expect(containsUnregisteredCardNumber('4242 4242 4242 4242')).toBe(false);
+  });
+});
+
 describe('card guard keeps every shape', () => {
   it.each([
     '41111111 11111111',
