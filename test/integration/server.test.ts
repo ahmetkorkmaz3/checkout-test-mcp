@@ -141,6 +141,7 @@ describe('list_scenarios', () => {
     expect(out.scenarios.map((s: { id: string }) => s.id).sort()).toEqual([
       'card-3ds-challenge-fail',
       'card-success',
+      'phone-otp-capture',
     ]);
     expect(out.test_cards.length).toBeGreaterThan(3);
     expect(JSON.stringify(out)).not.toMatch(/4242424242424242/);

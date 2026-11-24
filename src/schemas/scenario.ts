@@ -165,6 +165,28 @@ export type Condition = z.infer<typeof Condition>;
 const When = z.union([Condition, z.array(Condition).min(1)]);
 export type When = z.infer<typeof When>;
 
+/**
+ * Reads one value from the JSON body of a response that arrives during the step.
+ * Later steps use it as {{captured.<name>}}. The value is redacted like a secret.
+ */
+export const Capture = z
+  .object({
+    name: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .describe('Name of the value. Later steps use {{captured.<name>}}.'),
+    from_response: ResponseMatch.describe(
+      'The response that holds the value. It must arrive during this step.',
+    ),
+    json_path: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/)
+      .describe('Dot path in the JSON body, for example "data.otp_code" or "items.0.code".'),
+    pattern: z.string().optional().describe('Regex that the value must match, for example "^\\d{5}$".'),
+  })
+  .strict();
+export type Capture = z.infer<typeof Capture>;
+
 const STEP_ACTION_KINDS = [...ACTION_KINDS, 'include'] as const;
 
 function checkStep(v: Record<string, unknown>, ctx: z.RefinementCtx): void {
@@ -192,6 +214,7 @@ function checkStep(v: Record<string, unknown>, ctx: z.RefinementCtx): void {
     'value',
     'option',
     'key',
+    'capture',
   ].filter((k) => v[k] !== undefined);
   if (extra.length > 0) {
     ctx.addIssue({
@@ -211,6 +234,11 @@ export const Step = z
     expect: z.array(Expectation).optional(),
     timeout_ms: z.number().int().positive().optional(),
     on_failure: z.object({ hint: z.string() }).strict().optional(),
+    capture: z
+      .array(Capture)
+      .min(1)
+      .optional()
+      .describe('Values to read from responses of this step, after the actions and expectations.'),
     when: When.optional(),
     include: z
       .string()

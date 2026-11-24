@@ -4,6 +4,7 @@ import { type Browser, type BrowserContext, chromium, errors, type Page, selecto
 import { containsUnregisteredCardNumber } from '../safety/cards.js';
 import { hostOf, isUrlAllowed } from '../safety/hosts.js';
 import { type Redactor, redactQuery } from '../safety/secrets.js';
+import { readJsonPath, renderCaptured, TemplateError } from '../scenarios/template.js';
 import type { FailureCategory, Verdict } from '../schemas/common.js';
 import type { ResolvedConfig, TargetConfig } from '../schemas/config.js';
 import type {
@@ -15,7 +16,7 @@ import type {
   RunOptions,
   StepResult,
 } from '../schemas/run.js';
-import type { Action, Expectation, OutcomeCheck, Scenario, Step } from '../schemas/scenario.js';
+import type { Action, Capture, Expectation, OutcomeCheck, Scenario, Step } from '../schemas/scenario.js';
 import { classify } from './classify.js';
 import { describeLocator, scopeFor, toLocator } from './locator.js';
 import {
@@ -89,6 +90,8 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   let blockedNavigation: string | null = null;
   let runTimedOut = false;
   let tracePath: string | null = null;
+  /** Values read from responses by "capture". Never stored or returned. */
+  const captured = new Map<string, string>();
 
   const consoleIgnored = (text: string) => scenario.ignore.console.some((i) => text.includes(i.pattern));
   const networkIgnored = (url: string) => scenario.ignore.network.some((i) => urlMatchesGlob(url, i.url));
@@ -108,7 +111,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
     const p = page;
     if (!p || p.isClosed()) return undefined;
     const file = path.join(input.runDir, `${String(n).padStart(2, '0')}-${stepId}.png`);
-    const sensitive = 'input[type=password], input[autocomplete^="cc-"]';
+    const sensitive = 'input[type=password], input[autocomplete^="cc-"], input[autocomplete="one-time-code"]';
     const mask = [
       p.locator(sensitive),
       ...[...frameCss].map((css) => p.frameLocator(css).locator(sensitive)),
@@ -366,6 +369,69 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
     }
   }
 
+  async function capture(c: Capture, timeout: number, sinceStep: number): Promise<void> {
+    const deadline = Date.now() + timeout;
+    const where = describeResponseMatch(c.from_response);
+    const find = () =>
+      responses.find((r) => r.stepIndex >= sinceStep && r.body && responseMatches(r, c.from_response));
+    let hit = find();
+    while (!hit) {
+      if (Date.now() >= deadline) {
+        throw new StepFailure(
+          'unexpected_response',
+          `Capture "${c.name}": response ${where} did not arrive within ${timeout} ms.`,
+          where,
+          'no matching response',
+        );
+      }
+      await sleep(100);
+      hit = find();
+    }
+    const text = await hit.body;
+    let json: unknown;
+    try {
+      json = JSON.parse(text ?? '');
+    } catch {
+      throw new StepFailure(
+        'unexpected_response',
+        `Capture "${c.name}": the body of ${where} is not JSON.`,
+        'JSON body',
+        text === null ? 'no body' : 'not JSON',
+      );
+    }
+    const raw = readJsonPath(json, c.json_path);
+    if (typeof raw !== 'string' && typeof raw !== 'number') {
+      // Name only the path and the type. The body can hold personal data.
+      throw new StepFailure(
+        'unexpected_response',
+        `Capture "${c.name}": "${c.json_path}" is not a string or number in the body of ${where}.`,
+        `${c.json_path}: string or number`,
+        raw === undefined ? 'missing' : Array.isArray(raw) ? 'array' : raw === null ? 'null' : typeof raw,
+      );
+    }
+    const value = String(raw);
+    guardValue(value);
+    redactor.register(value);
+    if (c.pattern !== undefined && !new RegExp(c.pattern).test(value)) {
+      throw new StepFailure(
+        'assertion_failed',
+        `Capture "${c.name}": the value at "${c.json_path}" does not match /${c.pattern}/.`,
+        `/${c.pattern}/`,
+        `${value.length} characters`,
+      );
+    }
+    captured.set(c.name, value);
+  }
+
+  function withCaptured<T>(value: T): T {
+    try {
+      return renderCaptured(value, captured);
+    } catch (err) {
+      if (err instanceof TemplateError) throw new StepFailure('assertion_failed', err.message);
+      throw err;
+    }
+  }
+
   function buildFailure(
     err: unknown,
     stepId: string,
@@ -460,7 +526,10 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
     });
     page.on('response', (res) => {
       const req = res.request();
-      responses.push({ method: req.method(), url: res.url(), status: res.status(), stepIndex });
+      const rec: RecordedResponse = { method: req.method(), url: res.url(), status: res.status(), stepIndex };
+      const specs = input.steps[stepIndex]?.capture ?? [];
+      if (specs.some((c) => responseMatches(rec, c.from_response))) rec.body = res.text().catch(() => null);
+      responses.push(rec);
       if (res.status() >= 400 && !networkIgnored(res.url())) {
         networkFailures.push({
           method: req.method(),
@@ -496,9 +565,11 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       const urlBefore = page.url();
       const timeout = stepTimeout(step.timeout_ms);
       try {
-        await perform(page, step, timeout);
-        for (const t of step.then ?? []) await perform(page, t, timeout);
-        for (const e of step.expect ?? []) await check(page, e, timeout, i);
+        const live = withCaptured(step);
+        await perform(page, live, timeout);
+        for (const t of live.then ?? []) await perform(page, t, timeout);
+        for (const e of live.expect ?? []) await check(page, e, timeout, i);
+        for (const c of live.capture ?? []) await capture(c, timeout, i);
         result.status = 'passed';
         result.duration_ms = Date.now() - started;
         result.url_after = redactQuery(page.url());
@@ -525,7 +596,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       const o = input.outcome[i] as OutcomeCheck;
       const r = outcomeResults[i] as OutcomeCheckResult;
       try {
-        await check(page, o, stepTimeout(), 0);
+        await check(page, withCaptured(o), stepTimeout(), 0);
         r.status = 'passed';
       } catch (err) {
         r.status = 'failed';

@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { containsCardNumber } from '../safety/cards.js';
 import type { ParamValue } from '../schemas/common.js';
 import { type Condition, Fragment, type Scenario, type Step, type When } from '../schemas/scenario.js';
+import { collectCapturedNames } from './template.js';
 
 const MAX_INCLUDE_DEPTH = 5;
 const ARG_TOKEN = /\{\{\s*args\.([a-z][a-z0-9_]*)\s*\}\}/g;
@@ -153,6 +154,23 @@ export function expandScenario(scenario: Scenario, file: string, opts: ExpandOpt
     for (const c of toConditions(item.when)) {
       if (!(c.param in scenario.params))
         problems.push(`"${item.id}": condition uses unknown param "${c.param}".`);
+    }
+  }
+  // A captured value exists only after the step that reads it. Later steps and outcome checks can use it.
+  const declared = new Set<string>();
+  for (const step of steps) {
+    for (const name of collectCapturedNames(step)) {
+      if (!declared.has(name))
+        problems.push(`"${step.id}": {{captured.${name}}} is not captured by an earlier step.`);
+    }
+    for (const c of step.capture ?? []) {
+      if (declared.has(c.name)) problems.push(`"${step.id}": captured value "${c.name}" is defined twice.`);
+      declared.add(c.name);
+    }
+  }
+  for (const o of scenario.outcome) {
+    for (const name of collectCapturedNames(o)) {
+      if (!declared.has(name)) problems.push(`"${o.id}": {{captured.${name}}} is not captured by any step.`);
     }
   }
   const leftover = JSON.stringify([steps, scenario.outcome]).match(ARG_TOKEN);

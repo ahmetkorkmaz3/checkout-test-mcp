@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=../../schemas/scenario.schema.json
+schema_version: 1
+id: phone-otp-capture
+title: Verify the phone with the SMS code from the send-code response
+summary: >-
+  Asks for an SMS code, reads the code from the send-code response, and fills it in.
+  Expects "Phone verified". Shows how to use "capture" for an OTP step.
+tags: [otp, capture]
+compatible_profiles: [demo-store]
+expected_outcome: custom
+steps:
+  - id: open
+    title: Open the phone check page
+    goto: /account/verify-phone
+    expect:
+      - visible: { role: heading, name: Verify your phone }
+  - id: send_code
+    title: Ask for an SMS code and read it from the response
+    click: { role: button, name: Send code }
+    capture:
+      - name: otp_code
+        from_response: { method: POST, url: "**/api/otp/send-code", status: 2xx }
+        json_path: data.otp_code
+        pattern: "^\\d{5}$"
+    on_failure:
+      hint: The send-code response has no code at data.otp_code. Check if the test environment still returns the code.
+  - id: fill_code
+    title: Fill the code and verify
+    fill: { label: Verification code }
+    value: "{{captured.otp_code}}"
+    then:
+      - click: { role: button, name: Verify }
+    expect:
+      - response: { method: POST, url: "**/api/otp/verify", status: 200 }
+outcome:
+  - id: phone_verified
+    visible: { test_id: phone-verified }

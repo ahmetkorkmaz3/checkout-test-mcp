@@ -36,6 +36,8 @@ export interface RecordedResponse {
   url: string;
   status: number;
   stepIndex: number;
+  /** Body text. Read only for responses that a capture of the current step needs. */
+  body?: Promise<string | null>;
 }
 
 export function responseMatches(r: RecordedResponse, m: ResponseMatch, checkStatus = true): boolean {
