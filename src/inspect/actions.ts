@@ -35,8 +35,33 @@ export async function hasCardFields(page: Page): Promise<boolean> {
   return false;
 }
 
+/**
+ * Labels of a button that saves a step and goes on. A form submit button is clicked only when its
+ * name matches this list or the checkout words.
+ */
+export const CONTINUE =
+  /(?<![\p{L}\p{N}])(continue|save and continue|next|use this address|devam|devam et|kaydet ve devam et|bu adresi kullan|weiter|suivant|continuar|avanti|volgende)(?![\p{L}\p{N}])/iu;
+
+/**
+ * What the probe expects to click in the current step. The element name must match it.
+ * `list` is a custom select (role combobox), and `list_option` is one of its options (role option).
+ */
+export type ClickKind =
+  | 'add_to_cart'
+  | 'cart'
+  | 'checkout'
+  | 'guest'
+  | 'cookie_reject'
+  | 'continue'
+  | 'list'
+  | 'list_option';
+
 export interface ClickFacts {
+  /** The accessible name: aria-label, aria-labelledby, alt, value, text, title, or label. */
+  name: string;
+  /** Every text source of the element. The pay, cookie accept, and send-code checks read all of them. */
   texts: string[];
+  role: string;
   otpOnPage: boolean;
   passwordInForm: boolean;
 }
@@ -46,23 +71,48 @@ async function clickFacts(loc: Locator): Promise<ClickFacts | null> {
     .evaluate(
       (e) => {
         const input = e as HTMLInputElement;
-        const isButtonInput = e.tagName === 'INPUT' && /^(submit|button|reset|image)$/i.test(input.type);
+        const isInput = e.tagName === 'INPUT';
+        const type = isInput ? input.type.toLowerCase() : '';
         const labelledBy = (e.getAttribute('aria-labelledby') ?? '')
           .split(/\s+/)
           .filter(Boolean)
           .map((id) => document.getElementById(id)?.textContent ?? '')
           .join(' ');
-        const labels = Array.from(input.labels ?? []).map((l) => l.textContent ?? '');
+        const alt = isInput && type === 'image' ? (e.getAttribute('alt') ?? '') : '';
+        const value = isInput && /^(submit|button|reset)$/.test(type) ? input.value : '';
+        const imgAlts = Array.from(e.querySelectorAll('img[alt]'))
+          .map((i) => i.getAttribute('alt') ?? '')
+          .join(' ');
+        const text = `${e.textContent ?? ''} ${imgAlts}`;
+        const labels = Array.from(input.labels ?? [])
+          .map((l) => l.textContent ?? '')
+          .join(' ');
+        const sources = [
+          e.getAttribute('aria-label') ?? '',
+          labelledBy,
+          alt,
+          value,
+          text,
+          e.getAttribute('title') ?? '',
+          labels,
+        ].map((t) => t.replace(/\s+/g, ' ').trim());
+        const tag = e.tagName;
+        const role =
+          e.getAttribute('role') ||
+          (tag === 'BUTTON' || (isInput && /^(submit|button|reset|image)$/.test(type))
+            ? 'button'
+            : tag === 'A' && e.hasAttribute('href')
+              ? 'link'
+              : tag === 'OPTION'
+                ? 'option'
+                : tag === 'SELECT'
+                  ? 'combobox'
+                  : '');
         const form = e.closest('form');
         return {
-          texts: [
-            e.textContent ?? '',
-            e.getAttribute('aria-label') ?? '',
-            e.getAttribute('title') ?? '',
-            isButtonInput ? input.value : '',
-            labelledBy,
-            ...labels,
-          ].filter((t) => t.trim() !== ''),
+          name: sources.find((t) => t !== '') ?? '',
+          texts: sources.filter((t) => t !== ''),
+          role,
           otpOnPage: document.querySelector('input[autocomplete="one-time-code" i]') !== null,
           passwordInForm: form?.querySelector('input[type="password" i]') != null,
         };
@@ -73,43 +123,88 @@ async function clickFacts(loc: Locator): Promise<ClickFacts | null> {
     .catch(() => null);
 }
 
+/** True when the element is what the step expects: a name of the kind, or the role of a list. */
+export function matchesClickKind(
+  kind: ClickKind,
+  facts: Pick<ClickFacts, 'name' | 'role'>,
+  words: Words,
+): boolean {
+  const name = facts.name.normalize('NFC');
+  switch (kind) {
+    case 'continue':
+      return CONTINUE.test(name) || matchesKind('checkout', name, words);
+    case 'list':
+      return facts.role === 'combobox';
+    case 'list_option':
+      return facts.role === 'option';
+    case 'cart':
+      return matchesKind('cart', name, words) && !matchesKind('add_to_cart', name, words);
+    default:
+      return matchesKind(kind, name, words);
+  }
+}
+
 /** Returns the reason the click is not safe, or null when it is safe. */
-export function clickRefusal(facts: ClickFacts, words: Words): string | null {
+export function clickRefusal(facts: ClickFacts, allow: ClickKind, words: Words): string | null {
+  if (facts.name === '') return 'it has no name';
   for (const t of facts.texts) {
     if (matchesKind('pay', t, words)) return 'it can be a pay button';
     if (matchesKind('cookie_accept', t, words)) return 'it accepts cookies';
     if (SEND_CODE.test(t.normalize('NFC'))) return 'it can send or check a code';
   }
+  if (!matchesClickKind(allow, facts, words)) return `its name does not match the step "${allow}"`;
   if (facts.otpOnPage) return 'the page asks for a one-time code';
   if (facts.passwordInForm) return 'it submits a password form';
   return null;
 }
 
 /**
- * Clicks one element after the safety rules pass. It never clicks a pay button, a cookie accept
- * button, or a send-code button, never clicks on a page with card fields, never clicks on a page
- * with a one-time code field, and never submits a form with a password field.
+ * Clicks one element after the safety rules pass. The element needs a name of the expected kind.
+ * It never clicks a pay button or link, a cookie accept button, or a send-code button, never clicks
+ * on a page with card fields or a one-time code field, and never submits a form with a password field.
  */
 export async function guardedClick(
   page: Page,
   loc: Locator,
-  opts: { purpose: string; words: Words; log: ActionLog },
+  opts: { purpose: string; allow: ClickKind; words: Words; log: ActionLog },
 ): Promise<ActionResult> {
   const facts = await clickFacts(loc);
-  const name = clean(facts?.texts[0]);
+  const name = clean(facts?.name);
   const action = `${opts.purpose}${name ? `: "${name}"` : ''}`;
   if (!facts) {
     opts.log(action, 'failed');
     return 'failed';
   }
   const refusal =
-    clickRefusal(facts, opts.words) ?? ((await hasCardFields(page)) ? 'the page has card fields' : null);
+    clickRefusal(facts, opts.allow, opts.words) ??
+    ((await hasCardFields(page)) ? 'the page has card fields' : null);
   if (refusal) {
     opts.log(`${action} (not clicked: ${refusal})`, 'refused');
     return 'refused';
   }
   try {
     await loc.click({ timeout: ACTION_TIMEOUT_MS });
+  } catch {
+    opts.log(action, 'failed');
+    return 'failed';
+  }
+  opts.log(action, 'done');
+  return 'done';
+}
+
+/** Presses a key on the page. Only Escape is allowed: it closes a list or a dialog and submits nothing. */
+export async function guardedKey(
+  page: Page,
+  key: string,
+  opts: { purpose: string; log: ActionLog },
+): Promise<ActionResult> {
+  const action = `${opts.purpose}: press ${clean(key)}`;
+  if (key !== 'Escape') {
+    opts.log(`${action} (not pressed: only Escape is allowed)`, 'refused');
+    return 'refused';
+  }
+  try {
+    await page.keyboard.press('Escape');
   } catch {
     opts.log(action, 'failed');
     return 'failed';

@@ -291,7 +291,12 @@ export async function rejectCookieBanner(
     if (!matchesKind('cookie_reject', name, words) || matchesKind('cookie_accept', name, words)) continue;
     if (!(await b.isVisible().catch(() => false))) continue;
     if (!(await isInCookieContainer(b))) continue;
-    const result = await guardedClick(page, b, { purpose: 'reject cookie banner', words, log });
+    const result = await guardedClick(page, b, {
+      purpose: 'reject cookie banner',
+      allow: 'cookie_reject',
+      words,
+      log,
+    });
     if (result !== 'done') return false;
     await page.waitForTimeout(300);
     return true;

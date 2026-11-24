@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 // @ts-expect-error plain JS example without types
 import { startDemoStore } from '../../examples/demo-store/server.mjs';
 import { parseConfig } from '../../src/config/load-config.js';
-import { guardedClick, guardedFill } from '../../src/inspect/actions.js';
+import { guardedClick, guardedFill, guardedKey } from '../../src/inspect/actions.js';
 import { BlockedHostCounter, crawlSite, type SiteReport } from '../../src/inspect/crawl.js';
 import { type ProbeResult, probeCheckout } from '../../src/inspect/probe.js';
 import { openGuardedContext } from '../../src/runner/browser.js';
@@ -130,6 +130,7 @@ describe('checkout probe', () => {
     expect(r.steps[0]).toMatchObject({ action: expect.stringMatching(/reject/i), result: 'done' });
     expect(demo.stats.cookieAccepted).toBe(0);
     expect(r.reached).toBe('payment');
+    expect(r.dialogs).toContain('dialog: Cookie settings');
   });
 
   it('stops at a login wall without a guest option', async () => {
@@ -298,19 +299,18 @@ describe('site crawl rules', () => {
 });
 
 // A small Turkish shop: a cart page, custom lists where the district list waits
-// for the city list, a send-code button next to the phone field, and a site test card select.
+// for the city list, and a site test card select. The SMS case below tests a send-code page.
 const TR_HEAD =
   '<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Mağaza</title></head><body>';
 const TR_PAGES: Record<string, string> = {
   '/urun/kalem-123456': `${TR_HEAD}<header><a href="/sepet">Sepetim</a></header><main><h1>Kalem</h1>
-<button onclick="fetch('/api/sepet',{method:'POST'})">Sepete Ekle</button></main></body></html>`,
+<button onclick="fetch('/api/sepet',{method:'POST'}).then(()=>alert('Ürün sepete eklendi'))">Sepete Ekle</button></main></body></html>`,
   '/sepet': `${TR_HEAD}<main><h1>Sepetim</h1><p>1 ürün</p>
 <button onclick="location.href='/odeme/adres'">Sepeti Onayla</button></main></body></html>`,
   '/odeme/adres': `${TR_HEAD}<main><h1>Teslimat adresi</h1>
 <label for="ad">Ad</label><input id="ad">
 <label for="soyad">Soyad</label><input id="soyad">
 <label for="tel">Cep Telefonu</label><input id="tel" type="tel" placeholder="05XX XXX XX XX">
-<button onclick="fetch('/clicked/send-code',{method:'POST'})">Kod Gönder</button>
 <span id="il-l">İl</span><button id="il" role="combobox" aria-labelledby="il-l" aria-expanded="false">Seçiniz</button>
 <ul id="il-list" role="listbox" hidden><li role="option">Seçiniz</li><li role="option">Adana</li><li role="option">Ankara</li></ul>
 <span id="ilce-l">İlçe</span><button id="ilce" role="combobox" aria-labelledby="ilce-l" aria-disabled="true" aria-expanded="false">Seçiniz</button>
@@ -391,7 +391,7 @@ describe('checkout probe on a shop with custom lists', () => {
     await new Promise<void>((r) => server.close(() => r()));
   });
 
-  it('fills the dependent lists, records the test card select, and never pays or sends a code', async () => {
+  it('fills the dependent lists, records the test card select, and never pays', async () => {
     const config = parseConfig(
       {
         targets: {
@@ -432,11 +432,12 @@ describe('checkout probe on a shop with custom lists', () => {
     });
     expect(hits).toContain('POST /api/sepet');
     expect(hits).not.toContain('POST /clicked/pay');
-    expect(hits).not.toContain('POST /clicked/send-code');
     expect(r.steps.map((s) => s.action)).toEqual(
       expect.arrayContaining(['open cart: "Sepetim"', 'go to checkout: "Sepeti Onayla"']),
     );
     expect(r.side_effects).toEqual(['cart item', 'address', expect.stringMatching(/^order draft/)]);
+    expect(r.dialogs).toContain('alert: Ürün sepete eklendi');
+    expect(r.steps.map((s) => s.action)).toContain('dialog opened: alert: Ürün sepete eklendi');
   });
 });
 
@@ -456,7 +457,12 @@ describe('guarded actions', () => {
 <input id="pw" type="password"><input id="cc" autocomplete="cc-number"><input id="otp" autocomplete="one-time-code">
 </main><script>window.hit = []</script>`);
       const log: [string, string][] = [];
-      const opts = { purpose: 'test', words: {}, log: (a: string, r: string) => log.push([a, r]) };
+      const opts = {
+        purpose: 'test',
+        allow: 'continue' as const,
+        words: {},
+        log: (a: string, r: string) => log.push([a, r]),
+      };
       for (const name of ['Next', 'Pay now', 'Accept all', 'Send code', 'Place order', 'Sign in']) {
         await guardedClick(page, page.getByRole('button', { name, exact: true }), opts);
       }
@@ -483,5 +489,147 @@ describe('guarded actions', () => {
     } finally {
       await guarded.close();
     }
+  });
+
+  it('refuses image pay buttons, nameless buttons, pay links, unmatched names, and keys other than Escape', async () => {
+    const t = demoTarget();
+    const guarded = await openGuardedContext({ config: t.config, target: t.target, onBlocked: () => {} });
+    try {
+      const page = await guarded.context.newPage();
+      await page.setContent(`<main><form onsubmit="event.preventDefault()">
+<input id="img" type="image" alt="Pay" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" onclick="window.hit.push('img')">
+<button id="imgchild" onclick="window.hit.push('imgchild')"><img alt="Complete order" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></button>
+<button id="nameless" type="submit" onclick="window.hit.push('nameless')"></button>
+<button id="delete" onclick="window.hit.push('delete')">Delete address</button>
+</form>
+<span id="paylink" role="link" tabindex="0" onclick="window.hit.push('paylink')">Pay now</span>
+<a id="checkout" href="#" onclick="window.hit.push('checkout')">Checkout</a>
+</main><script>window.hit = []</script>`);
+      const log: [string, string][] = [];
+      const base = { purpose: 'test', words: {}, log: (a: string, r: string) => log.push([a, r]) };
+      for (const id of ['img', 'imgchild', 'nameless', 'delete']) {
+        expect(await guardedClick(page, page.locator(`#${id}`), { ...base, allow: 'continue' }), id).toBe(
+          'refused',
+        );
+      }
+      expect(await guardedClick(page, page.locator('#paylink'), { ...base, allow: 'checkout' })).toBe(
+        'refused',
+      );
+      // The right name for the wrong step is also refused.
+      expect(await guardedClick(page, page.locator('#checkout'), { ...base, allow: 'add_to_cart' })).toBe(
+        'refused',
+      );
+      expect(await page.evaluate(() => (window as unknown as { hit: string[] }).hit)).toEqual([]);
+      expect(await guardedClick(page, page.locator('#checkout'), { ...base, allow: 'checkout' })).toBe(
+        'done',
+      );
+      expect(await guardedKey(page, 'Enter', base)).toBe('refused');
+      expect(await guardedKey(page, 'Escape', base)).toBe('done');
+    } finally {
+      await guarded.close();
+    }
+  });
+});
+
+// Pages that test the payment step rules and the verification stop. Each case has a product page
+// "/urun/<case>-123456" whose checkout link opens "/odeme/<case>".
+const SAFETY_CASES: Record<string, string> = {
+  // Address fields, a card iframe on a host that the guard blocks, and an order button.
+  blocked: `<main><h1>Ödeme</h1><form onsubmit="event.preventDefault()">
+<label for="ad">Ad</label><input id="ad"><label for="soyad">Soyad</label><input id="soyad">
+<iframe title="Kart" src="https://pay.example.com/card"></iframe>
+<button type="submit" onclick="fetch('/clicked/order',{method:'POST'})">Siparişi Onayla</button></form></main>`,
+  // An express wallet button on the contact step must not end the probe.
+  express: `<main><h1>Contact</h1><form id="f">
+<label for="email">Email</label><input id="email" type="email">
+<label for="name">Full name</label><input id="name">
+<button type="submit">Continue</button></form>
+<button onclick="fetch('/clicked/applepay',{method:'POST'})">Apple Pay</button></main>
+<script>document.getElementById('f').addEventListener('submit', async (e) => {
+  e.preventDefault(); await fetch('/api/contact',{method:'POST'}); location.href = '/odeme/express-pay';
+});</script>`,
+  'express-pay': `<main><h1>Payment</h1><input autocomplete="cc-number" placeholder="Card number">
+<button onclick="fetch('/clicked/pay',{method:'POST'})">Pay now</button></main>`,
+  // A phone field and an SMS verification text: the probe stops before any continue click.
+  sms: `<main><h1>İletişim</h1><form onsubmit="event.preventDefault()">
+<label for="tel">Cep Telefonu</label><input id="tel" type="tel">
+<p>Telefonunuza SMS ile doğrulama kodu gönderilecek.</p>
+<button type="submit" onclick="fetch('/clicked/continue',{method:'POST'})">Devam Et</button></form></main>`,
+};
+
+describe('checkout probe safety rules', () => {
+  let server: Server;
+  let base = '';
+  const hits: string[] = [];
+
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      hits.push(`${req.method} ${req.url}`);
+      if (req.method === 'POST') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      const product = /^\/urun\/([a-z-]+)-123456$/.exec(req.url ?? '');
+      const step = /^\/odeme\/([a-z-]+)$/.exec(req.url ?? '');
+      let body: string | undefined;
+      if (product?.[1]) {
+        body = `<header><a href="/odeme/${product[1]}">Checkout</a></header><main><h1>Kalem</h1>
+<button onclick="fetch('/api/sepet',{method:'POST'})">Sepete Ekle</button></main>`;
+      } else if (step?.[1]) body = SAFETY_CASES[step[1]];
+      res.writeHead(body ? 200 : 404, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(
+        `<!doctype html><html><head><meta charset="utf-8"><title>Shop</title></head><body>${body ?? 'Yok'}</body></html>`,
+      );
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const addr = server.address();
+    base = `http://localhost:${typeof addr === 'object' && addr ? addr.port : 0}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  function caseTarget(name: string) {
+    const config = parseConfig(
+      {
+        targets: {
+          s: {
+            profile: 'p',
+            base_url: base,
+            allowed_hosts: ['localhost'],
+            inspect: { product_paths: [`/urun/${name}-123456`], probe_checkout: true },
+          },
+        },
+      },
+      '/tmp',
+    );
+    const target = config.targets.s;
+    if (!target?.inspect) throw new Error('test config has no inspect block');
+    return { config, target, inspect: target.inspect };
+  }
+
+  it('takes a blocked card iframe as the payment step and clicks nothing that orders', async () => {
+    const r = await probe(caseTarget('blocked'));
+    expect(r.reached).toBe('payment');
+    expect(r.stopped_reason).toBe('payment_step_reached');
+    expect(r.payment?.pay_button).toBe('Siparişi Onayla');
+    expect(hits.filter((h) => h.startsWith('POST /clicked/'))).toEqual([]);
+  });
+
+  it('does not stop at an express wallet button on the contact step', async () => {
+    const r = await probe(caseTarget('express'));
+    expect(r.reached).toBe('payment');
+    expect(r.steps.at(-1)?.url_path).toBe('/odeme/express-pay');
+    expect(r.payment?.pay_button).toBe('Pay now');
+    expect(hits).toContain('POST /api/contact');
+    expect(hits.filter((h) => h.startsWith('POST /clicked/'))).toEqual([]);
+  });
+
+  it('stops before a continue click when the page with a phone field talks about an SMS code', async () => {
+    const r = await probe(caseTarget('sms'));
+    expect(r.stopped_reason).toBe('verification_required');
+    expect(hits.filter((h) => h.startsWith('POST /clicked/'))).toEqual([]);
   });
 });

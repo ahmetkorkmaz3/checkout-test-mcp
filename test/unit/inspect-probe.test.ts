@@ -1,51 +1,77 @@
 import { describe, expect, it } from 'vitest';
-import { type ClickFacts, clickRefusal, fieldRefusal } from '../../src/inspect/actions.js';
+import { type ClickFacts, type ClickKind, clickRefusal, fieldRefusal } from '../../src/inspect/actions.js';
 import { fieldKind, guestEmail, phoneValue, postcodeValue } from '../../src/inspect/probe.js';
 
 const click = (texts: string[], more: Partial<ClickFacts> = {}): ClickFacts => ({
+  name: texts[0] ?? '',
   texts,
+  role: 'button',
   otpOnPage: false,
   passwordInForm: false,
   ...more,
 });
 
 describe('clickRefusal', () => {
-  it('allows step buttons', () => {
-    for (const t of [
-      'Add to cart',
-      'Checkout',
-      'Continue as guest',
-      'Continue to payment',
-      'Reject all',
-      'İstanbul',
-    ]) {
-      expect(clickRefusal(click([t]), {})).toBeNull();
-    }
+  it('allows step buttons whose name matches the step', () => {
+    const cases: [string, ClickKind][] = [
+      ['Add to cart', 'add_to_cart'],
+      ['Sepetim', 'cart'],
+      ['Checkout', 'checkout'],
+      ['Continue as guest', 'guest'],
+      ['Continue to payment', 'continue'],
+      ['Kaydet ve Devam Et', 'continue'],
+      ['Bu adresi kullan', 'continue'],
+      ['Reject all', 'cookie_reject'],
+    ];
+    for (const [t, kind] of cases) expect(clickRefusal(click([t]), kind, {}), t).toBeNull();
+    expect(clickRefusal(click(['İl'], { role: 'combobox' }), 'list', {})).toBeNull();
+    expect(clickRefusal(click(['İstanbul'], { role: 'option' }), 'list_option', {})).toBeNull();
+  });
+
+  it('refuses an element without a name', () => {
+    expect(clickRefusal(click([]), 'continue', {})).toMatch(/no name/);
+  });
+
+  it('refuses a name that does not match the step', () => {
+    expect(clickRefusal(click(['Delete address']), 'continue', {})).toMatch(
+      /does not match the step "continue"/,
+    );
+    expect(clickRefusal(click(['Checkout']), 'add_to_cart', {})).toMatch(
+      /does not match the step "add_to_cart"/,
+    );
+    expect(clickRefusal(click(['Add to cart']), 'cart', {})).toMatch(/does not match the step "cart"/);
+    expect(clickRefusal(click(['İl'], { role: 'button' }), 'list', {})).toMatch(
+      /does not match the step "list"/,
+    );
+    expect(clickRefusal(click(['Adana'], { role: 'button' }), 'list_option', {})).toMatch(
+      /does not match the step "list_option"/,
+    );
   });
 
   it('refuses a pay button in any text of the element', () => {
-    expect(clickRefusal(click(['Pay 349,00 TL']), {})).toMatch(/pay/);
-    expect(clickRefusal(click(['Go', 'Buy now']), {})).toMatch(/pay/);
-    expect(clickRefusal(click(['Siparişi tamamla']), { pay: ['siparişi tamamla'] })).toMatch(/pay/);
+    expect(clickRefusal(click(['Pay 349,00 TL']), 'continue', {})).toMatch(/pay/);
+    expect(clickRefusal(click(['Continue', 'Buy now']), 'continue', {})).toMatch(/pay/);
+    expect(clickRefusal(click(['Complete order'], { role: 'link' }), 'checkout', {})).toMatch(/pay/);
+    expect(clickRefusal(click(['Devam']), 'continue', { pay: ['devam'] })).toMatch(/pay/);
   });
 
   it('refuses a cookie accept button', () => {
-    expect(clickRefusal(click(['Accept all']), {})).toMatch(/cookies/);
-    expect(clickRefusal(click(['Tümünü kabul et']), {})).toMatch(/cookies/);
+    expect(clickRefusal(click(['Accept all']), 'cookie_reject', {})).toMatch(/cookies/);
+    expect(clickRefusal(click(['Tümünü kabul et']), 'cookie_reject', {})).toMatch(/cookies/);
   });
 
   it('refuses a send-code or verify button', () => {
     for (const t of ['Send code', 'Kod gönder', 'Resend', 'Verify', 'SMS ile doğrula', 'Code anfordern']) {
-      expect(clickRefusal(click([t]), {}), t).toMatch(/code/);
+      expect(clickRefusal(click([t]), 'continue', {}), t).toMatch(/code/);
     }
   });
 
   it('refuses any click on a page with a one-time code field', () => {
-    expect(clickRefusal(click(['Continue'], { otpOnPage: true }), {})).toMatch(/one-time code/);
+    expect(clickRefusal(click(['Continue'], { otpOnPage: true }), 'continue', {})).toMatch(/one-time code/);
   });
 
   it('refuses to submit a form with a password field', () => {
-    expect(clickRefusal(click(['Sign in'], { passwordInForm: true }), {})).toMatch(/password/);
+    expect(clickRefusal(click(['Continue'], { passwordInForm: true }), 'continue', {})).toMatch(/password/);
   });
 });
 
@@ -125,5 +151,13 @@ describe('probe values', () => {
     expect(k('Adres başlığı')).toBe('title');
     expect(k('x', 'text', 'shipping postal-code')).toBe('postcode');
     expect(k('Kimlik numarası')).toBeNull();
+    // Word boundaries: "cep" inside "Recep" and "zip" inside "Zipper" are not field words.
+    expect(k('Recep')).toBeNull();
+    expect(k('Zipper color')).toBeNull();
+    expect(k('Cep')).toBe('phone');
+    expect(k('Cep Telefonunuz')).toBe('phone');
+    expect(k('Zip code')).toBe('postcode');
+    expect(k('İl')).toBe('city');
+    expect(k('Adresiniz')).toBe('address');
   });
 });

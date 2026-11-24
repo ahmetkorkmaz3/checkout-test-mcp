@@ -340,3 +340,21 @@ Many test environments return an SMS or email code in the API response of the pa
 ## 11. Authoring
 
 Two tools let an agent write scenarios: `inspect_target` reads a test target and suggests scenarios, and `save_scenario` checks and writes a scenario, fragment, or test data file. The design is in the [scenario authoring spec](superpowers/specs/2026-11-24-scenario-authoring-design.md). The tool contract of `save_scenario` is in [tools.md](tools.md), section 7.
+
+### Checkout probe
+
+The probe (`src/inspect/probe.ts`) goes through the checkout of a test target up to the payment step with fictional data. Every click, fill, select, and key press goes through `src/inspect/actions.ts`:
+
+- A click needs a name that matches the step: add to cart, cart, checkout, guest, cookie reject, or continue. A list click needs the combobox or option role.
+- A click is refused when the element has no name, or when any of its texts names a pay, cookie accept, or send-code action. A click is also refused on a page with card fields or a one-time code field, and in a form with a password field.
+- A fill is refused for password, card, and one-time code fields, and for a field whose label names a secret.
+- The only key press is Escape.
+
+The payment step has card fields in any frame, a frame that the host guard blocked, or a visible terms checkbox. A pay button alone counts only when no empty field is left, because express wallet buttons also show on the contact step.
+
+Stop reasons: `payment_step_reached`, `login_required`, `no_product`, `no_add_to_cart`, `no_checkout_button`, `form_not_understood`, `timeout`, `blocked_by_safety`, and `verification_required`. The probe stops with `verification_required` when a page with a phone field says that it sends a code. It stops before it clicks to go on.
+
+Probe risks:
+
+- The fictional phone number (`555` and zeros) can belong to a real subscriber. The probe never clicks a send-code button, and it stops before it continues on a page that says it sends a code to the phone.
+- The probe makes a cart item, a guest checkout with an `example.test` email, an address, and possibly an unpaid order draft. `side_effects` lists them.

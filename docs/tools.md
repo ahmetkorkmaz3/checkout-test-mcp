@@ -470,7 +470,7 @@ Example `failure` for the 3DS scenario when the challenge did not appear:
       "arguments": { "target": "demo-local", "scenario_id": "card-3ds-challenge-fail" }
     }
   ],
-  "screenshot": "/path/to/.checkout-test-mcp/runs/run_8fK2mQ9xLp3vTz1a/04-submit_payment.png",
+  "screenshot": "/path/to/.checkout-test-mcp/runs/run_8fK2mQ9xLp3vTz1a/05-submit_payment.png",
   "page_url": "http://localhost:4173/checkout/success"
 }
 ```
