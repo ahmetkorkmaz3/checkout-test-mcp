@@ -1,4 +1,5 @@
 import { isMap, parseDocument } from 'yaml';
+import { wordsFor } from '../inspect/words.js';
 import { SECRET_KEYWORDS, STRONG_SECRET_WORDS } from '../safety/secrets.js';
 import type { Fragment, Scenario, Step } from '../schemas/scenario.js';
 import { checkTestData } from './test-data.js';
@@ -59,9 +60,7 @@ const SNAKE = /^[a-z][a-z0-9]*(_[a-z0-9]+)*$/;
 
 const EMAIL_LIKE = /@.*\./;
 const PHONE_LIKE = /^\+?[\d\s\-.()[\]]+$/;
-// A small local list. The shared word list of the inspect module replaces it.
-const PAY_WORDS =
-  /(?<![\p{L}])(pay|place order|complete order|öde|güvenli öde|siparişi tamamla)(?![\p{L}])/iu;
+const PAY_WORDS = wordsFor('pay');
 
 /** Tests a word list on the text and on its Turkish lower case, because "İ" does not fold to "i" in JS. */
 const hasWord = (re: RegExp, s: string): boolean => re.test(s) || re.test(s.toLocaleLowerCase('tr-TR'));

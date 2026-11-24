@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { WordKind } from '../inspect/words.js';
 
 const HostPattern = z
   .string()
@@ -18,8 +19,8 @@ export const InspectConfig = z
     max_pages: z.number().int().min(1).max(100).default(25),
     /** The probe may click add-to-cart and the checkout button. It never clicks a pay button. */
     probe_checkout: z.boolean().default(false),
-    // Task 7 narrows the keys to WordKind.
-    words: z.record(z.string(), z.array(z.string())).default({}),
+    /** Extra phrases per word kind. An unknown kind is a config error. */
+    words: z.partialRecord(WordKind, z.array(z.string())).default({}),
   })
   .strict();
 export type InspectConfig = z.infer<typeof InspectConfig>;
