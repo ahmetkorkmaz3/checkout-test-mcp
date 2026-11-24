@@ -578,6 +578,19 @@ const SAFETY_CASES: Record<string, string> = {
 <script>document.getElementById('f').addEventListener('submit', async (e) => {
   e.preventDefault(); await fetch('/api/consent-contact',{method:'POST'}); location.href = '/odeme/express-pay';
 });</script>`,
+  // Blocked ad and tag manager frames on the guest and contact steps are not payment frames.
+  adframes: `<main><h1>Checkout</h1><button onclick="location.href='/odeme/adframes-contact'">Continue as guest</button></main>
+<div class="ads"><iframe src="https://ads.example.net/frame"></iframe>
+<iframe src="https://www.googletagmanager.example/ns.html?id=GTM-X"></iframe></div>`,
+  'adframes-contact': `<main><h1>Contact</h1><form id="f">
+<label for="email">Email</label><input id="email" type="email">
+<label for="name">Full name</label><input id="name">
+<button type="submit">Continue</button></form></main>
+<div class="ads"><iframe src="https://ads.example.net/frame"></iframe>
+<iframe src="https://www.googletagmanager.example/ns.html?id=GTM-X"></iframe></div>
+<script>document.getElementById('f').addEventListener('submit', async (e) => {
+  e.preventDefault(); await fetch('/api/adframes-contact',{method:'POST'}); location.href = '/odeme/express-pay';
+});</script>`,
   'express-pay': `<main><h1>Payment</h1><input autocomplete="cc-number" placeholder="Card number">
 <button onclick="fetch('/clicked/pay',{method:'POST'})">Pay now</button></main>`,
   // A phone field and an SMS verification text: the probe stops before any continue click.
@@ -646,6 +659,15 @@ describe('checkout probe safety rules', () => {
     expect(r.stopped_reason).toBe('payment_step_reached');
     expect(r.payment?.pay_button).toBe('Siparişi Onayla');
     expect(hits.filter((h) => h.startsWith('POST /clicked/'))).toEqual([]);
+  });
+
+  it('does not take blocked ad or tag manager frames as the payment step', async () => {
+    const r = await probe(caseTarget('adframes'));
+    expect(r.guest_option).toBe(true);
+    expect(r.reached).toBe('payment');
+    expect(r.steps.at(-1)?.url_path).toBe('/odeme/express-pay');
+    expect(r.steps.some((s) => s.action.includes('frame that the guard blocked'))).toBe(false);
+    expect(hits).toContain('POST /api/adframes-contact');
   });
 
   it('does not stop at an express wallet button on the contact step', async () => {

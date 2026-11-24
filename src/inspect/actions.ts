@@ -56,17 +56,81 @@ export type ClickKind =
   | 'list'
   | 'list_option';
 
+// Host words: these match at the start of a host label, so "payments" and "cards" count.
+const HOST_PREFIX_WORDS = [
+  'pay',
+  'card',
+  'checkout',
+  '3ds',
+  'odeme',
+  'kart',
+  'zahlung',
+  'paiement',
+  'pago',
+  'pagamento',
+  'betaal',
+];
+// "secure" counts only as a whole host label: "securepubads" is an ad host.
+const HOST_EXACT_WORDS = ['secure', 'payment'];
+// Provider names count anywhere in the host, for example "sandbox-api.iyzipay.com".
+const HOST_PROVIDERS = ['craftgate', 'iyzi', 'stripe', 'adyen', 'masterpass', 'braintree'];
+/** Payment words in a frame title or in the text around the frame. They match at a word start. */
+const PAYMENT_TEXT =
+  /(?<![\p{L}\p{N}])(pay|payment|card|3ds|3d secure|secure payment|checkout|craftgate|iyzi|stripe|adyen|masterpass|braintree|ödeme|kart|kredi kartı|zahlung|kreditkarte|paiement|carte bancaire|pago|tarjeta|pagamento|carta di credito|betaal)/iu;
+
 /**
- * True when an iframe on the page has a URL whose load the host guard blocked. Such a frame can be
- * a card form on a payment provider host that the target does not list.
+ * True when a blocked frame looks like a payment frame: its host or title has a payment word, or
+ * the text around it does. Tag manager, ad, and chat frames that the guard blocked do not count.
+ */
+export function isPaymentFrame(frame: { src: string; title: string; context: string }): boolean {
+  let host = '';
+  try {
+    host = new URL(frame.src).hostname.toLowerCase();
+  } catch {
+    host = '';
+  }
+  const labels = host.split(/[.\-_]/).filter(Boolean);
+  if (labels.some((l) => HOST_PREFIX_WORDS.some((w) => l.startsWith(w)))) return true;
+  if (labels.some((l) => HOST_EXACT_WORDS.includes(l))) return true;
+  if (frame.src.toLowerCase().includes('checkout.com')) return true;
+  if (HOST_PROVIDERS.some((w) => host.includes(w))) return true;
+  return PAYMENT_TEXT.test(frame.title.normalize('NFC')) || PAYMENT_TEXT.test(frame.context.normalize('NFC'));
+}
+
+/**
+ * True when an iframe on the page has a URL whose load the host guard blocked, and the frame looks
+ * like a payment frame. Such a frame can be a card form on a provider host that the target does not list.
  */
 export async function hasBlockedFrame(page: Page, blockedFrames: ReadonlySet<string>): Promise<boolean> {
   if (blockedFrames.size === 0) return false;
-  const srcs = await page
+  const frames = await page
     .locator('iframe[src]')
-    .evaluateAll((els) => els.map((e) => (e as HTMLIFrameElement).src))
-    .catch(() => [] as string[]);
-  return srcs.some((src) => blockedFrames.has(src));
+    .evaluateAll((els) =>
+      els.map((e) => {
+        const frame = e as HTMLIFrameElement;
+        // The text of the nearest container, up to 5 levels. A form or landmark ends the walk.
+        let context = '';
+        let el = frame.parentElement;
+        for (let depth = 0; el && depth < 5; depth++, el = el.parentElement) {
+          if (/^(FORM|MAIN|NAV|ASIDE|HEADER|FOOTER|BODY|HTML)$/.test(el.tagName)) break;
+          if (
+            /^(form|main|navigation|complementary|contentinfo|search|banner)$/.test(
+              el.getAttribute('role') ?? '',
+            )
+          )
+            break;
+          // biome-ignore lint/performance/useDomNodeTextContent: only visible text counts.
+          const text = el.innerText ?? '';
+          if (text.trim() !== '') {
+            context = text.slice(0, 2000);
+            break;
+          }
+        }
+        return { src: frame.src, title: frame.getAttribute('title') ?? '', context };
+      }),
+    )
+    .catch(() => [] as { src: string; title: string; context: string }[]);
+  return frames.some((f) => blockedFrames.has(f.src) && isPaymentFrame(f));
 }
 
 export interface ClickFacts {

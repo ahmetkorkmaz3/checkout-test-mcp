@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { type ClickFacts, type ClickKind, clickRefusal, fieldRefusal } from '../../src/inspect/actions.js';
+import {
+  type ClickFacts,
+  type ClickKind,
+  clickRefusal,
+  fieldRefusal,
+  isPaymentFrame,
+} from '../../src/inspect/actions.js';
 import { fieldKind, guestEmail, phoneValue, postcodeValue } from '../../src/inspect/probe.js';
 
 const click = (texts: string[], more: Partial<ClickFacts> = {}): ClickFacts => ({
@@ -159,5 +165,27 @@ describe('probe values', () => {
     expect(k('Zip code')).toBe('postcode');
     expect(k('İl')).toBe('city');
     expect(k('Adresiniz')).toBe('address');
+  });
+});
+
+describe('isPaymentFrame', () => {
+  const f = (src: string, title = '', context = '') => isPaymentFrame({ src, title, context });
+
+  it('counts payment hosts, titles, and container text', () => {
+    expect(f('https://pay.example.com/card')).toBe(true);
+    expect(f('https://payments.example.org/x')).toBe(true);
+    expect(f('https://secure.example.org/x')).toBe(true);
+    expect(f('https://sandbox-api.iyzipay.example/x')).toBe(true);
+    expect(f('https://js.stripe.example/v3')).toBe(true);
+    expect(f('https://frames.example.net/x', 'Secure card payment input')).toBe(true);
+    expect(f('https://frames.example.net/x', 'Kart bilgileri')).toBe(true);
+    expect(f('https://frames.example.net/x', '', 'Kredi kartı bilgileriniz')).toBe(true);
+  });
+
+  it('does not count ad, tag manager, and chat frames', () => {
+    expect(f('https://ads.example.net/frame')).toBe(false);
+    expect(f('https://www.googletagmanager.example/ns.html?id=GTM-X')).toBe(false);
+    expect(f('https://securepubads.example.net/x')).toBe(false);
+    expect(f('https://chat.example.net/widget', 'Live chat', 'Need help?')).toBe(false);
   });
 });
