@@ -187,7 +187,7 @@ Input:
 | `path` | string | Relative to `authoring.dir`, kebab-case, `.yaml`. No `..`, no absolute path. |
 | `yaml` | string | Max 64 KB. |
 | `overwrite` | boolean | Default false. |
-| `validate_on` | object, optional | `{ target, params?, idempotency_key }`. Starts a run after a save. |
+| `validate_on` | object, optional | `{ target, params? }`. Only for `kind: "scenario"`. Starts a run after a save. The server makes the idempotency key (section 7.6.2). |
 
 Steps:
 
@@ -288,8 +288,9 @@ the user once.
 2. A save with content equal to the file on disk is a success, not
    `SCENARIO_EXISTS`. So a retry after a lost response is safe.
 3. The `validate_on` run gets an idempotency key that the server makes from the
-   scenario id, the file hash, and the params. A fixed file gives a new run, and
-   a repeated save of the same file gives the same run.
+   scenario id, the target, the file hash, and the params. The agent does not
+   send a key. A fixed file or another target gives a new run, and a repeated
+   save of the same file on the same target gives the same run.
 
 ### 7.7 Registry reload
 

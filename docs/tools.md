@@ -11,7 +11,8 @@ Contents:
 4. `run_scenario`
 5. `get_run_result`
 6. `compare_runs`
-7. Reasons behind the choices
+7. `save_scenario`
+8. Reasons behind the choices
 
 ## 1. Shared schemas
 
@@ -79,10 +80,10 @@ export const ToolErrorCode = z.enum([
   'RUN_NOT_FINISHED', // compare_runs only
   'RUNS_NOT_COMPARABLE',
   'QUEUE_FULL',
-  'AUTHORING_DISABLED', // save_scenario: config has no authoring.dir
-  'SCENARIO_INVALID', // save_scenario: the draft fails the scenario schema
+  'AUTHORING_DISABLED', // save_scenario: no authoring block, or test data writes are off
+  'SCENARIO_INVALID', // save_scenario: schema, house rule, or trial load issues in details.issues
   'PATH_REFUSED', // a file path leaves its allowed folder
-  'SCENARIO_EXISTS', // save_scenario: the id exists and overwrite is off
+  'SCENARIO_EXISTS', // save_scenario: the file exists with other content and overwrite is off
   'INSPECTION_FAILED', // inspect_target: the job could not finish
   'INTERNAL_ERROR',
 ]);
@@ -557,7 +558,131 @@ server.registerTool(
 - `inconclusive`: one run has verdict `error` or `blocked`. The site was not tested in that run.
 - Each run stores a hash of the scenario file. A different hash gives a warning, not an error.
 
-## 7. Reasons behind the choices
+## 7. `save_scenario`
+
+The agent writes the YAML. The server checks it and writes the file. Source: `src/tools/save-scenario.ts` (tool) and `src/authoring/save.ts` (logic). Design: [scenario authoring spec](superpowers/specs/2026-11-24-scenario-authoring-design.md), sections 7.3 and 7.6.
+
+```ts
+server.registerTool(
+  'save_scenario',
+  {
+    title: 'Save a scenario file',
+    description: SAVE_SCENARIO_DESCRIPTION, // see the source, reviewed through the tools/list snapshot
+    inputSchema: z.object({
+      kind: z.enum(['scenario', 'fragment', 'test_data']),
+      path: z.string().min(1), // relative, kebab-case, ".yaml"
+      yaml: z.string().min(1).max(65_536),
+      overwrite: z.boolean().default(false),
+      validate_on: z
+        .object({ target: z.string().min(1), params: z.record(z.string(), ParamValue).optional() })
+        .optional(), // kind "scenario" only
+    }),
+    outputSchema: z.object({
+      path: z.string(),
+      kind: z.enum(['scenario', 'fragment', 'test_data']),
+      scenario_id: z.string().nullable(),
+      written: z.boolean(),
+      unchanged: z.boolean(),
+      fixes_applied: z.array(z.string()),
+      warnings: z.array(RuleIssue), // { rule, severity, path, message, fix }
+      validation: z
+        .object({ run_id: RunId, status: RunStatus, reused_existing_run: z.boolean() })
+        .nullable(),
+      next: NextAction,
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  },
+  handler,
+);
+```
+
+The server does these steps in this order. A refusal writes nothing.
+
+1. No `authoring` block in the config: `AUTHORING_DISABLED`. `kind: "test_data"` without `authoring.test_data_dir_writable: true`: `AUTHORING_DISABLED`. `validate_on` with a kind other than `scenario`: `INVALID_PARAMS`.
+2. The path resolves inside `authoring.dir` (scenario, fragment) or `test_data_dir` (test data). A path with `..`, an absolute path, a wrong name, or a symlink that leaves the folder: `PATH_REFUSED`.
+3. A card-like number anywhere in the text, also a registry test card number: `REAL_CARD_DATA_REFUSED`. Secret-like text: `SECRET_IN_ARGUMENTS`. A key whose whole value is one template, for example `password: "{{secrets.member_password}}"`, and a key that opens a nested map are not secret values.
+4. Automatic fixes (schema line, `schema_version: 1`), YAML parse, zod schema, trial load of all scenario folders with the new text, and the house rules. Test data gets no fixes and uses the test data rules. Any error: `SCENARIO_INVALID` with every issue in `details.issues`.
+5. The file exists with the same text after the fixes: success with `unchanged: true` and `written: false`. Other text and `overwrite: false`: `SCENARIO_EXISTS`.
+6. Atomic write (temp file in the same folder, then rename). The server swaps in the trial registry, so `list_scenarios` and `run_scenario` see the file at once.
+7. `validate_on` starts a run. The server makes the idempotency key: `save-<scenario_id>-<first 16 hex of sha256(target + file text + JSON params)>`. The same file, target, and params give the same run. A changed file or another target gives a new run. When the run does not start, the error message says that the file was saved, and `details` has `saved: true`.
+
+Example: save and validate.
+
+```json
+{
+  "kind": "scenario",
+  "path": "guest/card-success-two-items.yaml",
+  "yaml": "id: card-success-two-items\ntitle: ...",
+  "validate_on": { "target": "demo-local", "params": { "quantity": 2 } }
+}
+```
+
+```json
+{
+  "path": "guest/card-success-two-items.yaml",
+  "kind": "scenario",
+  "scenario_id": "card-success-two-items",
+  "written": true,
+  "unchanged": false,
+  "fixes_applied": ["Added \"schema_version: 1\"."],
+  "warnings": [],
+  "validation": { "run_id": "run_8fK2mQ9xLp3vTz1a", "status": "queued", "reused_existing_run": false },
+  "next": {
+    "kind": "call_tool",
+    "description": "Wait for the validation run and get the result.",
+    "tool": "get_run_result",
+    "arguments": { "run_id": "run_8fK2mQ9xLp3vTz1a", "wait_s": 20 }
+  }
+}
+```
+
+Example: a weak outcome check.
+
+```json
+{
+  "error": {
+    "code": "SCENARIO_INVALID",
+    "message": "The scenario breaks 1 rule. Nothing was written.",
+    "likely_cause": "The YAML does not match the schema, a house rule, or the other scenario files.",
+    "retryable": false,
+    "next_actions": [
+      {
+        "kind": "fix_scenario",
+        "description": "Fix every issue in details.issues, then call save_scenario again with the fixed YAML.",
+        "tool": "save_scenario"
+      }
+    ],
+    "details": {
+      "issues": [
+        {
+          "rule": "outcome-proves-order",
+          "severity": "error",
+          "path": "outcome",
+          "message": "expected_outcome is order_placed, but no outcome check of kind \"response\" or \"url\" counts. A check with \"when\" does not count.",
+          "fix": "Add an outcome check without \"when\" that waits for the order response (\"response\") or the confirmation page URL (\"url\")."
+        }
+      ]
+    }
+  }
+}
+```
+
+Errors:
+
+| Code | When |
+|---|---|
+| `AUTHORING_DISABLED` | No `authoring` block, or test data writes are off. |
+| `PATH_REFUSED` | The path is not relative, does not match the name rule, or leaves the folder. |
+| `REAL_CARD_DATA_REFUSED` | The text has a card-like number. |
+| `SECRET_IN_ARGUMENTS` | The text has secret-like text. |
+| `SCENARIO_INVALID` | Schema, house rule, or trial load issues. See `details.issues`. |
+| `SCENARIO_EXISTS` | The file exists with other text and `overwrite` is false. |
+| `INVALID_PARAMS` | `validate_on` with a kind other than `scenario`. |
+| Errors of `run_scenario` | The file is saved, but the validation run did not start. |
+
+`INSPECTION_FAILED` belongs to `inspect_target`.
+
+## 8. Reasons behind the choices
 
 1. **The description tells the model the order of calls.** Each description says which tool comes before it, which comes after it, and what not to do ("Do not call run_scenario again to check progress"). Models follow sequence text in descriptions well.
 2. **Examples inside `.describe()`.** A concrete example value ("pr-4812-3ds-fail-after-deploy") gives the model the format at once. This lowers first-call errors more than a long rule.
@@ -566,4 +691,4 @@ server.registerTool(
 5. **Verdict and category are enums.** The agent can branch on them without text parsing. `summary` is for the human reading the agent transcript.
 6. **`relevant` flags and caps in summary mode.** A checkout page can log hundreds of console lines. The model gets at most ten items of each kind, ordered by relevance.
 7. **Annotations are honest.** `run_scenario` is not read-only and is open-world. Clients that ask the user before side effects ask for this tool only.
-8. **`tools/list` snapshot test.** A test stores the generated JSON of all four tools. Any change to a description or schema shows in review as a diff.
+8. **`tools/list` snapshot test.** A test stores the generated JSON of all tools. Any change to a description or schema shows in review as a diff.

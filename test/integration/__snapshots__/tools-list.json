@@ -1144,5 +1144,245 @@
       "idempotentHint": true,
       "openWorldHint": false
     }
+  },
+  {
+    "name": "save_scenario",
+    "title": "Save a scenario file",
+    "description": "Writes one scenario, fragment, or test data YAML file that you wrote, after the server checks it. The path is relative to the authoring folder of the server config (test data: the test data folder). The server adds the schema line and schema_version, validates the schema, and loads all scenario folders with the new file as a trial. It refuses card numbers, secrets, literal emails, phones, and passwords, and weak outcome checks. A refusal is SCENARIO_INVALID with every issue in details.issues, and nothing is written. Saving the same content again is safe and returns unchanged: true. To change a file, set overwrite: true. validate_on starts a run of the saved scenario on a test target. Then call get_run_result with the run_id. The same file, target, and params give the same run.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "scenario",
+            "fragment",
+            "test_data"
+          ],
+          "description": "\"scenario\" for a runnable scenario, \"fragment\" for reusable steps (kind: fragment), \"test_data\" for a data file such as customers/guest.yaml."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Relative path with lowercase letters, digits, and hyphens, ending in \".yaml\", for example \"guest/card-success.yaml\". Scenarios and fragments are relative to the authoring folder. Test data is relative to the test data folder. No \"..\", no absolute path."
+        },
+        "yaml": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536,
+          "description": "The full file text. Max 65536 characters."
+        },
+        "overwrite": {
+          "default": false,
+          "description": "Set to true to replace a file that exists with different content.",
+          "type": "boolean"
+        },
+        "validate_on": {
+          "description": "Only for kind \"scenario\". Starts a run of the saved scenario on this target.",
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Target name from list_scenarios.targets. Never a URL."
+            },
+            "params": {
+              "description": "Scenario params for the validation run. Omit a param to use its default.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            }
+          },
+          "required": [
+            "target"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "path",
+        "yaml"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The relative path of the file."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "scenario",
+            "fragment",
+            "test_data"
+          ]
+        },
+        "scenario_id": {
+          "description": "The scenario id. null for a fragment or test data.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "written": {
+          "type": "boolean",
+          "description": "True when the server wrote the file in this call."
+        },
+        "unchanged": {
+          "type": "boolean",
+          "description": "True when the file already had this content. A retry after a lost response is safe."
+        },
+        "fixes_applied": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Changes that the server made to the text before the write."
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "rule": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "error",
+                  "warning"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "description": "YAML path, for example \"steps.3.click\"."
+              },
+              "message": {
+                "type": "string"
+              },
+              "fix": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rule",
+              "severity",
+              "path",
+              "message",
+              "fix"
+            ],
+            "additionalProperties": false
+          },
+          "description": "Rule issues that did not stop the save. Fix them in a later save."
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "run_id": {
+                  "type": "string",
+                  "pattern": "^run_[A-Za-z0-9_-]{16}$",
+                  "description": "Run id returned by run_scenario, for example \"run_8fK2mQ9xLp3vTz1a\"."
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "queued",
+                    "running",
+                    "finished"
+                  ]
+                },
+                "reused_existing_run": {
+                  "type": "boolean",
+                  "description": "True when the same file, target, and params already had a validation run."
+                }
+              },
+              "required": [
+                "run_id",
+                "status",
+                "reused_existing_run"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The validation run. null without validate_on."
+        },
+        "next": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "call_tool",
+                "change_argument",
+                "wait_and_retry",
+                "fix_scenario",
+                "treat_as_regression",
+                "ask_human"
+              ]
+            },
+            "description": {
+              "type": "string",
+              "description": "One sentence the agent can act on."
+            },
+            "tool": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "after_s": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "kind",
+            "description"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "scenario_id",
+        "written",
+        "unchanged",
+        "fixes_applied",
+        "warnings",
+        "validation",
+        "next"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   }
 ]

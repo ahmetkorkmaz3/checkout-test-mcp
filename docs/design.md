@@ -336,3 +336,7 @@ Many test environments return an SMS or email code in the API response of the pa
 - The value is never stored. The run record and the result show `[REDACTED]`.
 - `body_regex` reads a code from a body that is not JSON, for example the `text/x-component` body of a Next.js server action. Error messages name the regex and the count of checked responses. They never show the body.
 - A separate OTP service that the runner must call is out of scope. It needs a new safety review.
+
+## 11. Authoring
+
+Two tools let an agent write scenarios: `inspect_target` reads a test target and suggests scenarios, and `save_scenario` checks and writes a scenario, fragment, or test data file. The design is in the [scenario authoring spec](superpowers/specs/2026-11-24-scenario-authoring-design.md). The tool contract of `save_scenario` is in [tools.md](tools.md), section 7.

@@ -109,7 +109,7 @@ afterEach(async () => {
 });
 
 describe('tools/list', () => {
-  it('exposes exactly four tools with descriptions and schemas', async () => {
+  it('exposes the expected tools with descriptions and schemas', async () => {
     await setup();
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
@@ -117,6 +117,7 @@ describe('tools/list', () => {
       'get_run_result',
       'list_scenarios',
       'run_scenario',
+      'save_scenario',
     ]);
     for (const t of tools) {
       expect(t.description?.length ?? 0).toBeGreaterThan(100);
