@@ -137,9 +137,17 @@ export function findCardLikeNumbers(text: string): string[] {
   return [...new Set(findCardSpans(text).map((span) => span.digits))];
 }
 
-/** True when the text contains a card-like number that is not a registered test card. */
-export function containsUnregisteredCardNumber(text: string): boolean {
-  return findCardLikeNumbers(text).some((digits) => !isRegisteredTestCardNumber(digits));
+/**
+ * True when the text contains a card-like number that is not a registered test card.
+ * Numbers in "allowed" also pass. A run puts the live card numbers of its production target there.
+ */
+export function containsUnregisteredCardNumber(
+  text: string,
+  allowed: ReadonlySet<string> = new Set(),
+): boolean {
+  return findCardLikeNumbers(text).some(
+    (digits) => !isRegisteredTestCardNumber(digits) && !allowed.has(digits),
+  );
 }
 
 /** True when the text contains any card-like number, registered or not. Used for tool arguments. */

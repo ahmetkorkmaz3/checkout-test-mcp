@@ -3,9 +3,17 @@ import { getTestCard, TEST_CARDS, type TestCard } from '../safety/test-cards.js'
 import type { ParamValue } from '../schemas/common.js';
 import type { Scenario } from '../schemas/scenario.js';
 
+/** A card that a run can use: a registered test card or a live card of a production target. */
+export type RunCard = Pick<
+  TestCard,
+  'id' | 'provider' | 'brand' | 'number' | 'expiry' | 'cvc' | 'behaviour' | 'description'
+>;
+
+export const LIVE_CARD_PREFIX = 'live/';
+
 export interface ResolvedParams {
   values: Record<string, ParamValue>;
-  cards: Record<string, TestCard>;
+  cards: Record<string, RunCard>;
 }
 
 function invalid(scenarioId: string, message: string, param: string, hint: string): ToolError {
@@ -25,9 +33,18 @@ function invalid(scenarioId: string, message: string, param: string, hint: strin
   });
 }
 
-export function resolveParams(scenario: Scenario, input: Record<string, ParamValue>): ResolvedParams {
+/**
+ * Checks the params against the scenario and resolves test card ids.
+ * liveCards holds the live cards of a production target, keyed by full id ("live/<name>").
+ * Leave it out for a test target. A live card id then fails.
+ */
+export function resolveParams(
+  scenario: Scenario,
+  input: Record<string, ParamValue>,
+  liveCards?: Record<string, RunCard>,
+): ResolvedParams {
   const values: Record<string, ParamValue> = {};
-  const cards: Record<string, TestCard> = {};
+  const cards: Record<string, RunCard> = {};
   const id = scenario.id;
 
   for (const name of Object.keys(input)) {
@@ -95,9 +112,29 @@ export function resolveParams(scenario: Scenario, input: Record<string, ParamVal
         values[name] = raw;
         break;
       case 'test_card': {
-        const card = typeof raw === 'string' ? getTestCard(raw) : undefined;
         const wanted = def.constraints?.behaviour;
-        const valid = TEST_CARDS.filter((c) => !wanted || c.behaviour === wanted).map((c) => c.id);
+        const valid = [...TEST_CARDS, ...Object.values(liveCards ?? {})]
+          .filter((c) => !wanted || c.behaviour === wanted)
+          .map((c) => c.id);
+        const isLive = typeof raw === 'string' && raw.startsWith(LIVE_CARD_PREFIX);
+        if (isLive && !liveCards) {
+          throw invalid(
+            id,
+            `Param "${name}": live card "${raw}" is not available. Live cards need a production target.`,
+            name,
+            `This target is a test target. Valid ids for this param: ${valid.join(', ')}.`,
+          );
+        }
+        const card: RunCard | undefined =
+          typeof raw !== 'string' ? undefined : isLive ? liveCards?.[raw] : getTestCard(raw);
+        if (isLive && !card) {
+          throw invalid(
+            id,
+            `Param "${name}": live card "${String(raw)}" is not in the live_cards of this target.`,
+            name,
+            `Valid ids for this param: ${valid.join(', ')}.`,
+          );
+        }
         if (!card) {
           throw invalid(
             id,
@@ -109,7 +146,7 @@ export function resolveParams(scenario: Scenario, input: Record<string, ParamVal
         if (wanted && card.behaviour !== wanted) {
           throw invalid(
             id,
-            `Test card "${card.id}" has behaviour "${card.behaviour}". This scenario needs "${wanted}".`,
+            `${isLive ? 'Live' : 'Test'} card "${card.id}" has behaviour "${card.behaviour}". This scenario needs "${wanted}".`,
             name,
             `Valid ids for this param: ${valid.join(', ')}.`,
           );

@@ -48,7 +48,7 @@ export const LiveCardConfig = z
     expiry_env: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
     cvc_env: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
     behaviour: CardBehaviour,
-    description: z.string(),
+    description: z.string().default(''),
   })
   .strict();
 export type LiveCardConfig = z.infer<typeof LiveCardConfig>;

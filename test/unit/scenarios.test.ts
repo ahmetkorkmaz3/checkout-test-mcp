@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ToolError } from '../../src/errors/tool-error.js';
 import { globToRegExp, statusMatches } from '../../src/runner/match.js';
-import { resolveParams } from '../../src/scenarios/params.js';
+import { type RunCard, resolveParams } from '../../src/scenarios/params.js';
 import { parseScenario, ScenarioRegistry } from '../../src/scenarios/registry.js';
 import { collectTokens, renderDeep, renderString, TemplateError } from '../../src/scenarios/template.js';
 
@@ -77,6 +77,49 @@ describe('params', () => {
   it('refuses unknown params and wrong card behaviour', () => {
     expect(() => resolveParams(scenario, { nope: 1 })).toThrow(/has no param "nope"/);
     expect(() => resolveParams(scenario, { card: 'stripe/declined-generic' })).toThrow(/needs "success"/);
+  });
+
+  describe('live cards', () => {
+    // Placeholder values. The run manager puts the env values in after this check.
+    const live = (behaviour: RunCard['behaviour']): Record<string, RunCard> => ({
+      'live/company-visa': {
+        id: 'live/company-visa',
+        provider: 'live',
+        brand: 'unknown',
+        number: '',
+        expiry: '',
+        cvc: '',
+        behaviour,
+        description: 'Company card.',
+      },
+    });
+
+    it('resolves a live card id to the live card', () => {
+      const r = resolveParams(scenario, { card: 'live/company-visa' }, live('success'));
+      expect(r.values.card).toBe('live/company-visa');
+      expect(r.cards.card?.id).toBe('live/company-visa');
+    });
+
+    it('refuses an unknown live card name', () => {
+      expect(() => resolveParams(scenario, { card: 'live/nope' }, live('success'))).toThrow(
+        expect.objectContaining({ code: 'INVALID_PARAMS' }),
+      );
+    });
+
+    it('refuses a live card without live cards for the target', () => {
+      expect(() => resolveParams(scenario, { card: 'live/company-visa' })).toThrow(
+        expect.objectContaining({
+          code: 'INVALID_PARAMS',
+          message: expect.stringMatching(/need a production target/),
+        }),
+      );
+    });
+
+    it('applies the behaviour constraint to a live card', () => {
+      expect(() => resolveParams(scenario, { card: 'live/company-visa' }, live('declined_generic'))).toThrow(
+        /needs "success"/,
+      );
+    });
   });
 });
 

@@ -7,10 +7,11 @@ import { ToolError } from '../errors/tool-error.js';
 import type { Logger } from '../logger.js';
 import { classify } from '../runner/classify.js';
 import { type ExecuteInput, type ExecuteOutput, executeRun } from '../runner/executor.js';
-import { containsCardNumber } from '../safety/cards.js';
+import { containsCardNumber, luhnValid } from '../safety/cards.js';
+import { isProductionTarget } from '../safety/hosts.js';
 import { looksLikeSecret, Redactor } from '../safety/secrets.js';
 import { conditionsPass } from '../scenarios/expand.js';
-import { resolveParams } from '../scenarios/params.js';
+import { LIVE_CARD_PREFIX, type RunCard, resolveParams } from '../scenarios/params.js';
 import type { LoadedScenario, ScenarioRegistry } from '../scenarios/registry.js';
 import { capturedPlaceholders, collectTokens, renderDeep, TemplateError } from '../scenarios/template.js';
 import type { ParamValue } from '../schemas/common.js';
@@ -49,7 +50,27 @@ interface Prepared {
   steps: Step[];
   outcome: OutcomeCheck[];
   redactor: Redactor;
+  allowedCardNumbers: ReadonlySet<string>;
   httpCredentials: { username: string; password: string } | undefined;
+}
+
+/** The live cards of a target with empty values. resolveParams checks ids and behaviour with them. */
+function liveCardPlaceholders(target: TargetConfig): Record<string, RunCard> {
+  const out: Record<string, RunCard> = {};
+  for (const [name, entry] of Object.entries(target.live_cards)) {
+    const id = `${LIVE_CARD_PREFIX}${name}`;
+    out[id] = {
+      id,
+      provider: 'live',
+      brand: 'unknown',
+      number: '',
+      expiry: '',
+      cvc: '',
+      behaviour: entry.behaviour,
+      description: entry.description,
+    };
+  }
+  return out;
 }
 
 export function newRunId(): string {
@@ -366,8 +387,68 @@ export class RunManager {
       });
     }
 
-    const params = resolveParams(scenario, input.params);
+    const production = isProductionTarget(target);
+    if (production && options.trace) {
+      throw new ToolError({
+        code: 'INVALID_PARAMS',
+        message: `Target "${input.target}" is a production target. A trace is not allowed on it.`,
+        likelyCause: 'A trace holds DOM snapshots with typed values, such as card data and addresses.',
+        nextActions: [
+          {
+            kind: 'change_argument',
+            description: 'Call run_scenario again with options.trace set to false.',
+            tool: 'run_scenario',
+            arguments: { options: { trace: false } },
+          },
+        ],
+        details: { option: 'trace' },
+      });
+    }
+
+    // Placeholders only. The env values are read below, and only for the live cards that the params name.
+    const liveCards = production ? liveCardPlaceholders(target) : undefined;
+    const params = resolveParams(scenario, input.params, liveCards);
     const redactor = new Redactor();
+    const missing: string[] = [];
+    const invalidLive: string[] = [];
+    const allowedCardNumbers = new Set<string>();
+    for (const [param, card] of Object.entries(params.cards)) {
+      if (!card.id.startsWith(LIVE_CARD_PREFIX)) continue;
+      const entry = target.live_cards[card.id.slice(LIVE_CARD_PREFIX.length)];
+      if (!entry) continue;
+      const read = (envName: string) => {
+        const value = this.env[envName];
+        if (!value) missing.push(`${card.id} (env ${envName})`);
+        return value ?? '';
+      };
+      const number = read(entry.number_env);
+      const expiry = read(entry.expiry_env);
+      const cvc = read(entry.cvc_env);
+      if (number && !(/^\d{13,19}$/.test(number) && luhnValid(number))) {
+        invalidLive.push(`${card.id} (env ${entry.number_env})`);
+      }
+      redactor.register(number);
+      redactor.register(expiry);
+      redactor.register(cvc);
+      if (number) allowedCardNumbers.add(number);
+      params.cards[param] = { ...card, number, expiry, cvc };
+    }
+    if (invalidLive.length > 0) {
+      throw new ToolError({
+        code: 'MISSING_ENV_SECRET',
+        message: `The live card env value is not a valid card number: ${invalidLive.join(', ')}.`,
+        likelyCause:
+          'The environment variable does not hold 13 to 19 digits with a valid Luhn check. Spaces and dashes are not allowed.',
+        nextActions: [
+          {
+            kind: 'ask_human',
+            description:
+              'Ask a human to check the live card environment variable and restart the MCP server.',
+          },
+        ],
+        details: { invalid: invalidLive },
+      });
+    }
 
     // Secrets referenced by the scenario and by http_credentials.
     // Steps and outcome checks whose "when" conditions pass for these params. Only they run.
@@ -397,7 +478,6 @@ export class RunManager {
       secretNames.add(target.http_credentials.password_secret);
     }
     const secrets: Record<string, string> = {};
-    const missing: string[] = [];
     for (const name of secretNames) {
       const envName = target.secrets[name];
       const value = envName ? this.env[envName] : undefined;
@@ -490,7 +570,7 @@ export class RunManager {
       artifacts: { run_dir: this.deps.store.runDir(runId), screenshots: [], trace_path: null },
     };
     record.summary = buildSummary(record);
-    return { record, loaded, target, steps, outcome, redactor, httpCredentials };
+    return { record, loaded, target, steps, outcome, redactor, allowedCardNumbers, httpCredentials };
   }
 
   private async loadData(refs: Record<string, string>, scenarioId: string): Promise<Record<string, unknown>> {
@@ -560,6 +640,7 @@ export class RunManager {
         options: record.options,
         ...(p.httpCredentials ? { httpCredentials: p.httpCredentials } : {}),
         redactor: p.redactor,
+        allowedCardNumbers: p.allowedCardNumbers,
         onProgress: (prog) => {
           record = {
             ...record,

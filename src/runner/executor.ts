@@ -42,6 +42,8 @@ export interface ExecuteInput {
   options: RunOptions;
   httpCredentials?: { username: string; password: string };
   redactor: Redactor;
+  /** Live card numbers of this run. The card guard lets them through. Empty for a test card run. */
+  allowedCardNumbers: ReadonlySet<string>;
   onProgress: (p: { completed_steps: number; current_step_id: string | null; steps: StepResult[] }) => void;
 }
 
@@ -86,6 +88,16 @@ const SECRET_INPUTS = 'input[type=password i], input[autocomplete="one-time-code
  */
 export function sensitiveMask(page: Page): Locator[] {
   return page.frames().flatMap((f) => [f.locator(SECRET_INPUTS), cardInputs(f)]);
+}
+
+/** Stops the run before it fills or captures a card number that is not a test card or a live card of this run. */
+export function guardCardValue(value: string, allowed: ReadonlySet<string>): void {
+  if (containsUnregisteredCardNumber(value, allowed)) {
+    throw new StepFailure(
+      'blocked_by_safety',
+      'The run stopped before it filled a value that looks like a card number outside the test card registry.',
+    );
+  }
 }
 
 export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
@@ -133,12 +145,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   }
 
   function guardValue(value: string): void {
-    if (containsUnregisteredCardNumber(value)) {
-      throw new StepFailure(
-        'blocked_by_safety',
-        'The run stopped before it filled a value that looks like a card number outside the test card registry.',
-      );
-    }
+    guardCardValue(value, input.allowedCardNumbers);
   }
 
   function checkBlockedNavigation(): void {

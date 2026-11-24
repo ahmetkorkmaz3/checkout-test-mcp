@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { guardCardValue } from '../../src/runner/executor.js';
 import { isCardInput } from '../../src/safety/card-inputs.js';
 import {
   containsCardNumber,
@@ -84,6 +85,45 @@ describe('card guard', () => {
   it('refuses any card number in tool arguments', () => {
     expect(containsCardNumber(JSON.stringify({ note: '4242424242424242' }))).toBe(true);
     expect(containsCardNumber(JSON.stringify({ card: 'stripe/visa-success' }))).toBe(false);
+  });
+});
+
+/** Appends the Luhn check digit. The tests build numbers at run time, so no new card literal enters the repo. */
+function withCheckDigit(body: string): string {
+  for (let d = 0; d <= 9; d++) {
+    if (luhnValid(`${body}${d}`)) return `${body}${d}`;
+  }
+  throw new Error('unreachable');
+}
+
+describe('card guard with live cards of a run', () => {
+  const live = withCheckDigit(`5${'31'.repeat(7)}`);
+  const other = withCheckDigit(`5${'13'.repeat(7)}`);
+
+  it('builds unregistered Luhn-valid numbers', () => {
+    expect(live).toHaveLength(16);
+    expect(other).not.toBe(live);
+    expect(containsUnregisteredCardNumber(live)).toBe(true);
+    expect(containsUnregisteredCardNumber(other)).toBe(true);
+  });
+
+  it('accepts a fill value that is a live card number of this run', () => {
+    const allowed = new Set([live]);
+    expect(() => guardCardValue(live, allowed)).not.toThrow();
+    expect(() => guardCardValue(live.replace(/(\d{4})(?=\d)/g, '$1 '), allowed)).not.toThrow();
+    expect(() => guardCardValue('4242424242424242', allowed)).not.toThrow();
+  });
+
+  it('refuses another unregistered number', () => {
+    expect(() => guardCardValue(other, new Set([live]))).toThrow(
+      expect.objectContaining({ category: 'blocked_by_safety' }),
+    );
+    expect(() => guardCardValue(`${live} ${other}`, new Set([live]))).toThrow(
+      expect.objectContaining({ category: 'blocked_by_safety' }),
+    );
+    expect(() => guardCardValue(live, new Set())).toThrow(
+      expect.objectContaining({ category: 'blocked_by_safety' }),
+    );
   });
 });
 
