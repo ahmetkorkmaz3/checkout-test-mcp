@@ -41,7 +41,7 @@ SDK v2 API facts that the design uses:
 checkout-test-mcp/
 ├─ CLAUDE.md
 ├─ README.md
-├─ LICENSE                          # MIT or Apache-2.0, see Q12
+├─ LICENSE                          # MIT, see Q12
 ├─ package.json                     # exact versions, "type": "module", bin entry
 ├─ tsconfig.json                    # strict, NodeNext, types: ["node"]
 ├─ biome.json
@@ -314,7 +314,7 @@ Each item has my recommendation. Decide or change them before implementation.
 | Q9  | Turkish payment providers               | iyzico, PayTR, and bank virtual POS flows differ from Stripe.                                                                | Ship the registry with Stripe and iyzico published test cards. Add others only with a source URL for each card.                                                                                     |
 | Q10 | TypeScript 7                            | TS 7 is the native compiler. Some tools can lag behind.                                                                      | Use 7.0.2. Fall back to TS 6.x if Biome, tsx, or Vitest show type tool problems.                                                                                                                    |
 | Q11 | Node engine range                       | `>=24` or `>=26`.                                                                                                            | `engines.node: ">=24"`, develop and run CI on 26. Your machine has 22.21.1, so install 26 first.                                                                                                    |
-| Q12 | License and name                        | MIT or Apache-2.0. `checkout-test-mcp` or another name.                                                                      | Apache-2.0 for the patent grant. Keep `checkout-test-mcp`.                                                                                                                                          |
+| Q12 | License and name                        | MIT or Apache-2.0. `checkout-test-mcp` or another name.                                                                      | MIT. Decided 2026-11-25. Keep `checkout-test-mcp`.                                                                                                                                          |
 | Q13 | Scenario reuse across targets           | Copy scenarios per site, or support selector overrides per profile.                                                          | Copy for v0.1. Add a `selectors` map per profile in v0.2 if duplication grows.                                                                                                                      |
 | Q14 | Telemetry                               | None, or opt-in.                                                                                                             | None.                                                                                                                                                                                               |
 

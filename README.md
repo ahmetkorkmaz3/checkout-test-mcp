@@ -171,4 +171,4 @@ Project rules: [CLAUDE.md](CLAUDE.md).
 
 ## License
 
-Apache-2.0
+MIT. See [LICENSE](LICENSE).

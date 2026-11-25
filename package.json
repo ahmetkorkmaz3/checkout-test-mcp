@@ -3,7 +3,25 @@
   "version": "0.1.0",
   "description": "MCP server that lets AI agents run end-to-end checkout and payment test scenarios against e-commerce test environments.",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "MIT",
+  "mcpName": "io.github.ahmetkorkmaz3/checkout-test-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ahmetkorkmaz3/checkout-test-mcp.git"
+  },
+  "homepage": "https://github.com/ahmetkorkmaz3/checkout-test-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/ahmetkorkmaz3/checkout-test-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "checkout",
+    "e2e",
+    "playwright",
+    "payments",
+    "testing"
+  ],
   "bin": {
     "checkout-test-mcp": "dist/index.js"
   },
@@ -12,6 +30,8 @@
     "scenarios",
     "test-data",
     "schemas",
+    "examples/demo-store/server.mjs",
+    "LICENSE",
     "checkout-test-mcp.config.example.yaml"
   ],
   "engines": {
