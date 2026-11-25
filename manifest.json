@@ -1,0 +1,52 @@
+{
+  "manifest_version": "0.3",
+  "name": "checkout-test-mcp",
+  "display_name": "Checkout Test",
+  "version": "0.1.0",
+  "description": "Run checkout and payment test scenarios on your test shop. Get a clear result for each run.",
+  "long_description": "Lets Claude run end-to-end checkout and payment test scenarios against test shops that you list in a config file. The server only opens hosts on your allow list and only uses published test cards. It starts a real browser, runs the scenario, and returns a structured result.",
+  "author": {
+    "name": "Ahmet Korkmaz"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ahmetkorkmaz3/checkout-test-mcp.git"
+  },
+  "homepage": "https://github.com/ahmetkorkmaz3/checkout-test-mcp#readme",
+  "support": "https://github.com/ahmetkorkmaz3/checkout-test-mcp/issues",
+  "license": "MIT",
+  "keywords": ["checkout", "payments", "e2e", "playwright", "testing"],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/dist/index.js",
+        "--config",
+        "${user_config.config_path}",
+        "--env-file",
+        "${user_config.env_file}"
+      ]
+    }
+  },
+  "user_config": {
+    "config_path": {
+      "type": "file",
+      "title": "Config file",
+      "description": "The checkout-test-mcp YAML config file. It lists your test targets and the hosts that are allowed.",
+      "required": true
+    },
+    "env_file": {
+      "type": "file",
+      "title": "Env file (optional)",
+      "description": "A .env file with the secrets that your config uses. Leave this empty if you do not use secrets.",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "runtimes": {
+      "node": ">=22.12"
+    }
+  }
+}

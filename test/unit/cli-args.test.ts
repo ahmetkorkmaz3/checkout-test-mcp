@@ -12,6 +12,10 @@ describe('parseCli', () => {
       envFile: '.env',
     });
   });
+  it('treats an unreplaced .mcpb placeholder as not set', () => {
+    expect(parseCli(['--env-file', ['$', '{user_config.env_file}'].join('')])).toEqual({ kind: 'serve' });
+  });
+
   it('treats an empty --env-file as not set', () => {
     expect(parseCli(['--env-file', ''])).toEqual({ kind: 'serve' });
   });

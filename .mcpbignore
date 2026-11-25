@@ -1,0 +1,10 @@
+# pack-mcpb.sh packs an allow list. These lines are a second guard for the root of the bundle.
+# The paths start with a slash so they never match files inside node_modules.
+/.env
+/.env.*
+/.git/
+/.superpowers/
+/.checkout-test-mcp/
+/test/
+/docs/
+/src/

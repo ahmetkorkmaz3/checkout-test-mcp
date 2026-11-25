@@ -8,6 +8,7 @@ export type CliCommand =
   | { kind: 'version' };
 
 const DEFAULT_DEMO_PORT = 4173;
+const UNREPLACED_PLACEHOLDER = /^\$\{user_config\.[^}]+\}$/;
 
 export function parseCli(argv: string[]): CliCommand {
   const { values, positionals } = parseArgs({
@@ -31,8 +32,10 @@ export function parseCli(argv: string[]): CliCommand {
   if (sub === undefined) {
     const cmd: CliCommand = { kind: 'serve' };
     if (values.config !== undefined) cmd.config = values.config;
-    // The .mcpb passes an empty value when the user leaves the field empty. That means not set.
-    if (values['env-file']) cmd.envFile = values['env-file'];
+    // The .mcpb host leaves the literal ${user_config.env_file} in the args when the user leaves
+    // the field empty. An empty value or an unreplaced placeholder both mean not set.
+    const envFile = values['env-file'];
+    if (envFile && !UNREPLACED_PLACEHOLDER.test(envFile)) cmd.envFile = envFile;
     return cmd;
   }
   if (sub === 'init') {

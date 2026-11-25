@@ -1,0 +1,38 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ahmetkorkmaz3/checkout-test-mcp",
+  "title": "Checkout Test",
+  "description": "Run checkout and payment test scenarios on test shops. Uses only published test cards.",
+  "repository": {
+    "url": "https://github.com/ahmetkorkmaz3/checkout-test-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/ahmetkorkmaz3/checkout-test-mcp#readme",
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "checkout-test-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--config",
+          "description": "Path to the checkout-test-mcp YAML config file.",
+          "format": "filepath",
+          "isRequired": true
+        },
+        {
+          "type": "named",
+          "name": "--env-file",
+          "description": "Path to a .env file with the secrets that the config uses.",
+          "format": "filepath"
+        }
+      ]
+    }
+  ]
+}
