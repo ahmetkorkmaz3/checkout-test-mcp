@@ -1,5 +1,11 @@
 # checkout-test-mcp
 
+[![CI](https://github.com/ahmetkorkmaz3/checkout-test-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ahmetkorkmaz3/checkout-test-mcp/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/checkout-test-mcp)](https://www.npmjs.com/package/checkout-test-mcp)
+[![Node.js](https://img.shields.io/node/v/checkout-test-mcp)](package.json)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.ahmetkorkmaz3%2Fcheckout--test--mcp-6e56cf)](https://registry.modelcontextprotocol.io/v0/servers?search=checkout-test-mcp)
+
 An MCP server that lets AI agents run end-to-end checkout and payment test scenarios against e-commerce **test environments**, and get structured results they can act on.
 
 > "Run the 3D Secure failure scenario on staging and tell me what broke."
@@ -7,6 +13,16 @@ An MCP server that lets AI agents run end-to-end checkout and payment test scena
 The agent calls `list_scenarios`, starts a run with `run_scenario`, reads the verdict with `get_run_result`, and checks a deploy with `compare_runs`. A failed checkout comes back as a result with a failing step, a category, likely causes, next actions, a screenshot, and the relevant console errors and network failures.
 
 Stdio transport. Scenarios in YAML. Playwright (Chromium or Google Chrome).
+
+## Why use it
+
+- **Results an agent can use.** Each failure has a category, likely causes, and next actions. The agent does not have to read a stack trace.
+- **Safe by default.** Only allowlisted hosts and published test cards. A production run needs your yes each time.
+- **Regression checks.** `compare_runs` shows what broke between two runs of the same scenario.
+- **No lost orders.** The same idempotency key never starts a second checkout, also after a restart.
+- **Agent-written tests.** `inspect_target` reads a new shop and suggests scenarios. `save_scenario` checks and saves them.
+
+Contents: [Safety](#safety) · [Quick start](#quick-start) · [Example result](#example-result) · [Tools](#tools) · [Scenarios](#scenarios) · [Contributing](#contributing)
 
 ## Safety
 
@@ -95,6 +111,30 @@ DEMO_STORE_BUGS=skip-3ds npx checkout-test-mcp demo-store
 Then ask the agent to compare the two runs.
 
 Other bug flags: `cookie-banner` shows a consent dialog over every page. `login-wall` removes the guest checkout.
+
+## Example result
+
+With the `skip-3ds` bug on, `card-3ds-challenge-fail` fails. `get_run_result` gives the agent this `failure` block:
+
+```json
+{
+  "step_id": "submit_payment",
+  "category": "element_not_found",
+  "expected": "3DS challenge frame with a \"Fail authentication\" button",
+  "actual": "Page navigated to /checkout/success. No challenge frame was present.",
+  "likely_causes": [
+    "The checkout skipped 3D Secure for a card that requires a challenge. This is a probable regression."
+  ],
+  "next_actions": [
+    {
+      "kind": "treat_as_regression",
+      "description": "Report that the order completed without 3DS. Include the screenshot and the POST /api/payments response."
+    }
+  ]
+}
+```
+
+The full result also has a screenshot, the page URL, console errors, and network failures. See [docs/tools.md](docs/tools.md#5-get_run_result).
 
 ## Claude Desktop extension
 
@@ -220,6 +260,10 @@ npm run smoke       # build and call the server over stdio
 ```
 
 Project rules: [CLAUDE.md](CLAUDE.md).
+
+## Contributing
+
+Bug reports, scenario ideas, and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before you open a pull request. To report a security problem, follow [SECURITY.md](SECURITY.md). Do not open a public issue for it.
 
 ## License
 

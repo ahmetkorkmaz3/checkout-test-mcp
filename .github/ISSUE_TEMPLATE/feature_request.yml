@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest a change, a scenario step, or support for a payment flow.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What do you want an agent to test or do? What stops it now?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Your idea for a solution. A new tool needs a discussion first, because the server keeps a small tool set.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Other solutions that you tried or thought about.

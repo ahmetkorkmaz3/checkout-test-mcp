@@ -4,6 +4,7 @@
   "description": "MCP server that lets AI agents run end-to-end checkout and payment test scenarios against e-commerce test environments.",
   "type": "module",
   "license": "MIT",
+  "author": "Ahmet Korkmaz",
   "mcpName": "io.github.ahmetkorkmaz3/checkout-test-mcp",
   "repository": {
     "type": "git",
@@ -15,11 +16,19 @@
   },
   "keywords": [
     "mcp",
+    "mcp-server",
     "model-context-protocol",
+    "ai-agents",
+    "claude",
     "checkout",
-    "e2e",
-    "playwright",
     "payments",
+    "3d-secure",
+    "e2e",
+    "e2e-testing",
+    "test-automation",
+    "regression-testing",
+    "ecommerce",
+    "playwright",
     "testing"
   ],
   "bin": {

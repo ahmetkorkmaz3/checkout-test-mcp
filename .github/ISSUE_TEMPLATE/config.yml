@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/ahmetkorkmaz3/checkout-test-mcp/security/advisories/new
+    about: Report it in private. Do not open a public issue.
+  - name: Read the tool definitions
+    url: https://github.com/ahmetkorkmaz3/checkout-test-mcp/blob/main/docs/tools.md
+    about: Inputs, outputs, and error codes of all tools.
