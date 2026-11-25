@@ -90,6 +90,8 @@ export const ServerConfig = z
     authoring: AuthoringConfig.optional(),
     /** A dotenv file for secrets. Relative to the config folder. Empty means not set. */
     env_file: z.string().optional(),
+    /** "auto" uses Playwright Chromium, and the installed Google Chrome when Chromium is missing. */
+    browser: z.enum(['auto', 'chromium', 'chrome']).default('auto'),
   })
   .strict();
 export type ServerConfig = z.infer<typeof ServerConfig>;

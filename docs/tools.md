@@ -516,12 +516,18 @@ server.registerTool(
         screenshots: z.array(z.object({ step_id: z.string(), path: z.string(), uri: z.string() })),
         trace_path: z.string().nullable(),
       }),
+      browser: z
+        .object({ name: z.enum(['chromium', 'chrome']), version: z.string() })
+        .nullable()
+        .describe('The browser of the run. null until the browser starts.'),
     }),
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   },
   handler,
 );
 ```
+
+`browser.name` is `chromium` for Playwright Chromium and `chrome` for the installed Google Chrome. `compare_runs` adds a warning when two runs used different browsers or different major versions. A run record from v0.1 has no browser, so the field is `null`. If no browser can start, the run ends with verdict `error`, category `browser_error`, and a message that starts with `No browser found.`
 
 `blocked_requests` lists each blocked URL once for each step. For an https request or a WebSocket that the guard proxy blocked, the URL is `https://<host>:<port>/` (no port for 443), because a tunnel has no path.
 

@@ -142,6 +142,15 @@ export function classify(input: ClassifyInput): Classified {
       });
       break;
     case 'browser_error':
+      if (input.message?.startsWith('No browser found.')) {
+        causes.push('No browser is available on the machine that runs the MCP server.');
+        actions.push({
+          kind: 'ask_human',
+          description:
+            'Ask a human to install Google Chrome, or to run "npx checkout-test-mcp init", and to restart the MCP server.',
+        });
+        break;
+      }
       if (input.message?.includes("Executable doesn't exist")) {
         causes.push('The Playwright browser is not installed on the machine that runs the MCP server.');
         actions.push({

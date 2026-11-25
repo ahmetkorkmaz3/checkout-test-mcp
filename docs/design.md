@@ -110,6 +110,7 @@ max_parallel_runs: 1
 scenario_dirs: [./scenarios]
 test_data_dir: ./test-data
 env_file: ./.env # optional. Secrets as KEY=value lines. See below.
+browser: auto # optional. auto, chromium, or chrome. See 3.2.
 
 targets:
   demo-local:
@@ -156,6 +157,16 @@ production_hosts: # refused for test targets, even if listed above. See section 
 - The `--env-file` flag wins over the config field. A relative flag value is relative to the working folder. A relative config value is relative to the config folder. An empty value means "not set".
 - The server loads the file after it reads the config and before it builds the run and inspection managers. A variable that is already set keeps its value.
 - A value from the file is handled like an env var: the redactor registers it, and it never appears in a log, an error, or a result. The log line `env file loaded` has the path and the number of keys. An error has the path and a line number only.
+
+### 3.2 Browser choice
+
+`browser` picks the browser for runs and inspections. Both use `openGuardedContext`, so both follow this field.
+
+- `auto` (default) starts Playwright Chromium. If Chromium is not installed, it starts the installed Google Chrome (`channel: 'chrome'`). Any other launch error goes up and does not start Chrome.
+- `chromium` and `chrome` start that browser only and never fall back.
+- Each launch keeps the proxy, the `bypass` value, and the WebRTC argument of the host guard. The fallback does not weaken the guard.
+- The run record stores `browser: { name, version }`. A record of v0.1 has no such field and loads with `browser: null`, so a restart still finds each run.
+- If no browser starts, the error message starts with `No browser found.` and names both fixes.
 
 ## 4. Scenario format
 

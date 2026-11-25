@@ -6,6 +6,7 @@ import { RunId, RunStatus, Verdict } from '../schemas/common.js';
 import {
   Artifacts,
   BlockedRequest,
+  BrowserInfo,
   ConsoleError,
   Failure,
   NetworkFailure,
@@ -54,6 +55,7 @@ export const GetRunResultOutput = z.object({
     .array(BlockedRequest)
     .describe('Requests the host guard stopped. Often a missing third_party_hosts entry.'),
   artifacts: Artifacts,
+  browser: BrowserInfo.nullable().describe('The browser of the run. null until the browser starts.'),
 });
 type Output = z.infer<typeof GetRunResultOutput>;
 
@@ -91,6 +93,7 @@ export function toRunView(r: RunRecord, detail: 'summary' | 'full'): Output {
       : r.network_failures.filter((n) => n.relevant).slice(0, SUMMARY_LIMIT),
     blocked_requests: full ? r.blocked_requests : r.blocked_requests.slice(0, SUMMARY_LIMIT),
     artifacts: r.artifacts,
+    browser: r.browser,
   };
 }
 

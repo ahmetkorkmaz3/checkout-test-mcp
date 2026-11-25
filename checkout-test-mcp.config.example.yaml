@@ -11,6 +11,9 @@ headless: true
 # The --env-file flag wins over this field. A variable already set in the shell wins over the file.
 # env_file: ./.env
 
+# Optional. auto uses Playwright Chromium, and the installed Google Chrome if Chromium is missing.
+# browser: auto # or chromium, or chrome
+
 targets:
   demo-local:
     description: Bundled demo store on this machine. Start it with "npx checkout-test-mcp demo-store".
