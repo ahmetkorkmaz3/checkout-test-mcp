@@ -1,6 +1,6 @@
 {
   "name": "checkout-test-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "MCP server that lets AI agents run end-to-end checkout and payment test scenarios against e-commerce test environments.",
   "type": "module",
   "license": "MIT",
