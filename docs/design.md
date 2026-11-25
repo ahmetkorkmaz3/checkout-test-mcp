@@ -479,4 +479,6 @@ A tag `vX.Y.Z` starts `.github/workflows/release.yml`. The workflow runs in this
 3. It packs the Desktop extension (`npm run pack:mcpb`) and creates the GitHub release with the `.mcpb` file.
 4. It downloads the pinned `mcp-publisher` release from `modelcontextprotocol/registry`, checks the SHA-256 hash, logs in with `github-oidc`, and publishes `server.json`.
 
+**Recovery.** npm publishes first. If the GitHub release or the registry step fails, the npm version is already public, and a re-run of the same tag fails at `npm publish`. Start the workflow by hand (`workflow_dispatch`) on the tag: the npm step skips itself when the version already exists, so only the later steps run. If the fix needs a code change, bump the patch version and tag again, because npm never lets you publish a version twice.
+
 To upgrade `mcp-publisher`, change `MCP_PUBLISHER_VERSION` and `MCP_PUBLISHER_SHA256` together. Every action in the workflows is pinned to a full commit SHA.

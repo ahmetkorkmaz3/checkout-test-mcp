@@ -1,4 +1,12 @@
-import { type Browser, type BrowserContext, chromium, type Frame, type Route, selectors } from 'playwright';
+import {
+  type Browser,
+  type BrowserContext,
+  type BrowserType,
+  chromium,
+  type Frame,
+  type Route,
+  selectors,
+} from 'playwright';
 import { isHostAllowed, isUrlAllowed } from '../safety/hosts.js';
 import type { ResolvedConfig, TargetConfig } from '../schemas/config.js';
 import type { BrowserInfo } from '../schemas/run.js';
@@ -16,6 +24,8 @@ export interface GuardedContextInput {
    * each request that the proxy refuses. A proxy URL of an https request has no path.
    */
   onBlocked: (url: string, frame: Frame | null, isNavigation: boolean) => void;
+  /** Only for tests: a stand-in for the Playwright launcher. */
+  launcher?: Pick<BrowserType, 'launch'>;
 }
 
 export interface GuardedContext {
@@ -53,7 +63,7 @@ export async function openGuardedContext(input: GuardedContextInput): Promise<Gu
         // WebRTC sends UDP (for example STUN) past an HTTP proxy. This policy allows proxied traffic only.
         args: ['--force-webrtc-ip-handling-policy=disable_non_proxied_udp'],
       },
-      chromium,
+      input.launcher ?? chromium,
     );
     browser = launched.browser;
     const context = await browser.newContext({

@@ -49,10 +49,10 @@ GitHub keeps the old commits of a pull request reachable by their SHA, also afte
 
 - Tool: `git filter-repo` with a `--replace-text` file and a `--replace-message` file. Install it with Homebrew.
 - Work on a fresh mirror clone, not on the working copy.
-- Rules: every case of the first customer name becomes `acme`. The real product path becomes `/urun/example-tabak-19-cm`. A local path `/home/<name>/...` becomes `~/work/...`.
+- Rules: every case of the first customer name becomes `acme`. The real product path becomes `/urun/example-tabak-19-cm`. A macOS home path becomes `~/work/...`.
 - Keep only `main`. Drop the other branches.
 - Check before the push: scan every blob and every commit message of the new history with the pattern list below. The scan must find zero hits. `npm ci && npm test` must pass on the new `main`.
-- Pattern list: the customer name (any case), the real product path, `/home/`, the work email domain, `sk_live`, `pk_live`. Published test card numbers are allowed.
+- Pattern list: the customer name (any case), the real product path, a macOS home path prefix, the work email domain, `sk_live`, `pk_live`. Published test card numbers are allowed.
 - The replace file and the pattern list name private data. They stay in the session scratchpad and never enter a repo. The controller writes them, not a subagent.
 - Before the rewrite, the same scan runs on the files that `npm pack` ships (`scenarios`, `test-data`, `schemas`, `examples/demo-store`).
 - The private repo gets the name `checkout-test-mcp-private`. The new public repo gets `checkout-test-mcp`. The user does the rename and the archive, or approves each one.
