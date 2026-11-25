@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a problem with the server, a tool, or a scenario.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste a secret, a password, a real card number, or a real customer address. For a security problem, use the Security tab instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `npx checkout-test-mcp --version`, or the version in package.json.
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: MCP client
+      options:
+        - Claude Code
+        - Claude Desktop (npx)
+        - Claude Desktop (.mcpb extension)
+        - MCP Inspector
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Node.js version, and browser (Chromium or Chrome).
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The tool call, the result or error, and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: If possible, reproduce the problem with the bundled demo store.
+      placeholder: |
+        1. Start the demo store with `npx checkout-test-mcp demo-store`.
+        2. Call run_scenario with ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or result JSON
+      description: Remove host names and personal data first.
+      render: text
