@@ -84,6 +84,8 @@ npm test                                                  # vitest: unit + integ
 npm run test:e2e                                          # real Chromium against examples/demo-store
 npm run schema                                            # regenerate schemas/scenario.schema.json
 npm run smoke                                             # build, start over stdio, call list_scenarios
+node dist/index.js init --dir ./my-tests                  # starter config, demo scenarios, Chromium (--skip-browser)
+node dist/index.js demo-store --port 4173                 # demo store from the built package
 ```
 
 Update `test/integration/__snapshots__/tools-list.json` with `npx vitest run -u` only after you review the diff.
