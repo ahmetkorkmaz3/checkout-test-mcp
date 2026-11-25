@@ -8,3 +8,4 @@ checkout-test-mcp.config.yaml
 !test/fixtures/shop-src/.env
 !test/fixtures/shop-src/node_modules/
 *.mcpb
+.DS_Store
