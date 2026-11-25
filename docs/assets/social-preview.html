@@ -1,0 +1,47 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>checkout-test-mcp social preview</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { width: 1280px; height: 640px; overflow: hidden; background: #0d1117;
+    font-family: -apple-system, "SF Pro Display", "Segoe UI", Helvetica, Arial, sans-serif; color: #e6edf3; }
+  .wrap { position: relative; width: 100%; height: 100%; padding: 72px 80px;
+    background: radial-gradient(900px 500px at 100% 0%, rgba(110,86,207,.28), transparent 60%),
+                radial-gradient(700px 400px at 0% 100%, rgba(46,160,67,.16), transparent 60%); }
+  .grid { display: grid; grid-template-columns: 1fr 470px; gap: 56px; align-items: center; height: 100%; }
+  .tag { display: inline-block; font: 600 18px/1 ui-monospace, "SF Mono", Menlo, monospace; color: #b9a8ff;
+    border: 1px solid rgba(185,168,255,.4); border-radius: 999px; padding: 9px 16px; margin-bottom: 28px; }
+  h1 { white-space: nowrap; font: 700 54px/1.05 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: -1.5px; margin-bottom: 24px; }
+  h1 span { color: #7ee787; }
+  p.lead { font-size: 30px; line-height: 1.35; color: #c9d1d9; margin-bottom: 36px; }
+  .quote { font-size: 22px; line-height: 1.4; color: #8b949e; border-left: 4px solid #6e56cf; padding-left: 18px; font-style: italic; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 16px; padding: 26px 28px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.45); font: 19px/1.55 ui-monospace, "SF Mono", Menlo, monospace; }
+  .card .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px;
+    font-family: -apple-system, "Segoe UI", Helvetica, sans-serif; font-size: 17px; color: #8b949e; }
+  .pill { font-weight: 700; color: #ffa198; background: rgba(248,81,73,.15); border: 1px solid rgba(248,81,73,.45);
+    border-radius: 999px; padding: 5px 14px; }
+  .k { color: #79c0ff; } .s { color: #a5d6ff; } .o { color: #ffa657; } .d { color: #8b949e; }
+  .foot { position: absolute; left: 80px; right: 80px; bottom: 44px; display: flex; gap: 28px;
+    font-size: 19px; color: #8b949e; }
+  .foot b { color: #c9d1d9; font-weight: 600; }
+</style></head>
+<body><div class="wrap">
+  <div class="grid">
+    <div>
+      <div class="tag">MCP server</div>
+      <h1>checkout-<span>test</span>-mcp</h1>
+      <p class="lead">AI agents run end-to-end checkout and payment tests on your test shops.</p>
+      <div class="quote">“Run the 3D Secure failure scenario on staging and tell me what broke.”</div>
+    </div>
+    <div class="card">
+      <div class="head"><span>get_run_result</span><span class="pill">failed</span></div>
+      <div><span class="k">"step_id"</span>: <span class="s">"submit_payment"</span>,</div>
+      <div><span class="k">"category"</span>: <span class="s">"element_not_found"</span>,</div>
+      <div><span class="k">"likely_cause"</span>:</div>
+      <div class="d">&nbsp;&nbsp;"Checkout skipped 3D Secure."</div>
+      <div><span class="k">"next_action"</span>:</div>
+      <div>&nbsp;&nbsp;<span class="o">"treat_as_regression"</span></div>
+    </div>
+  </div>
+  <div class="foot"><span><b>Safe by default</b> · test cards only</span><span><b>Playwright</b> · Chromium or Chrome</span><span><b>npx</b> checkout-test-mcp init</span></div>
+</div></body></html>
