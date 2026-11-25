@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "checkout-test-mcp",
   "display_name": "Checkout Test",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Run checkout and payment test scenarios on your test shop. Get a clear result for each run.",
   "long_description": "Lets Claude run end-to-end checkout and payment test scenarios against test shops that you list in a config file. The server only opens hosts on your allow list and only uses published test cards. It starts a real browser, runs the scenario, and returns a structured result. The server needs Google Chrome or Playwright Chromium on your computer. Run npx checkout-test-mcp init to install Chromium.",
   "author": {
