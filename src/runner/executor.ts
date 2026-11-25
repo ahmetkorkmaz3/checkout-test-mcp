@@ -45,6 +45,8 @@ export interface ExecuteInput {
   redactor: Redactor;
   /** Live card numbers of this run. The card guard lets them through. Empty for a test card run. */
   allowedCardNumbers: ReadonlySet<string>;
+  /** Called once when the browser has started, so the run record shows it before the run ends. */
+  onBrowser?: (info: BrowserInfo) => void;
   onProgress: (p: { completed_steps: number; current_step_id: string | null; steps: StepResult[] }) => void;
 }
 
@@ -557,6 +559,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       return;
     }
     browserInfo = guarded.info;
+    input.onBrowser?.(guarded.info);
     closeGuarded = guarded.close;
     proxyErrorToken = guarded.proxyErrorToken;
     context = guarded.context;

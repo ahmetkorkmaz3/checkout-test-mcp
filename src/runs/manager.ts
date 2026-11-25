@@ -679,6 +679,11 @@ export class RunManager {
         ...(p.httpCredentials ? { httpCredentials: p.httpCredentials } : {}),
         redactor: p.redactor,
         allowedCardNumbers: p.allowedCardNumbers,
+        onBrowser: (info) => {
+          record = { ...record, browser: info };
+          void store.save(record);
+          this.events.emit(record.run_id);
+        },
         onProgress: (prog) => {
           record = {
             ...record,
