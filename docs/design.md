@@ -109,6 +109,7 @@ runs_dir: .checkout-test-mcp/runs # results, screenshots, traces
 max_parallel_runs: 1
 scenario_dirs: [./scenarios]
 test_data_dir: ./test-data
+env_file: ./.env # optional. Secrets as KEY=value lines. See below.
 
 targets:
   demo-local:
@@ -147,6 +148,14 @@ production_hosts: # refused for test targets, even if listed above. See section 
   - example-shop.com
   - www.example-shop.com
 ```
+
+### 3.1 Env file
+
+`env_file` names a dotenv file with `KEY=value` lines. The Claude Desktop extension cannot pass the shell environment to the server, so a user puts secrets in this file.
+
+- The `--env-file` flag wins over the config field. A relative flag value is relative to the working folder. A relative config value is relative to the config folder. An empty value means "not set".
+- The server loads the file after it reads the config and before it builds the run and inspection managers. A variable that is already set keeps its value.
+- A value from the file is handled like an env var: the redactor registers it, and it never appears in a log, an error, or a result. The log line `env file loaded` has the path and the number of keys. An error has the path and a line number only.
 
 ## 4. Scenario format
 

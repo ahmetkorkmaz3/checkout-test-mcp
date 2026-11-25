@@ -31,7 +31,8 @@ export function parseCli(argv: string[]): CliCommand {
   if (sub === undefined) {
     const cmd: CliCommand = { kind: 'serve' };
     if (values.config !== undefined) cmd.config = values.config;
-    if (values['env-file'] !== undefined) cmd.envFile = values['env-file'];
+    // The .mcpb passes an empty value when the user leaves the field empty. That means not set.
+    if (values['env-file']) cmd.envFile = values['env-file'];
     return cmd;
   }
   if (sub === 'init') {

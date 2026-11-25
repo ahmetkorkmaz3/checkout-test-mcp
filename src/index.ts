@@ -62,7 +62,7 @@ async function main(): Promise<void> {
     case 'serve': {
       const logger = createLogger();
       const configPath = cmd.config ?? process.env.CHECKOUT_MCP_CONFIG ?? 'checkout-test-mcp.config.yaml';
-      const deps = await bootstrap({ configPath, logger });
+      const deps = await bootstrap({ configPath, logger, ...(cmd.envFile ? { envFile: cmd.envFile } : {}) });
       serveStdio(() => createServer(deps), {
         onerror: (err) => logger.error('transport error', { error: err.message }),
       });

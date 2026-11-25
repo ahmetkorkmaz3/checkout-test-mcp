@@ -7,9 +7,13 @@ scenario_dirs: [./scenarios]
 test_data_dir: ./test-data
 headless: true
 
+# Optional. A dotenv file with secrets (KEY=value lines). Relative to this file.
+# The --env-file flag wins over this field. A variable already set in the shell wins over the file.
+# env_file: ./.env
+
 targets:
   demo-local:
-    description: Bundled demo store on this machine. Start it with "npm run demo-store".
+    description: Bundled demo store on this machine. Start it with "npx checkout-test-mcp demo-store".
     profile: demo-store
     base_url: http://localhost:4173
     allowed_hosts: [localhost]

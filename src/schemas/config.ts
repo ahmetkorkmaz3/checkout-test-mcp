@@ -88,6 +88,8 @@ export const ServerConfig = z
     targets: z.record(z.string().regex(/^[a-z0-9][a-z0-9-]*$/), TargetConfig),
     production_hosts: z.array(HostPattern).default([]),
     authoring: AuthoringConfig.optional(),
+    /** A dotenv file for secrets. Relative to the config folder. Empty means not set. */
+    env_file: z.string().optional(),
   })
   .strict();
 export type ServerConfig = z.infer<typeof ServerConfig>;

@@ -12,6 +12,9 @@ describe('parseCli', () => {
       envFile: '.env',
     });
   });
+  it('treats an empty --env-file as not set', () => {
+    expect(parseCli(['--env-file', ''])).toEqual({ kind: 'serve' });
+  });
   it('parses init', () => {
     expect(parseCli(['init', '--dir', 'x', '--skip-browser'])).toEqual({
       kind: 'init',
