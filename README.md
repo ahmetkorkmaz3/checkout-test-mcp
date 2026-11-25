@@ -6,7 +6,7 @@ An MCP server that lets AI agents run end-to-end checkout and payment test scena
 
 The agent calls `list_scenarios`, starts a run with `run_scenario`, reads the verdict with `get_run_result`, and checks a deploy with `compare_runs`. A failed checkout comes back as a result with a failing step, a category, likely causes, next actions, a screenshot, and the relevant console errors and network failures.
 
-Status: v0.1. Stdio transport. Scenarios in YAML. Playwright (Chromium).
+Stdio transport. Scenarios in YAML. Playwright (Chromium or Google Chrome).
 
 ## Safety
 
@@ -48,31 +48,81 @@ Details: [docs/design.md, section 12](docs/design.md#12-production-targets).
 
 Requirements: Node.js 22.12 or later (26 recommended).
 
-```bash
-npm ci
-npx playwright install chromium
-cp checkout-test-mcp.config.example.yaml checkout-test-mcp.config.yaml
-npm run build
-npm run demo-store
-```
+1. Make a folder for your checkout tests and set it up:
 
-Add the server to Claude Code (run in this folder):
+   ```bash
+   mkdir checkout-tests && cd checkout-tests
+   npx -y checkout-test-mcp init
+   ```
 
-```bash
-claude mcp add checkout-test -- node dist/index.js --config ./checkout-test-mcp.config.yaml
-```
+   The command writes a config file, example scenarios, and test data. It also installs Chromium. Use `--skip-browser` to skip the browser install.
 
-Then ask: "Run card-3ds-challenge-fail on demo-local."
+2. Add the server to your client. Use the absolute path of the config file.
+
+   Claude Desktop (`claude_desktop_config.json`):
+
+   ```json
+   {
+     "mcpServers": {
+       "checkout-test": {
+         "command": "npx",
+         "args": ["-y", "checkout-test-mcp", "--config", "/absolute/path/to/checkout-test-mcp.config.yaml"]
+       }
+     }
+   }
+   ```
+
+   Claude Code:
+
+   ```bash
+   claude mcp add checkout-test -- npx -y checkout-test-mcp --config /absolute/path/to/checkout-test-mcp.config.yaml
+   ```
+
+3. Start the bundled demo store and ask the agent to run `list_scenarios`:
+
+   ```bash
+   npx checkout-test-mcp demo-store
+   ```
+
+   The demo store runs on http://localhost:4173. Then ask: "Run card-3ds-challenge-fail on demo-local."
 
 To see regression detection, restart the demo store with a bug and run the scenario again:
 
 ```bash
-DEMO_STORE_BUGS=skip-3ds npm run demo-store
+DEMO_STORE_BUGS=skip-3ds npx checkout-test-mcp demo-store
 ```
 
 Then ask the agent to compare the two runs.
 
-Other bug flags: `cookie-banner` shows a consent dialog over every page. `login-wall` removes the guest checkout. The checkout probe tests use them.
+Other bug flags: `cookie-banner` shows a consent dialog over every page. `login-wall` removes the guest checkout.
+
+## Claude Desktop extension
+
+You can install the server as a Desktop extension. Download `checkout-test-mcp-<version>.mcpb` from the [releases page](https://github.com/ahmetkorkmaz3/checkout-test-mcp/releases) and open the file. Claude Desktop asks for the config file and, optionally, an env file.
+
+The extension needs Google Chrome or Playwright Chromium on your computer. Run `npx checkout-test-mcp init` to install Chromium.
+
+## Browser
+
+The `browser` field of the config picks the browser:
+
+| Value      | Meaning                                                           |
+| ---------- | ----------------------------------------------------------------- |
+| `auto`     | Default. Uses Playwright Chromium, then Google Chrome.            |
+| `chromium` | Uses Playwright Chromium only.                                    |
+| `chrome`   | Uses Google Chrome only.                                          |
+
+In `auto` mode, the server switches to Chrome only when Chromium is not installed. Each run result shows `browser: { name, version }`.
+
+## Secrets and `env_file`
+
+Secrets come from environment variables. The config can also name a dotenv file with `KEY=value` lines:
+
+```yaml
+env_file: ./.env # relative to the folder of the config file
+```
+
+The CLI flag `--env-file <path>` wins over the config field. A variable that is already set in the environment wins over the file. An error about the file names the path and the line number only, never a value. Keep the file out of version control.
 
 ## Tools
 
@@ -84,6 +134,8 @@ Other bug flags: `cookie-banner` shows a consent dialog over every page. `login-
 | `compare_runs`   | Diffs two runs of the same scenario and reports regressions, fixes, and slower steps.                                                                                      |
 | `inspect_target` | Reads a test target (site and, when configured, source code) and suggests scenarios with evidence. One tool starts the job and long polls it with the same key.           |
 | `save_scenario`  | Checks and writes a scenario, fragment, or test data file, and can start a validation run.                                                                                 |
+
+The server also has two prompts: `setup_checkout_tests` and `create_scenario`.
 
 Full definitions: [docs/tools.md](docs/tools.md).
 

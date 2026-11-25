@@ -469,3 +469,14 @@ One constant, `PRODUCTION_WARNING` in `src/safety/production.ts`, holds the warn
 
 - No automatic cancel or refund of live orders. The user handles them.
 - The probe of `inspect_target` still never clicks a pay button.
+
+## 13. Release
+
+A tag `vX.Y.Z` starts `.github/workflows/release.yml`. The workflow runs in this order:
+
+1. It checks that the tag equals the version in `package.json`, `manifest.json`, and `server.json`. It runs the CI checks and the e2e tests.
+2. It publishes the npm package with trusted publishing (OIDC) and provenance. There is no npm token. The workflow needs npm 11.5.1 or later, so it pins an exact npm version.
+3. It packs the Desktop extension (`npm run pack:mcpb`) and creates the GitHub release with the `.mcpb` file.
+4. It downloads the pinned `mcp-publisher` release from `modelcontextprotocol/registry`, checks the SHA-256 hash, logs in with `github-oidc`, and publishes `server.json`.
+
+To upgrade `mcp-publisher`, change `MCP_PUBLISHER_VERSION` and `MCP_PUBLISHER_SHA256` together. Every action in the workflows is pinned to a full commit SHA.

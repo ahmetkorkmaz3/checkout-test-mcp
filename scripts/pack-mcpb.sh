@@ -10,6 +10,8 @@ version="$(node -p "require('./package.json').version")"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 
+# Remove old output first, so a stale file cannot ship.
+rm -rf dist
 npm run build
 
 mkdir -p "$stage/examples/demo-store"
