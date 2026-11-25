@@ -88,6 +88,10 @@ export const ServerConfig = z
     targets: z.record(z.string().regex(/^[a-z0-9][a-z0-9-]*$/), TargetConfig),
     production_hosts: z.array(HostPattern).default([]),
     authoring: AuthoringConfig.optional(),
+    /** A dotenv file for secrets. Relative to the config folder. Empty means not set. */
+    env_file: z.string().optional(),
+    /** "auto" uses Playwright Chromium, and the installed Google Chrome when Chromium is missing. */
+    browser: z.enum(['auto', 'chromium', 'chrome']).default('auto'),
   })
   .strict();
 export type ServerConfig = z.infer<typeof ServerConfig>;

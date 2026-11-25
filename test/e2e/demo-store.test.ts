@@ -340,6 +340,7 @@ describe('demo store', () => {
     });
     expect(res.structuredContent.failure, res.structuredContent.summary).toBeNull();
     expect(res.structuredContent.verdict).toBe('passed');
+    expect(res.structuredContent.browser.name).toMatch(/^(chromium|chrome)$/);
     expect(res.structuredContent.outcome_checks.every((o: { status: string }) => o.status === 'passed')).toBe(
       true,
     );

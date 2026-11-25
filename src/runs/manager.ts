@@ -605,6 +605,7 @@ export class RunManager {
       network_failures: [],
       blocked_requests: [],
       artifacts: { run_dir: this.deps.store.runDir(runId), screenshots: [], trace_path: null },
+      browser: null,
     };
     record.summary = buildSummary(record);
     return { record, loaded, target, steps, outcome, redactor, allowedCardNumbers, httpCredentials };
@@ -678,6 +679,11 @@ export class RunManager {
         ...(p.httpCredentials ? { httpCredentials: p.httpCredentials } : {}),
         redactor: p.redactor,
         allowedCardNumbers: p.allowedCardNumbers,
+        onBrowser: (info) => {
+          record = { ...record, browser: info };
+          void store.save(record);
+          this.events.emit(record.run_id);
+        },
         onProgress: (prog) => {
           record = {
             ...record,
@@ -716,6 +722,7 @@ export class RunManager {
           screenshots: out.screenshots,
           trace_path: out.trace_path,
         },
+        browser: out.browser ?? null,
       };
     } catch (err) {
       logger.error('run crashed', {

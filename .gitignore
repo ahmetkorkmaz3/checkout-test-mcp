@@ -7,3 +7,4 @@ checkout-test-mcp.config.yaml
 # The code scan fixture needs a fake .env and node_modules in git.
 !test/fixtures/shop-src/.env
 !test/fixtures/shop-src/node_modules/
+*.mcpb

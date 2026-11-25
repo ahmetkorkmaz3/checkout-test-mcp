@@ -10,6 +10,7 @@ import type { FailureCategory, Verdict } from '../schemas/common.js';
 import type { ResolvedConfig, TargetConfig } from '../schemas/config.js';
 import type {
   BlockedRequest,
+  BrowserInfo,
   ConsoleError,
   Failure,
   NetworkFailure,
@@ -38,12 +39,14 @@ export interface ExecuteInput {
   outcome: OutcomeCheck[];
   target: TargetConfig;
   targetName: string;
-  config: Pick<ResolvedConfig, 'production_hosts' | 'headless'>;
+  config: Pick<ResolvedConfig, 'production_hosts' | 'headless' | 'browser'>;
   options: RunOptions;
   httpCredentials?: { username: string; password: string };
   redactor: Redactor;
   /** Live card numbers of this run. The card guard lets them through. Empty for a test card run. */
   allowedCardNumbers: ReadonlySet<string>;
+  /** Called once when the browser has started, so the run record shows it before the run ends. */
+  onBrowser?: (info: BrowserInfo) => void;
   onProgress: (p: { completed_steps: number; current_step_id: string | null; steps: StepResult[] }) => void;
 }
 
@@ -57,6 +60,8 @@ export interface ExecuteOutput {
   blocked_requests: BlockedRequest[];
   screenshots: { step_id: string; path: string; uri: string }[];
   trace_path: string | null;
+  /** null when the browser did not start. */
+  browser?: BrowserInfo | null;
 }
 
 /** A step or outcome check did not pass. */
@@ -118,6 +123,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
   let blockedNavigation: string | null = null;
   let runTimedOut = false;
   let tracePath: string | null = null;
+  let browserInfo: BrowserInfo | null = null;
   /** Values read from responses by "capture". Never stored or returned. */
   const captured = new Map<string, string>();
 
@@ -552,6 +558,8 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
       await guarded.close();
       return;
     }
+    browserInfo = guarded.info;
+    input.onBrowser?.(guarded.info);
     closeGuarded = guarded.close;
     proxyErrorToken = guarded.proxyErrorToken;
     context = guarded.context;
@@ -770,6 +778,7 @@ export async function executeRun(input: ExecuteInput): Promise<ExecuteOutput> {
     blocked_requests: blocked,
     screenshots,
     trace_path: tracePath,
+    browser: browserInfo,
   });
 }
 

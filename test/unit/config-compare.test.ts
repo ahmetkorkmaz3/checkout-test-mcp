@@ -240,11 +240,34 @@ function record(over: Partial<RunRecord>): RunRecord {
     network_failures: [],
     blocked_requests: [],
     artifacts: { run_dir: '/tmp', screenshots: [], trace_path: null },
+    browser: null,
     ...over,
   };
 }
 
 describe('compare', () => {
+  it('warns when the runs used different browsers', () => {
+    const b = record({ browser: { name: 'chromium', version: '140.0.1' } });
+    const c = record({ run_id: 'run_bbbbbbbbbbbbbbbb', browser: { name: 'chrome', version: '141.0.2' } });
+    expect(compareRuns(b, c, 50).warnings).toContain(
+      'The runs used different browsers: chromium 140.0.1 and chrome 141.0.2.',
+    );
+  });
+
+  it('warns for a different major version only', () => {
+    const b = record({ browser: { name: 'chrome', version: '140.0.1' } });
+    const same = record({ run_id: 'run_bbbbbbbbbbbbbbbb', browser: { name: 'chrome', version: '140.9.9' } });
+    const other = record({ run_id: 'run_cccccccccccccccc', browser: { name: 'chrome', version: '141.0.0' } });
+    expect(compareRuns(b, same, 50).warnings.some((w) => w.includes('browsers'))).toBe(false);
+    expect(compareRuns(b, other, 50).warnings.some((w) => w.includes('browsers'))).toBe(true);
+  });
+
+  it('does not warn when one run has no browser', () => {
+    const b = record({ browser: null });
+    const c = record({ run_id: 'run_bbbbbbbbbbbbbbbb', browser: { name: 'chrome', version: '141.0.2' } });
+    expect(compareRuns(b, c, 50).warnings.some((w) => w.includes('browsers'))).toBe(false);
+  });
+
   it('reports no_change for equal runs', () => {
     const r = compareRuns(record({}), record({ run_id: 'run_bbbbbbbbbbbbbbbb' }), 50);
     expect(r.verdict).toBe('no_change');

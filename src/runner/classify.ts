@@ -142,6 +142,20 @@ export function classify(input: ClassifyInput): Classified {
       });
       break;
     case 'browser_error':
+      if (input.message?.startsWith('No browser found.')) {
+        causes.push('No browser is available on the machine that runs the MCP server.');
+        // The text comes from launchBrowser. Each mode names the browser that it needs.
+        const needsChrome = input.message.includes('Google Chrome is not installed');
+        const needsChromium = input.message.includes('Playwright Chromium is not installed');
+        const description =
+          needsChrome && !needsChromium
+            ? 'Ask a human to install Google Chrome and to restart the MCP server.'
+            : needsChromium && !needsChrome
+              ? 'Ask a human to run "npx checkout-test-mcp init" and to restart the MCP server.'
+              : 'Ask a human to install Google Chrome, or to run "npx checkout-test-mcp init", and to restart the MCP server.';
+        actions.push({ kind: 'ask_human', description });
+        break;
+      }
       if (input.message?.includes("Executable doesn't exist")) {
         causes.push('The Playwright browser is not installed on the machine that runs the MCP server.');
         actions.push({

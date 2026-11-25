@@ -3,7 +3,25 @@
   "version": "0.1.0",
   "description": "MCP server that lets AI agents run end-to-end checkout and payment test scenarios against e-commerce test environments.",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "MIT",
+  "mcpName": "io.github.ahmetkorkmaz3/checkout-test-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ahmetkorkmaz3/checkout-test-mcp.git"
+  },
+  "homepage": "https://github.com/ahmetkorkmaz3/checkout-test-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/ahmetkorkmaz3/checkout-test-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "checkout",
+    "e2e",
+    "playwright",
+    "payments",
+    "testing"
+  ],
   "bin": {
     "checkout-test-mcp": "dist/index.js"
   },
@@ -12,6 +30,8 @@
     "scenarios",
     "test-data",
     "schemas",
+    "examples/demo-store/server.mjs",
+    "LICENSE",
     "checkout-test-mcp.config.example.yaml"
   ],
   "engines": {
@@ -27,7 +47,8 @@
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "schema": "tsx scripts/generate-schema.ts",
     "demo-store": "node examples/demo-store/server.mjs",
-    "smoke": "npm run build && tsx scripts/smoke-stdio.ts"
+    "smoke": "npm run build && tsx scripts/smoke-stdio.ts",
+    "pack:mcpb": "bash scripts/pack-mcpb.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.4.0",
@@ -36,6 +57,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@anthropic-ai/mcpb": "2.1.2",
     "@biomejs/biome": "2.6.8",
     "@modelcontextprotocol/client": "2.4.0",
     "@types/node": "26.6.6",

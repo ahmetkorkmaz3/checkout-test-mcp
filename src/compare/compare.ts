@@ -92,6 +92,12 @@ export function compareRuns(baseline: RunRecord, candidate: RunRecord, slowdownP
     warnings.push('The runs used different timeout_multiplier values.');
   }
 
+  const bb = baseline.browser;
+  const cb = candidate.browser;
+  if (bb && cb && (bb.name !== cb.name || majorOf(bb.version) !== majorOf(cb.version))) {
+    warnings.push(`The runs used different browsers: ${bb.name} ${bb.version} and ${cb.name} ${cb.version}.`);
+  }
+
   const regressions: Regression[] = [];
   const fixes: CompareResult['fixes'] = [];
   const candSteps = new Map(candidate.steps.map((s) => [s.id, s]));
@@ -229,4 +235,8 @@ export function compareRuns(baseline: RunRecord, candidate: RunRecord, slowdownP
     step_changes: stepChanges,
     warnings,
   };
+}
+
+function majorOf(version: string): string {
+  return version.split('.')[0] ?? version;
 }

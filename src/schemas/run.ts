@@ -86,6 +86,14 @@ export const Artifacts = z.object({
 });
 export type Artifacts = z.infer<typeof Artifacts>;
 
+export const BrowserInfo = z.object({
+  name: z
+    .enum(['chromium', 'chrome'])
+    .describe('"chromium" is Playwright Chromium. "chrome" is the installed Google Chrome.'),
+  version: z.string(),
+});
+export type BrowserInfo = z.infer<typeof BrowserInfo>;
+
 /** The full run record as stored on disk. get_run_result returns a view of it. */
 export const RunRecord = z.object({
   run_id: RunId,
@@ -115,5 +123,7 @@ export const RunRecord = z.object({
   network_failures: z.array(NetworkFailure),
   blocked_requests: z.array(BlockedRequest),
   artifacts: Artifacts,
+  /** null until the browser starts, and for a record of v0.1, which did not store it. */
+  browser: BrowserInfo.nullable().default(null),
 });
 export type RunRecord = z.infer<typeof RunRecord>;

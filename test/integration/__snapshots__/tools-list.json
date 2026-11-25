@@ -927,6 +927,35 @@
             "trace_path"
           ],
           "additionalProperties": false
+        },
+        "browser": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "enum": [
+                    "chromium",
+                    "chrome"
+                  ],
+                  "description": "\"chromium\" is Playwright Chromium. \"chrome\" is the installed Google Chrome."
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "version"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The browser of the run. null until the browser starts."
         }
       },
       "required": [
@@ -946,7 +975,8 @@
         "console_errors",
         "network_failures",
         "blocked_requests",
-        "artifacts"
+        "artifacts",
+        "browser"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false

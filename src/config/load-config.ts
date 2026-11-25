@@ -39,6 +39,7 @@ export function parseConfig(raw: unknown, configDir: string): ResolvedConfig {
         t.inspect ? { ...t, inspect: { ...t.inspect, source_dirs: t.inspect.source_dirs.map(resolve) } } : t,
       ]),
     ),
+    ...(cfg.env_file ? { env_file: resolve(cfg.env_file) } : { env_file: undefined }),
     ...(cfg.authoring ? { authoring: { ...cfg.authoring, dir: resolve(cfg.authoring.dir) } } : {}),
   };
   validateTargets(resolved);

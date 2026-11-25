@@ -230,8 +230,13 @@ describe('run_scenario and get_run_result', () => {
     const { config, registry } = await setup();
     const args = { target: 'demo-local', scenario_id: 'card-success', idempotency_key: 'restart-key-01' };
     const first = await call('run_scenario', args);
+    // A slow machine can start the run later than a fixed delay, so wait for the start and the finish.
+    await vi.waitFor(() => expect(executions).toHaveLength(1));
     release();
-    await new Promise((r) => setTimeout(r, 50));
+    await vi.waitFor(async () => {
+      const res = await call('get_run_result', { run_id: first.structuredContent.run_id });
+      expect(res.structuredContent.status).toBe('finished');
+    });
 
     const store2 = new RunStore(config.runs_dir);
     await store2.init();

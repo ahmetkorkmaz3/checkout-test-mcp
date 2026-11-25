@@ -41,7 +41,7 @@ SDK v2 API facts that the design uses:
 checkout-test-mcp/
 ├─ CLAUDE.md
 ├─ README.md
-├─ LICENSE                          # MIT or Apache-2.0, see Q12
+├─ LICENSE                          # MIT, see Q12
 ├─ package.json                     # exact versions, "type": "module", bin entry
 ├─ tsconfig.json                    # strict, NodeNext, types: ["node"]
 ├─ biome.json
@@ -109,6 +109,8 @@ runs_dir: .checkout-test-mcp/runs # results, screenshots, traces
 max_parallel_runs: 1
 scenario_dirs: [./scenarios]
 test_data_dir: ./test-data
+env_file: ./.env # optional. Secrets as KEY=value lines. See below.
+browser: auto # optional. auto, chromium, or chrome. See 3.2.
 
 targets:
   demo-local:
@@ -147,6 +149,24 @@ production_hosts: # refused for test targets, even if listed above. See section 
   - example-shop.com
   - www.example-shop.com
 ```
+
+### 3.1 Env file
+
+`env_file` names a dotenv file with `KEY=value` lines. The Claude Desktop extension cannot pass the shell environment to the server, so a user puts secrets in this file.
+
+- The `--env-file` flag wins over the config field. A relative flag value is relative to the working folder. A relative config value is relative to the config folder. An empty value means "not set".
+- The server loads the file after it reads the config and before it builds the run and inspection managers. A variable that is already set keeps its value.
+- A value from the file is handled like an env var: the redactor registers it, and it never appears in a log, an error, or a result. The log line `env file loaded` has the path and the number of keys. An error has the path and a line number only.
+
+### 3.2 Browser choice
+
+`browser` picks the browser for runs and inspections. Both use `openGuardedContext`, so both follow this field.
+
+- `auto` (default) starts Playwright Chromium. If Chromium is not installed, it starts the installed Google Chrome (`channel: 'chrome'`). Any other launch error goes up and does not start Chrome.
+- `chromium` and `chrome` start that browser only and never fall back.
+- Each launch keeps the proxy, the `bypass` value, and the WebRTC argument of the host guard. The fallback does not weaken the guard.
+- The run record stores `browser: { name, version }`. A record of v0.1 has no such field and loads with `browser: null`, so a restart still finds each run.
+- If no browser starts, the error message starts with `No browser found.` and names both fixes.
 
 ## 4. Scenario format
 
@@ -314,7 +334,7 @@ Each item has my recommendation. Decide or change them before implementation.
 | Q9  | Turkish payment providers               | iyzico, PayTR, and bank virtual POS flows differ from Stripe.                                                                | Ship the registry with Stripe and iyzico published test cards. Add others only with a source URL for each card.                                                                                     |
 | Q10 | TypeScript 7                            | TS 7 is the native compiler. Some tools can lag behind.                                                                      | Use 7.0.2. Fall back to TS 6.x if Biome, tsx, or Vitest show type tool problems.                                                                                                                    |
 | Q11 | Node engine range                       | `>=24` or `>=26`.                                                                                                            | `engines.node: ">=24"`, develop and run CI on 26. Your machine has 22.21.1, so install 26 first.                                                                                                    |
-| Q12 | License and name                        | MIT or Apache-2.0. `checkout-test-mcp` or another name.                                                                      | Apache-2.0 for the patent grant. Keep `checkout-test-mcp`.                                                                                                                                          |
+| Q12 | License and name                        | MIT or Apache-2.0. `checkout-test-mcp` or another name.                                                                      | MIT. Decided 2026-11-25. Keep `checkout-test-mcp`.                                                                                                                                          |
 | Q13 | Scenario reuse across targets           | Copy scenarios per site, or support selector overrides per profile.                                                          | Copy for v0.1. Add a `selectors` map per profile in v0.2 if duplication grows.                                                                                                                      |
 | Q14 | Telemetry                               | None, or opt-in.                                                                                                             | None.                                                                                                                                                                                               |
 
@@ -449,3 +469,16 @@ One constant, `PRODUCTION_WARNING` in `src/safety/production.ts`, holds the warn
 
 - No automatic cancel or refund of live orders. The user handles them.
 - The probe of `inspect_target` still never clicks a pay button.
+
+## 13. Release
+
+A tag `vX.Y.Z` starts `.github/workflows/release.yml`. The workflow runs in this order:
+
+1. It checks that the tag equals the version in `package.json`, `manifest.json`, and `server.json`. It runs the CI checks and the e2e tests.
+2. It publishes the npm package with trusted publishing (OIDC) and provenance. There is no npm token. The workflow needs npm 11.5.1 or later, so it pins an exact npm version.
+3. It packs the Desktop extension (`npm run pack:mcpb`) and creates the GitHub release with the `.mcpb` file.
+4. It downloads the pinned `mcp-publisher` release from `modelcontextprotocol/registry`, checks the SHA-256 hash, logs in with `github-oidc`, and publishes `server.json`.
+
+**Recovery.** npm publishes first. If the GitHub release or the registry step fails, the npm version is already public, and a re-run of the same tag fails at `npm publish`. Start the workflow by hand (`workflow_dispatch`) on the tag: the npm step skips itself when the version already exists, so only the later steps run. If the fix needs a code change, bump the patch version and tag again, because npm never lets you publish a version twice.
+
+To upgrade `mcp-publisher`, change `MCP_PUBLISHER_VERSION` and `MCP_PUBLISHER_SHA256` together. Every action in the workflows is pinned to a full commit SHA.
